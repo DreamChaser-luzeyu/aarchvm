@@ -1,0 +1,70 @@
+/dts-v1/;
+
+/ {
+	model = "aarchvm arm64 minimal platform";
+	compatible = "aarchvm,arm64-min", "linux,dummy-virt";
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+		bootargs = "console=ttyAMA0,115200 earlycon=pl011,0x09000000";
+	};
+
+	aliases {
+		serial0 = &uart0;
+	};
+
+	cpus {
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a53";
+			reg = <0x0 0x0>;
+			enable-method = "psci";
+		};
+	};
+
+	psci {
+		compatible = "arm,psci-1.0";
+		method = "smc";
+	};
+
+	/* System RAM base follows U-Boot qemu-arm64 expectations. */
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0x0 0x40000000 0x0 0x08000000>;
+	};
+
+	intc: interrupt-controller@8000000 {
+		compatible = "arm,gic-v3";
+		reg = <0x0 0x08000000 0x0 0x00010000>;
+		interrupt-controller;
+		#interrupt-cells = <3>;
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+	};
+
+	uart0: serial@9000000 {
+		compatible = "arm,pl011", "arm,primecell";
+		reg = <0x0 0x09000000 0x0 0x00001000>;
+		clock-frequency = <24000000>;
+		current-speed = <115200>;
+		status = "okay";
+	};
+
+	/*
+	 * Current emulator routes timer IRQ to GIC INTID 30 (SPI 30).
+	 * This is a simple MMIO + sysreg hybrid model, not a full architected timer.
+	 */
+	timer@a000000 {
+		compatible = "aarchvm,generic-timer-mmio";
+		reg = <0x0 0x0A000000 0x0 0x00001000>;
+		interrupt-parent = <&intc>;
+		interrupts = <0 30 4>; /* GIC_SPI, level-high */
+		status = "okay";
+	};
+};

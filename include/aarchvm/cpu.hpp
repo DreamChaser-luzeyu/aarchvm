@@ -1,0 +1,88 @@
+#pragma once
+
+#include "aarchvm/bus.hpp"
+#include "aarchvm/generic_timer.hpp"
+#include "aarchvm/gicv3.hpp"
+#include "aarchvm/system_registers.hpp"
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <unordered_map>
+
+namespace aarchvm {
+
+class Cpu {
+public:
+  explicit Cpu(Bus& bus, GicV3& gic, GenericTimer& timer);
+
+  bool step();
+
+  void reset(std::uint64_t pc);
+  void set_cntvct(std::uint64_t value);
+  void set_sp(std::uint64_t value) { regs_[31] = value; }
+  void set_x(std::uint32_t idx, std::uint64_t value) {
+    if (idx < 32) {
+      regs_[idx] = value;
+    }
+  }
+  [[nodiscard]] bool halted() const { return halted_; }
+  [[nodiscard]] std::uint64_t pc() const { return pc_; }
+  [[nodiscard]] std::uint64_t steps() const { return steps_; }
+
+private:
+  enum class AccessType {
+    Fetch,
+    Read,
+    Write,
+  };
+
+  bool try_take_irq();
+  void enter_sync_exception(std::uint64_t fault_pc, std::uint32_t ec, std::uint32_t iss, bool far_valid, std::uint64_t far);
+  [[nodiscard]] std::optional<std::uint64_t> translate_address(std::uint64_t va, AccessType access, bool allow_tlb_fill);
+  [[nodiscard]] std::optional<std::uint64_t> walk_page_tables(std::uint64_t va);
+  void tlb_flush_all();
+  void tlb_flush_va(std::uint64_t va);
+
+  [[nodiscard]] std::uint64_t reg(std::uint32_t idx) const;
+  [[nodiscard]] std::uint32_t reg32(std::uint32_t idx) const;
+  void set_reg(std::uint32_t idx, std::uint64_t value);
+  void set_reg32(std::uint32_t idx, std::uint32_t value);
+  [[nodiscard]] std::uint64_t sp_or_reg(std::uint32_t idx) const;
+  void set_sp_or_reg(std::uint32_t idx, std::uint64_t value, bool is_32bit);
+
+  bool exec_branch(std::uint32_t insn);
+  bool exec_system(std::uint32_t insn);
+  bool exec_data_processing(std::uint32_t insn);
+  bool exec_load_store(std::uint32_t insn);
+  bool condition_holds(std::uint32_t cond) const;
+  void set_flags_add(std::uint64_t lhs, std::uint64_t rhs, std::uint64_t result, bool is_32bit);
+  void set_flags_sub(std::uint64_t lhs, std::uint64_t rhs, std::uint64_t result, bool is_32bit);
+  void set_flags_logic(std::uint64_t result, bool is_32bit);
+
+  static std::int64_t sign_extend(std::uint64_t value, std::uint32_t bits);
+
+  Bus& bus_;
+  GicV3& gic_;
+  GenericTimer& timer_;
+  std::array<std::uint64_t, 32> regs_{};
+  SystemRegisters sysregs_{};
+  bool in_exception_ = false;
+  bool active_exception_is_irq_ = false;
+  bool sync_reported_ = false;
+  bool trace_exceptions_ = false;
+  std::uint32_t active_intid_ = 0;
+  bool waiting_for_interrupt_ = false;
+  bool waiting_for_event_ = false;
+  bool event_register_ = false;
+  std::uint64_t icc_pmr_el1_ = 0xFF;
+  std::uint64_t icc_ctlr_el1_ = 0;
+  std::uint64_t icc_sre_el1_ = 0;
+  std::unordered_map<std::uint64_t, std::uint64_t> tlb_page_map_;
+  std::uint64_t pc_ = 0;
+  std::uint64_t steps_ = 0;
+  bool halted_ = false;
+};
+
+} // namespace aarchvm

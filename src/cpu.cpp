@@ -1,0 +1,2168 @@
+#include "aarchvm/cpu.hpp"
+
+#include <cstdlib>
+#include <iostream>
+
+namespace aarchvm {
+
+namespace {
+
+std::uint64_t ones(std::uint32_t bits) {
+  if (bits == 0) {
+    return 0;
+  }
+  if (bits >= 64) {
+    return ~0ull;
+  }
+  return (1ull << bits) - 1ull;
+}
+
+std::uint64_t ror(std::uint64_t value, std::uint32_t shift, std::uint32_t width) {
+  if (width == 0) {
+    return 0;
+  }
+  shift %= width;
+  const std::uint64_t mask = ones(width);
+  value &= mask;
+  if (shift == 0) {
+    return value;
+  }
+  return ((value >> shift) | (value << (width - shift))) & mask;
+}
+
+std::uint64_t replicate(std::uint64_t value, std::uint32_t esize, std::uint32_t datasize) {
+  const std::uint64_t elem_mask = ones(esize);
+  const std::uint64_t elem = value & elem_mask;
+  std::uint64_t out = 0;
+  for (std::uint32_t pos = 0; pos < datasize; pos += esize) {
+    out |= (elem << pos);
+  }
+  return out;
+}
+
+std::uint64_t bit_reverse(std::uint64_t value, std::uint32_t width) {
+  std::uint64_t out = 0;
+  for (std::uint32_t i = 0; i < width; ++i) {
+    out <<= 1;
+    out |= (value >> i) & 1u;
+  }
+  return out;
+}
+
+std::uint32_t cls32(std::uint32_t value) {
+  const bool sign = (value >> 31) != 0;
+  const std::uint32_t x = sign ? ~value : value;
+  if (x == 0) {
+    return 31;
+  }
+  return static_cast<std::uint32_t>(__builtin_clz(x) - 1);
+}
+
+std::uint64_t cls64(std::uint64_t value) {
+  const bool sign = (value >> 63) != 0;
+  const std::uint64_t x = sign ? ~value : value;
+  if (x == 0) {
+    return 63;
+  }
+  return static_cast<std::uint64_t>(__builtin_clzll(x) - 1);
+}
+
+std::uint32_t crc32_update(std::uint32_t crc, std::uint64_t data, std::uint32_t bytes, std::uint32_t poly_reflected) {
+  for (std::uint32_t i = 0; i < bytes; ++i) {
+    crc ^= static_cast<std::uint8_t>((data >> (8u * i)) & 0xFFu);
+    for (std::uint32_t b = 0; b < 8u; ++b) {
+      crc = (crc >> 1) ^ ((crc & 1u) ? poly_reflected : 0u);
+    }
+  }
+  return crc;
+}
+
+bool decode_bit_masks(std::uint32_t n,
+                      std::uint32_t imms,
+                      std::uint32_t immr,
+                      std::uint32_t datasize,
+                      std::uint64_t& wmask,
+                      std::uint64_t& tmask) {
+  const std::uint32_t not_imms = (~imms) & 0x3Fu;
+  const std::uint32_t concat = (n << 6) | not_imms;
+  int len = -1;
+  for (int i = 6; i >= 0; --i) {
+    if (((concat >> i) & 1u) != 0) {
+      len = i;
+      break;
+    }
+  }
+  if (len < 1) {
+    return false;
+  }
+  const std::uint32_t levels = (1u << len) - 1u;
+  const std::uint32_t s = imms & levels;
+  const std::uint32_t r = immr & levels;
+  const std::uint32_t esize = 1u << len;
+  const std::uint32_t d = (s - r) & levels;
+  const std::uint64_t welem = ones(s + 1);
+  const std::uint64_t telem = ones(d + 1);
+  wmask = replicate(ror(welem, r, esize), esize, datasize);
+  tmask = replicate(telem, esize, datasize);
+  return true;
+}
+
+} // namespace
+
+Cpu::Cpu(Bus& bus, GicV3& gic, GenericTimer& timer) : bus_(bus), gic_(gic), timer_(timer) {}
+
+void Cpu::reset(std::uint64_t pc) {
+  const std::uint64_t sp_saved = regs_[31];
+  regs_.fill(0);
+  regs_[31] = sp_saved;
+  sysregs_.reset();
+  in_exception_ = false;
+  active_exception_is_irq_ = false;
+  sync_reported_ = false;
+  trace_exceptions_ = (std::getenv("AARCHVM_TRACE_EXC") != nullptr);
+  active_intid_ = 0;
+  waiting_for_interrupt_ = false;
+  waiting_for_event_ = false;
+  event_register_ = false;
+  icc_pmr_el1_ = 0xFF;
+  icc_ctlr_el1_ = 0;
+  icc_sre_el1_ = 0;
+  tlb_page_map_.clear();
+  pc_ = pc;
+  steps_ = 0;
+  halted_ = false;
+}
+
+void Cpu::set_cntvct(std::uint64_t value) {
+  sysregs_.set_cntvct(value);
+}
+
+bool Cpu::step() {
+  if (halted_) {
+    return false;
+  }
+
+  if (waiting_for_interrupt_) {
+    if (try_take_irq()) {
+      waiting_for_interrupt_ = false;
+    }
+    ++steps_;
+    return true;
+  }
+
+  if (waiting_for_event_) {
+    if (event_register_) {
+      event_register_ = false;
+      waiting_for_event_ = false;
+    } else if (try_take_irq()) {
+      waiting_for_event_ = false;
+    }
+    ++steps_;
+    return true;
+  }
+
+  if (try_take_irq()) {
+    ++steps_;
+    return true;
+  }
+
+  const auto fetch_pa = translate_address(pc_, AccessType::Fetch, true);
+  if (!fetch_pa.has_value()) {
+    enter_sync_exception(pc_, 0x21u, 0u, true, pc_);
+    return true;
+  }
+
+  const auto fetch = bus_.read(*fetch_pa, 4);
+  if (!fetch.has_value()) {
+    enter_sync_exception(pc_, 0x21u, 0u, true, pc_);
+    return true;
+  }
+
+  const std::uint32_t insn = static_cast<std::uint32_t>(*fetch);
+  const std::uint64_t this_pc = pc_;
+  pc_ += 4;
+  ++steps_;
+
+  if (insn == 0xD503201Fu) {
+    return true; // NOP
+  }
+  if ((insn & 0xFFFFFC1Fu) == 0xD65F0000u) {
+    pc_ = reg((insn >> 5) & 0x1Fu); // RET Xn
+    return true;
+  }
+  if ((insn & 0xFFFFFC1Fu) == 0xD61F0000u) {
+    pc_ = reg((insn >> 5) & 0x1Fu); // BR Xn
+    return true;
+  }
+  if ((insn & 0xFFFFFC1Fu) == 0xD63F0000u) {
+    set_reg(30, pc_);               // BLR Xn
+    pc_ = reg((insn >> 5) & 0x1Fu);
+    return true;
+  }
+  if (insn == 0xD69F03E0u) { // ERET
+    pc_ = sysregs_.exception_return();
+    if (in_exception_) {
+      if (active_exception_is_irq_) {
+        gic_.eoi(active_intid_);
+      }
+      in_exception_ = false;
+      active_exception_is_irq_ = false;
+    }
+    return true;
+  }
+  if ((insn & 0xFFE0001Fu) == 0xD4200000u) {
+    halted_ = true; // BRK
+    return false;
+  }
+
+  if (exec_branch(insn)) {
+    return true;
+  }
+  if (exec_system(insn)) {
+    return true;
+  }
+  if (exec_data_processing(insn)) {
+    return true;
+  }
+  if (exec_load_store(insn)) {
+    return true;
+  }
+
+  enter_sync_exception(this_pc, 0x00u, 0u, false, 0);
+  return true;
+}
+
+bool Cpu::try_take_irq() {
+  if (in_exception_) {
+    return false;
+  }
+  if (sysregs_.irq_masked()) {
+    return false;
+  }
+  const auto intid = gic_.acknowledge();
+  if (!intid.has_value()) {
+    return false;
+  }
+
+  active_intid_ = *intid;
+  in_exception_ = true;
+  active_exception_is_irq_ = true;
+  sysregs_.exception_enter_irq(pc_);
+  pc_ = sysregs_.vbar_el1() + (sysregs_.use_sp_elx() ? 0x280 : 0x80);
+  return true;
+}
+
+void Cpu::enter_sync_exception(std::uint64_t fault_pc,
+                               std::uint32_t ec,
+                               std::uint32_t iss,
+                               bool far_valid,
+                               std::uint64_t far) {
+  if (in_exception_) {
+    if (trace_exceptions_) {
+      std::cerr << "FATAL: nested sync exception at PC=0x" << std::hex << pc_
+                << " fault_pc=0x" << fault_pc
+                << " ec=0x" << ec
+                << " iss=0x" << iss
+                << " far=0x" << far << std::dec << '\n';
+    }
+    halted_ = true;
+    return;
+  }
+  in_exception_ = true;
+  active_exception_is_irq_ = false;
+  if (!sync_reported_ && trace_exceptions_) {
+    std::cerr << "SYNC: pc=0x" << std::hex << fault_pc
+              << " ec=0x" << ec
+              << " iss=0x" << iss
+              << " far_valid=" << (far_valid ? 1 : 0)
+              << " far=0x" << far << std::dec << '\n';
+    sync_reported_ = true;
+  }
+  sysregs_.exception_enter_sync(fault_pc, ec, iss, far_valid, far);
+  pc_ = sysregs_.vbar_el1() + (sysregs_.use_sp_elx() ? 0x200 : 0x0);
+}
+
+std::optional<std::uint64_t> Cpu::translate_address(std::uint64_t va, AccessType access, bool allow_tlb_fill) {
+  (void)access;
+
+  if (!sysregs_.mmu_enabled()) {
+    return va;
+  }
+
+  const std::uint64_t page = va >> 12;
+  const std::uint64_t off = va & 0xFFFull;
+
+  const auto hit = tlb_page_map_.find(page);
+  if (hit != tlb_page_map_.end()) {
+    return (hit->second << 12) | off;
+  }
+
+  const auto pa = walk_page_tables(va);
+  if (!pa.has_value()) {
+    return std::nullopt;
+  }
+
+  if (allow_tlb_fill) {
+    tlb_page_map_[page] = (*pa >> 12);
+  }
+  return *pa;
+}
+
+std::optional<std::uint64_t> Cpu::walk_page_tables(std::uint64_t va) {
+  const std::uint64_t tcr = sysregs_.tcr_el1();
+  const bool va_upper = (va >> 63) != 0;
+
+  const std::uint32_t txsz = va_upper
+      ? static_cast<std::uint32_t>((tcr >> 16) & 0x3Fu)
+      : static_cast<std::uint32_t>(tcr & 0x3Fu);
+  if (txsz > 39) {
+    return std::nullopt;
+  }
+
+  const std::uint32_t va_bits = 64u - txsz;
+  if (va_bits < 12u || va_bits > 48u) {
+    return std::nullopt;
+  }
+
+  const std::uint32_t tg = va_upper
+      ? static_cast<std::uint32_t>((tcr >> 30) & 0x3u)
+      : static_cast<std::uint32_t>((tcr >> 14) & 0x3u);
+  // 4KB granule only: TG0==00, TG1==10.
+  if ((!va_upper && tg != 0u) || (va_upper && tg != 2u)) {
+    return std::nullopt;
+  }
+
+  // Address-space range check for TTBR0/TTBR1 selection.
+  const std::uint64_t low_limit = (va_bits == 64u) ? ~0ull : ((1ull << va_bits) - 1ull);
+  if (!va_upper && va > low_limit) {
+    return std::nullopt;
+  }
+  if (va_upper && va_bits < 64u) {
+    const std::uint64_t upper_tag_mask = ~low_limit;
+    if ((va & upper_tag_mask) != upper_tag_mask) {
+      return std::nullopt;
+    }
+  }
+
+  std::uint64_t table_base = va_upper ? sysregs_.ttbr1_el1() : sysregs_.ttbr0_el1();
+  // TTBR contains non-address fields (e.g. ASID). Keep only PA[47:12].
+  table_base &= 0x0000FFFFFFFFF000ull;
+
+  const std::uint32_t levels = (va_bits <= 12u) ? 1u : ((va_bits - 12u + 8u) / 9u);
+  const std::uint32_t start_level = 4u - levels;
+  if (start_level > 3u) {
+    return std::nullopt;
+  }
+
+  const std::uint64_t idx[4] = {
+      (va >> 39) & 0x1FFu,
+      (va >> 30) & 0x1FFu,
+      (va >> 21) & 0x1FFu,
+      (va >> 12) & 0x1FFu,
+  };
+
+  for (std::uint32_t level = start_level; level < 4u; ++level) {
+    const std::uint64_t desc_addr = table_base + idx[level] * 8u;
+    const auto desc_opt = bus_.read(desc_addr, 8);
+    if (!desc_opt.has_value()) {
+      return std::nullopt;
+    }
+    const std::uint64_t desc = *desc_opt;
+    const bool valid = (desc & 1u) != 0;
+    const bool bit1 = (desc & 2u) != 0;
+    if (!valid) {
+      return std::nullopt;
+    }
+
+    if (level == 3u) {
+      if (!bit1) {
+        return std::nullopt;
+      }
+      const std::uint64_t page_base = desc & 0x0000FFFFFFFFF000ull;
+      return page_base | (va & 0xFFFull);
+    }
+
+    if (bit1) {
+      table_base = desc & 0x0000FFFFFFFFF000ull;
+      continue;
+    }
+
+    // Block descriptor (L1:1GB, L2:2MB). L0 block unsupported for 4KB granule.
+    if (level == 0u) {
+      return std::nullopt;
+    }
+    const std::uint32_t page_off_bits = 12u + 9u * (3u - level);
+    const std::uint64_t block_mask = (1ull << page_off_bits) - 1ull;
+    // Block address is in PA bits, while high bits may hold attributes.
+    std::uint64_t pa_base = desc & 0x0000FFFFFFFFF000ull;
+    pa_base &= ~block_mask;
+    return pa_base | (va & block_mask);
+  }
+
+  return std::nullopt;
+}
+
+void Cpu::tlb_flush_all() {
+  tlb_page_map_.clear();
+}
+
+void Cpu::tlb_flush_va(std::uint64_t va) {
+  tlb_page_map_.erase(va >> 12);
+}
+
+std::uint64_t Cpu::reg(std::uint32_t idx) const {
+  if (idx >= 31) {
+    return 0;
+  }
+  return regs_[idx];
+}
+
+std::uint32_t Cpu::reg32(std::uint32_t idx) const {
+  return static_cast<std::uint32_t>(reg(idx) & 0xFFFFFFFFu);
+}
+
+void Cpu::set_reg(std::uint32_t idx, std::uint64_t value) {
+  if (idx >= 31) {
+    return;
+  }
+  regs_[idx] = value;
+}
+
+void Cpu::set_reg32(std::uint32_t idx, std::uint32_t value) {
+  set_reg(idx, value);
+}
+
+std::uint64_t Cpu::sp_or_reg(std::uint32_t idx) const {
+  if (idx == 31) {
+    return regs_[31];
+  }
+  return reg(idx);
+}
+
+void Cpu::set_sp_or_reg(std::uint32_t idx, std::uint64_t value, bool is_32bit) {
+  if (idx == 31) {
+    regs_[31] = is_32bit ? static_cast<std::uint32_t>(value) : value;
+    return;
+  }
+  if (is_32bit) {
+    set_reg32(idx, static_cast<std::uint32_t>(value));
+  } else {
+    set_reg(idx, value);
+  }
+}
+
+bool Cpu::exec_branch(std::uint32_t insn) {
+  // B/BL imm26
+  if ((insn & 0x7C000000u) == 0x14000000u) {
+    const std::int64_t off = sign_extend((insn & 0x03FFFFFFu) << 2u, 28);
+    if ((insn & 0x80000000u) != 0) {
+      set_reg(30, pc_);
+    }
+    pc_ = static_cast<std::uint64_t>(static_cast<std::int64_t>(pc_) + off - 4);
+    return true;
+  }
+
+  // B.cond
+  if ((insn & 0xFF000010u) == 0x54000000u) {
+    const std::uint32_t cond = insn & 0xFu;
+    const std::int64_t off = sign_extend(((insn >> 5) & 0x7FFFFu) << 2u, 21);
+    if (condition_holds(cond)) {
+      pc_ = static_cast<std::uint64_t>(static_cast<std::int64_t>(pc_) + off - 4);
+    }
+    return true;
+  }
+
+  // CBZ/CBNZ (32/64-bit)
+  if ((insn & 0x7F000000u) == 0x34000000u || (insn & 0x7F000000u) == 0x35000000u) {
+    const bool sf = (insn >> 31) != 0;
+    const std::uint32_t rt = insn & 0x1Fu;
+    const bool nonzero = (insn & 0x01000000u) != 0;
+    const std::int64_t off = sign_extend(((insn >> 5) & 0x7FFFFu) << 2u, 21);
+    const std::uint64_t val = sf ? reg(rt) : static_cast<std::uint64_t>(reg32(rt));
+    const bool take = nonzero ? (val != 0) : (val == 0);
+    if (take) {
+      pc_ = static_cast<std::uint64_t>(static_cast<std::int64_t>(pc_) + off - 4);
+    }
+    return true;
+  }
+
+  // TBZ/TBNZ
+  if ((insn & 0x7F000000u) == 0x36000000u || (insn & 0x7F000000u) == 0x37000000u) {
+    const bool test_nonzero = (insn & 0x01000000u) != 0;
+    const std::uint32_t b5 = (insn >> 31) & 0x1u;
+    const std::uint32_t b40 = (insn >> 19) & 0x1Fu;
+    const std::uint32_t bitpos = (b5 << 5) | b40;
+    const std::uint32_t rt = insn & 0x1Fu;
+    const std::int64_t off = sign_extend(((insn >> 5) & 0x3FFFu) << 2u, 16);
+    const std::uint64_t value = reg(rt);
+    const bool bit_set = ((value >> bitpos) & 1u) != 0;
+    const bool take = test_nonzero ? bit_set : !bit_set;
+    if (take) {
+      pc_ = static_cast<std::uint64_t>(static_cast<std::int64_t>(pc_) + off - 4);
+    }
+    return true;
+  }
+
+  return false;
+}
+
+bool Cpu::exec_system(std::uint32_t insn) {
+  // DMB <option>
+  if ((insn & 0xFFFFF0FFu) == 0xD50330BFu) {
+    return true;
+  }
+
+  // DSB <option>
+  if ((insn & 0xFFFFF0FFu) == 0xD503309Fu) {
+    return true;
+  }
+
+  // ISB <option>
+  if ((insn & 0xFFFFF0FFu) == 0xD50330DFu) {
+    return true;
+  }
+
+  // CLREX <imm4>
+  if ((insn & 0xFFFFF0FFu) == 0xD503305Fu) {
+    return true;
+  }
+
+  // TLBI VMALLE1
+  if (insn == 0xD508871Fu) {
+    tlb_flush_all();
+    return true;
+  }
+
+  // TLBI VAE1, Xt
+  if ((insn & 0xFFFFFFE0u) == 0xD5088720u) {
+    const std::uint32_t rt = insn & 0x1Fu;
+    tlb_flush_va(reg(rt));
+    return true;
+  }
+
+  // IC IALLU
+  if (insn == 0xD508751Fu) {
+    return true;
+  }
+
+  // IC IALLUIS
+  if (insn == 0xD508711Fu) {
+    return true;
+  }
+
+  // IC IVAU, Xt
+  if ((insn & 0xFFFFFFE0u) == 0xD50B7520u) {
+    return true;
+  }
+
+  // DC IVAC, Xt
+  if ((insn & 0xFFFFFFE0u) == 0xD5087620u) {
+    return true;
+  }
+
+  // DC CVAC, Xt
+  if ((insn & 0xFFFFFFE0u) == 0xD50B7A20u) {
+    return true;
+  }
+
+  // DC CIVAC, Xt
+  if ((insn & 0xFFFFFFE0u) == 0xD50B7E20u) {
+    return true;
+  }
+
+  // DC ISW, Xt
+  if ((insn & 0xFFFFFFE0u) == 0xD5087640u) {
+    return true;
+  }
+
+  // DC CISW, Xt
+  if ((insn & 0xFFFFFFE0u) == 0xD5087E40u) {
+    return true;
+  }
+
+  // AT S1E1R, Xt
+  if ((insn & 0xFFFFFFE0u) == 0xD5087800u) {
+    const std::uint32_t rt = insn & 0x1Fu;
+    const auto pa = translate_address(reg(rt), AccessType::Read, false);
+    sysregs_.set_par_el1(pa.has_value() ? (*pa & 0x0000FFFFFFFFF000ull) : 1ull);
+    return true;
+  }
+
+  // AT S1E1W, Xt
+  if ((insn & 0xFFFFFFE0u) == 0xD5087820u) {
+    const std::uint32_t rt = insn & 0x1Fu;
+    const auto pa = translate_address(reg(rt), AccessType::Write, false);
+    sysregs_.set_par_el1(pa.has_value() ? (*pa & 0x0000FFFFFFFFF000ull) : 1ull);
+    return true;
+  }
+
+  // WFI
+  if (insn == 0xD503207Fu) {
+    waiting_for_interrupt_ = true;
+    return true;
+  }
+
+  // WFE
+  if (insn == 0xD503205Fu) {
+    if (event_register_) {
+      event_register_ = false;
+    } else {
+      waiting_for_event_ = true;
+    }
+    return true;
+  }
+
+  // SEV / SEVL
+  if (insn == 0xD503209Fu || insn == 0xD50320BFu) {
+    event_register_ = true;
+    return true;
+  }
+
+  // MSR SPSel, #imm
+  if ((insn & 0xFFFFF0FFu) == 0xD50040BFu) {
+    sysregs_.set_spsel((insn >> 8) & 0x1u);
+    return true;
+  }
+
+  // MSR DAIFSet, #imm4
+  if ((insn & 0xFFFFF0FFu) == 0xD50340DFu) {
+    sysregs_.daif_set(static_cast<std::uint8_t>((insn >> 8) & 0xFu));
+    return true;
+  }
+
+  // MSR DAIFClr, #imm4
+  if ((insn & 0xFFFFF0FFu) == 0xD50340FFu) {
+    sysregs_.daif_clr(static_cast<std::uint8_t>((insn >> 8) & 0xFu));
+    return true;
+  }
+
+  // MRS Xt, sysreg
+  if ((insn & 0xFFE00000u) == 0xD5200000u) {
+    const std::uint32_t rt = insn & 0x1Fu;
+    const std::uint32_t op0 = (insn >> 19) & 0x3u;
+    const std::uint32_t op1 = (insn >> 16) & 0x7u;
+    const std::uint32_t crn = (insn >> 12) & 0xFu;
+    const std::uint32_t crm = (insn >> 8) & 0xFu;
+    const std::uint32_t op2 = (insn >> 5) & 0x7u;
+    const std::uint32_t key = (op0 << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2;
+
+    if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (12u << 3) | 0u)) { // ICC_IAR1_EL1
+      set_reg(rt, (in_exception_ && active_exception_is_irq_) ? active_intid_ : 1023u);
+      return true;
+    }
+    if (key == ((3u << 14) | (0u << 11) | (4u << 7) | (6u << 3) | 0u)) { // ICC_PMR_EL1
+      set_reg(rt, icc_pmr_el1_);
+      return true;
+    }
+    if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (12u << 3) | 4u)) { // ICC_CTLR_EL1
+      set_reg(rt, icc_ctlr_el1_);
+      return true;
+    }
+    if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (12u << 3) | 5u)) { // ICC_SRE_EL1
+      set_reg(rt, icc_sre_el1_);
+      return true;
+    }
+    if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (3u << 3) | 1u)) { // CNTV_CTL_EL0
+      set_reg(rt, timer_.read_cntv_ctl_el0());
+      return true;
+    }
+    if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (3u << 3) | 2u)) { // CNTV_CVAL_EL0
+      set_reg(rt, timer_.read_cntv_cval_el0());
+      return true;
+    }
+    if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (3u << 3) | 0u)) { // CNTV_TVAL_EL0
+      set_reg(rt, timer_.read_cntv_tval_el0());
+      return true;
+    }
+
+    std::uint64_t value = 0;
+    if (!sysregs_.read(op0, op1, crn, crm, op2, value)) {
+      return false;
+    }
+    set_reg(rt, value);
+    return true;
+  }
+
+  // MSR sysreg, Xt
+  if ((insn & 0xFFE00000u) == 0xD5000000u) {
+    const std::uint32_t rt = insn & 0x1Fu;
+    const std::uint32_t op0 = (insn >> 19) & 0x3u;
+    const std::uint32_t op1 = (insn >> 16) & 0x7u;
+    const std::uint32_t crn = (insn >> 12) & 0xFu;
+    const std::uint32_t crm = (insn >> 8) & 0xFu;
+    const std::uint32_t op2 = (insn >> 5) & 0x7u;
+    const std::uint32_t key = (op0 << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2;
+
+    if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (12u << 3) | 1u)) { // ICC_EOIR1_EL1
+      gic_.eoi(static_cast<std::uint32_t>(reg(rt)));
+      return true;
+    }
+    if (key == ((3u << 14) | (0u << 11) | (4u << 7) | (6u << 3) | 0u)) { // ICC_PMR_EL1
+      icc_pmr_el1_ = reg(rt);
+      return true;
+    }
+    if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (12u << 3) | 4u)) { // ICC_CTLR_EL1
+      icc_ctlr_el1_ = reg(rt);
+      return true;
+    }
+    if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (12u << 3) | 5u)) { // ICC_SRE_EL1
+      icc_sre_el1_ = reg(rt);
+      return true;
+    }
+    if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (3u << 3) | 1u)) { // CNTV_CTL_EL0
+      timer_.write_cntv_ctl_el0(reg(rt));
+      return true;
+    }
+    if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (3u << 3) | 2u)) { // CNTV_CVAL_EL0
+      timer_.write_cntv_cval_el0(reg(rt));
+      return true;
+    }
+    if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (3u << 3) | 0u)) { // CNTV_TVAL_EL0
+      timer_.write_cntv_tval_el0(reg(rt));
+      return true;
+    }
+
+    const bool ok = sysregs_.write(op0, op1, crn, crm, op2, reg(rt));
+    if (!ok) {
+      return false;
+    }
+
+    // Flush software TLB on translation regime changes.
+    if (key == ((3u << 14) | (0u << 11) | (1u << 7) | (0u << 3) | 0u) || // SCTLR_EL1
+        key == ((3u << 14) | (0u << 11) | (2u << 7) | (0u << 3) | 0u) || // TTBR0_EL1
+        key == ((3u << 14) | (0u << 11) | (2u << 7) | (0u << 3) | 1u) || // TTBR1_EL1
+        key == ((3u << 14) | (0u << 11) | (2u << 7) | (0u << 3) | 2u)) { // TCR_EL1
+      tlb_flush_all();
+    }
+    return true;
+  }
+
+  return false;
+}
+
+bool Cpu::exec_data_processing(std::uint32_t insn) {
+  const std::uint32_t rd = insn & 0x1Fu;
+  const std::uint32_t rn = (insn >> 5) & 0x1Fu;
+
+  // ADR
+  if ((insn & 0x9F000000u) == 0x10000000u) {
+    const std::uint64_t this_pc = pc_ - 4;
+    const std::uint64_t immlo = (insn >> 29) & 0x3u;
+    const std::uint64_t immhi = (insn >> 5) & 0x7FFFFu;
+    const std::int64_t imm = sign_extend((immhi << 2u) | immlo, 21);
+    set_reg(rd, static_cast<std::uint64_t>(static_cast<std::int64_t>(this_pc) + imm));
+    return true;
+  }
+
+  // ADRP
+  if ((insn & 0x9F000000u) == 0x90000000u) {
+    const std::uint64_t this_pc = pc_ - 4;
+    const std::uint64_t page = this_pc & ~0xFFFull;
+    const std::uint64_t immlo = (insn >> 29) & 0x3u;
+    const std::uint64_t immhi = (insn >> 5) & 0x7FFFFu;
+    const std::int64_t imm = sign_extend((immhi << 2u) | immlo, 21) << 12u;
+    set_reg(rd, static_cast<std::uint64_t>(static_cast<std::int64_t>(page) + imm));
+    return true;
+  }
+
+  // MOVZ (32/64-bit)
+  if ((insn & 0x7F800000u) == 0x52800000u) {
+    const bool sf = (insn >> 31) != 0;
+    const std::uint64_t imm16 = (insn >> 5) & 0xFFFFu;
+    const std::uint64_t hw = (insn >> 21) & 0x3u;
+    const std::uint64_t value = imm16 << (hw * 16);
+    if (sf) {
+      set_reg(rd, value);
+    } else {
+      set_reg32(rd, static_cast<std::uint32_t>(value));
+    }
+    return true;
+  }
+
+  // MOVK (32/64-bit)
+  if ((insn & 0x7F800000u) == 0x72800000u) {
+    const bool sf = (insn >> 31) != 0;
+    const std::uint64_t imm16 = (insn >> 5) & 0xFFFFu;
+    const std::uint64_t hw = (insn >> 21) & 0x3u;
+    const std::uint64_t shift = hw * 16;
+    if (sf) {
+      const std::uint64_t mask = ~(0xFFFFull << shift);
+      const std::uint64_t updated = (reg(rd) & mask) | (imm16 << shift);
+      set_reg(rd, updated);
+    } else {
+      if (hw > 1) {
+        return false;
+      }
+      const std::uint32_t mask = ~(static_cast<std::uint32_t>(0xFFFFu) << shift);
+      const std::uint32_t updated = (reg32(rd) & mask) | static_cast<std::uint32_t>(imm16 << shift);
+      set_reg32(rd, updated);
+    }
+    return true;
+  }
+
+  // MOVN (32/64-bit)
+  if ((insn & 0x7F800000u) == 0x12800000u) {
+    const bool sf = (insn >> 31) != 0;
+    const std::uint64_t imm16 = (insn >> 5) & 0xFFFFu;
+    const std::uint64_t hw = (insn >> 21) & 0x3u;
+    const std::uint64_t value = ~(imm16 << (hw * 16));
+    if (sf) {
+      set_reg(rd, value);
+    } else {
+      if (hw > 1) {
+        return false;
+      }
+      set_reg32(rd, static_cast<std::uint32_t>(value));
+    }
+    return true;
+  }
+
+  // ADD/ADDS (immediate, 32/64-bit)
+  if ((insn & 0x7F000000u) == 0x11000000u || (insn & 0x7F000000u) == 0x31000000u) {
+    const bool sf = (insn >> 31) != 0;
+    const bool set_flags = (insn & 0x20000000u) != 0;
+    const std::uint64_t imm12 = (insn >> 10) & 0xFFFu;
+    const std::uint32_t shift = (insn >> 22) & 0x1u;
+    const std::uint64_t rhs = imm12 << (shift ? 12u : 0u);
+    const std::uint64_t lhs = set_flags ? (sf ? reg(rn) : reg32(rn)) : sp_or_reg(rn);
+    const std::uint64_t value = sf ? (lhs + rhs) : (static_cast<std::uint32_t>(lhs) + static_cast<std::uint32_t>(rhs));
+    if (set_flags) {
+      if (sf) {
+        set_reg(rd, value);
+      } else {
+        set_reg32(rd, static_cast<std::uint32_t>(value));
+      }
+    } else {
+      set_sp_or_reg(rd, value, !sf);
+    }
+    if (set_flags) {
+      if (sf) {
+        set_flags_add(lhs, rhs, value, false);
+      } else {
+        set_flags_add(static_cast<std::uint32_t>(lhs), static_cast<std::uint32_t>(rhs), static_cast<std::uint32_t>(value), true);
+      }
+    }
+    return true;
+  }
+
+  // SUB/SUBS (immediate, 32/64-bit)
+  if ((insn & 0x7F000000u) == 0x51000000u || (insn & 0x7F000000u) == 0x71000000u) {
+    const bool sf = (insn >> 31) != 0;
+    const bool set_flags = (insn & 0x20000000u) != 0;
+    const std::uint64_t imm12 = (insn >> 10) & 0xFFFu;
+    const std::uint32_t shift = (insn >> 22) & 0x1u;
+    const std::uint64_t rhs = imm12 << (shift ? 12u : 0u);
+    const std::uint64_t lhs = set_flags ? (sf ? reg(rn) : reg32(rn)) : sp_or_reg(rn);
+    const std::uint64_t value = sf ? (lhs - rhs) : (static_cast<std::uint32_t>(lhs) - static_cast<std::uint32_t>(rhs));
+    if (set_flags) {
+      if (sf) {
+        set_reg(rd, value);
+      } else {
+        set_reg32(rd, static_cast<std::uint32_t>(value));
+      }
+    } else {
+      set_sp_or_reg(rd, value, !sf);
+    }
+    if (set_flags) {
+      if (sf) {
+        set_flags_sub(lhs, rhs, value, false);
+      } else {
+        set_flags_sub(static_cast<std::uint32_t>(lhs), static_cast<std::uint32_t>(rhs), static_cast<std::uint32_t>(value), true);
+      }
+    }
+    return true;
+  }
+
+  // ADD/ADDS (shifted register, 32/64-bit, LSL only)
+  if ((insn & 0x7F200000u) == 0x0B000000u || (insn & 0x7F200000u) == 0x2B000000u) {
+    const bool sf = (insn >> 31) != 0;
+    const bool set_flags = (insn & 0x20000000u) != 0;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t shift_type = (insn >> 22) & 0x3u;
+    const std::uint32_t imm6 = (insn >> 10) & 0x3Fu;
+    if (shift_type > 2u) {
+      return false;
+    }
+    std::uint64_t rhs = 0;
+    if (sf) {
+      const std::uint64_t v = reg(rm);
+      const std::uint32_t sh = imm6 & 63u;
+      if (shift_type == 0u) {
+        rhs = (sh >= 64u) ? 0 : (v << sh);
+      } else if (shift_type == 1u) {
+        rhs = (sh >= 64u) ? 0 : (v >> sh);
+      } else {
+        rhs = static_cast<std::uint64_t>(static_cast<std::int64_t>(v) >> sh);
+      }
+    } else {
+      const std::uint32_t v = reg32(rm);
+      const std::uint32_t sh = imm6 & 31u;
+      if (shift_type == 0u) {
+        rhs = static_cast<std::uint32_t>(v << sh);
+      } else if (shift_type == 1u) {
+        rhs = static_cast<std::uint32_t>(v >> sh);
+      } else {
+        rhs = static_cast<std::uint32_t>(static_cast<std::int32_t>(v) >> sh);
+      }
+    }
+    const std::uint64_t lhs = sf ? reg(rn) : reg32(rn);
+    const std::uint64_t value = sf ? (lhs + rhs) : (static_cast<std::uint32_t>(lhs) + static_cast<std::uint32_t>(rhs));
+    if (set_flags) {
+      if (sf) {
+        set_reg(rd, value);
+      } else {
+        set_reg32(rd, static_cast<std::uint32_t>(value));
+      }
+    } else {
+      set_sp_or_reg(rd, value, !sf);
+    }
+    if (set_flags) {
+      if (sf) {
+        set_flags_add(lhs, rhs, value, false);
+      } else {
+        set_flags_add(static_cast<std::uint32_t>(lhs), static_cast<std::uint32_t>(rhs), static_cast<std::uint32_t>(value), true);
+      }
+    }
+    return true;
+  }
+
+  // SUB/SUBS (shifted register, 32/64-bit)
+  if ((insn & 0x7F200000u) == 0x4B000000u || (insn & 0x7F200000u) == 0x6B000000u) {
+    const bool sf = (insn >> 31) != 0;
+    const bool set_flags = (insn & 0x20000000u) != 0;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t shift_type = (insn >> 22) & 0x3u;
+    const std::uint32_t imm6 = (insn >> 10) & 0x3Fu;
+    if (shift_type > 2u) {
+      return false;
+    }
+    std::uint64_t rhs = 0;
+    if (sf) {
+      const std::uint64_t v = reg(rm);
+      const std::uint32_t sh = imm6 & 63u;
+      if (shift_type == 0u) {
+        rhs = (sh >= 64u) ? 0 : (v << sh);
+      } else if (shift_type == 1u) {
+        rhs = (sh >= 64u) ? 0 : (v >> sh);
+      } else {
+        rhs = static_cast<std::uint64_t>(static_cast<std::int64_t>(v) >> sh);
+      }
+    } else {
+      const std::uint32_t v = reg32(rm);
+      const std::uint32_t sh = imm6 & 31u;
+      if (shift_type == 0u) {
+        rhs = static_cast<std::uint32_t>(v << sh);
+      } else if (shift_type == 1u) {
+        rhs = static_cast<std::uint32_t>(v >> sh);
+      } else {
+        rhs = static_cast<std::uint32_t>(static_cast<std::int32_t>(v) >> sh);
+      }
+    }
+    const std::uint64_t lhs = sf ? reg(rn) : reg32(rn);
+    const std::uint64_t value = sf ? (lhs - rhs) : (static_cast<std::uint32_t>(lhs) - static_cast<std::uint32_t>(rhs));
+    if (set_flags) {
+      if (sf) {
+        set_reg(rd, value);
+      } else {
+        set_reg32(rd, static_cast<std::uint32_t>(value));
+      }
+    } else {
+      set_sp_or_reg(rd, value, !sf);
+    }
+    if (set_flags) {
+      if (sf) {
+        set_flags_sub(lhs, rhs, value, false);
+      } else {
+        set_flags_sub(static_cast<std::uint32_t>(lhs), static_cast<std::uint32_t>(rhs), static_cast<std::uint32_t>(value), true);
+      }
+    }
+    return true;
+  }
+
+  // ADD/SUB (extended register, 32/64-bit)
+  if ((insn & 0x1F200000u) == 0x0B200000u) {
+    const bool sf = (insn >> 31) != 0;
+    const bool is_sub = ((insn >> 30) & 0x1u) != 0;
+    const bool set_flags = ((insn >> 29) & 0x1u) != 0;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t option = (insn >> 13) & 0x7u;
+    const std::uint32_t imm3 = (insn >> 10) & 0x7u;
+    if (imm3 > 4u) {
+      return false;
+    }
+
+    std::uint64_t rhs = 0;
+    const std::uint64_t rm_x = reg(rm);
+    const std::uint32_t rm_w = reg32(rm);
+    switch (option) {
+    case 0u: rhs = rm_w & 0xFFu; break;                             // UXTB
+    case 1u: rhs = rm_w & 0xFFFFu; break;                           // UXTH
+    case 2u: rhs = rm_w; break;                                     // UXTW
+    case 3u: rhs = sf ? rm_x : rm_w; break;                         // UXTX/LSL
+    case 4u: rhs = static_cast<std::uint64_t>(sign_extend(rm_w & 0xFFu, 8)); break;   // SXTB
+    case 5u: rhs = static_cast<std::uint64_t>(sign_extend(rm_w & 0xFFFFu, 16)); break; // SXTH
+    case 6u: rhs = static_cast<std::uint64_t>(sign_extend(rm_w, 32)); break;            // SXTW
+    case 7u: rhs = sf ? rm_x : rm_w; break;                         // SXTX
+    default: return false;
+    }
+    rhs <<= imm3;
+
+    const std::uint64_t lhs = set_flags ? (sf ? reg(rn) : reg32(rn)) : sp_or_reg(rn);
+    const std::uint64_t value = is_sub
+        ? (sf ? (lhs - rhs) : static_cast<std::uint32_t>(lhs - rhs))
+        : (sf ? (lhs + rhs) : static_cast<std::uint32_t>(lhs + rhs));
+
+    if (set_flags) {
+      if (sf) {
+        set_reg(rd, value);
+      } else {
+        set_reg32(rd, static_cast<std::uint32_t>(value));
+      }
+      if (is_sub) {
+        if (sf) {
+          set_flags_sub(lhs, rhs, value, false);
+        } else {
+          set_flags_sub(static_cast<std::uint32_t>(lhs),
+                        static_cast<std::uint32_t>(rhs),
+                        static_cast<std::uint32_t>(value),
+                        true);
+        }
+      } else {
+        if (sf) {
+          set_flags_add(lhs, rhs, value, false);
+        } else {
+          set_flags_add(static_cast<std::uint32_t>(lhs),
+                        static_cast<std::uint32_t>(rhs),
+                        static_cast<std::uint32_t>(value),
+                        true);
+        }
+      }
+    } else {
+      set_sp_or_reg(rd, value, !sf);
+    }
+    return true;
+  }
+
+  // CSEL (32/64-bit)
+  if ((insn & 0x1FE00C00u) == 0x1A800000u || (insn & 0x1FE00C00u) == 0x1A800400u) {
+    const bool sf = (insn >> 31) != 0;
+    const bool op = ((insn >> 30) & 0x1u) != 0;
+    const bool s = ((insn >> 10) & 0x1u) != 0;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t cond = (insn >> 12) & 0xFu;
+    const bool take_rn = condition_holds(cond);
+    const std::uint64_t rn_val = sf ? reg(rn) : static_cast<std::uint64_t>(reg32(rn));
+    const std::uint64_t rm_val = sf ? reg(rm) : static_cast<std::uint64_t>(reg32(rm));
+
+    std::uint64_t false_val = rm_val;
+    if (!op && s) {          // CSINC
+      false_val = rm_val + 1u;
+    } else if (op && !s) {   // CSINV
+      false_val = ~rm_val;
+    } else if (op && s) {    // CSNEG
+      false_val = static_cast<std::uint64_t>(-static_cast<std::int64_t>(rm_val));
+    }
+    const std::uint64_t value = take_rn ? rn_val : false_val;
+    if (sf) {
+      set_reg(rd, value);
+    } else {
+      set_reg32(rd, static_cast<std::uint32_t>(value));
+    }
+    return true;
+  }
+
+  // CRC32/CRC32C (b/h/w/x)
+  {
+    const std::uint32_t tag = insn & 0xFFC0FC00u;
+    std::uint32_t bytes = 0;
+    std::uint32_t poly = 0;
+    if (tag == 0x1AC04000u) {        // CRC32B
+      bytes = 1u; poly = 0xEDB88320u;
+    } else if (tag == 0x1AC04400u) { // CRC32H
+      bytes = 2u; poly = 0xEDB88320u;
+    } else if (tag == 0x1AC04800u) { // CRC32W
+      bytes = 4u; poly = 0xEDB88320u;
+    } else if (tag == 0x9AC04C00u) { // CRC32X
+      bytes = 8u; poly = 0xEDB88320u;
+    } else if (tag == 0x1AC05000u) { // CRC32CB
+      bytes = 1u; poly = 0x82F63B78u;
+    } else if (tag == 0x1AC05400u) { // CRC32CH
+      bytes = 2u; poly = 0x82F63B78u;
+    } else if (tag == 0x1AC05800u) { // CRC32CW
+      bytes = 4u; poly = 0x82F63B78u;
+    } else if (tag == 0x9AC05C00u) { // CRC32CX
+      bytes = 8u; poly = 0x82F63B78u;
+    }
+
+    if (bytes != 0u) {
+      const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+      const std::uint32_t crc_in = reg32(rn);
+      const std::uint64_t data = (bytes == 8u) ? reg(rm) : static_cast<std::uint64_t>(reg32(rm));
+      set_reg32(rd, crc32_update(crc_in, data, bytes, poly));
+      return true;
+    }
+  }
+
+  // Data-processing (1 source): RBIT/REV16/REV32/REV/CLZ/CLS
+  if ((insn & 0x5FE0FC00u) == 0x5AC00000u ||
+      (insn & 0x5FE0FC00u) == 0x5AC00400u ||
+      (insn & 0x5FE0FC00u) == 0x5AC00800u ||
+      (insn & 0x5FE0FC00u) == 0x5AC00C00u ||
+      (insn & 0x5FE0FC00u) == 0x5AC01000u ||
+      (insn & 0x5FE0FC00u) == 0x5AC01400u) {
+    const bool sf = (insn >> 31) != 0;
+    const std::uint32_t opcode = (insn >> 10) & 0x3Fu;
+    const std::uint64_t src = sf ? reg(rn) : static_cast<std::uint64_t>(reg32(rn));
+    std::uint64_t result = 0;
+
+    if (opcode == 0u) { // RBIT
+      result = bit_reverse(src, sf ? 64u : 32u);
+    } else if (opcode == 1u) { // REV16
+      if (sf) {
+        const std::uint64_t x = src;
+        result = ((x & 0x00FF00FF00FF00FFull) << 8) | ((x & 0xFF00FF00FF00FF00ull) >> 8);
+      } else {
+        const std::uint32_t x = static_cast<std::uint32_t>(src);
+        result = static_cast<std::uint32_t>(((x & 0x00FF00FFu) << 8) | ((x & 0xFF00FF00u) >> 8));
+      }
+    } else if (opcode == 2u) { // REV (W) / REV32 (X)
+      if (sf) {
+        const std::uint64_t x = src;
+        const std::uint64_t lo = static_cast<std::uint32_t>(x & 0xFFFFFFFFu);
+        const std::uint64_t hi = static_cast<std::uint32_t>((x >> 32) & 0xFFFFFFFFu);
+        result = (static_cast<std::uint64_t>(__builtin_bswap32(static_cast<std::uint32_t>(hi))) << 32) |
+                 static_cast<std::uint64_t>(__builtin_bswap32(static_cast<std::uint32_t>(lo)));
+      } else {
+        result = static_cast<std::uint32_t>(__builtin_bswap32(static_cast<std::uint32_t>(src)));
+      }
+    } else if (opcode == 3u) { // REV (X) only
+      if (!sf) {
+        return false;
+      }
+      result = __builtin_bswap64(src);
+    } else if (opcode == 4u) { // CLZ
+      if (sf) {
+        result = (src == 0) ? 64u : static_cast<std::uint64_t>(__builtin_clzll(src));
+      } else {
+        const std::uint32_t x = static_cast<std::uint32_t>(src);
+        result = (x == 0) ? 32u : static_cast<std::uint32_t>(__builtin_clz(x));
+      }
+    } else if (opcode == 5u) { // CLS
+      result = sf ? cls64(src) : cls32(static_cast<std::uint32_t>(src));
+    } else {
+      return false;
+    }
+
+    if (sf) {
+      set_reg(rd, result);
+    } else {
+      set_reg32(rd, static_cast<std::uint32_t>(result));
+    }
+    return true;
+  }
+
+  // UDIV / SDIV (32/64-bit)
+  if ((insn & 0x7FE0FC00u) == 0x1AC00800u || (insn & 0x7FE0FC00u) == 0x1AC00C00u) {
+    const bool sf = (insn >> 31) != 0;
+    const bool is_signed = ((insn & 0x00000400u) != 0);
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    if (sf) {
+      const std::uint64_t lhs_u = reg(rn);
+      const std::uint64_t rhs_u = reg(rm);
+      if (rhs_u == 0) {
+        set_reg(rd, 0);
+        return true;
+      }
+      if (is_signed) {
+        const std::int64_t lhs = static_cast<std::int64_t>(lhs_u);
+        const std::int64_t rhs = static_cast<std::int64_t>(rhs_u);
+        if (lhs == static_cast<std::int64_t>(0x8000000000000000ull) && rhs == -1) {
+          set_reg(rd, static_cast<std::uint64_t>(lhs));
+        } else {
+          set_reg(rd, static_cast<std::uint64_t>(lhs / rhs));
+        }
+      } else {
+        set_reg(rd, lhs_u / rhs_u);
+      }
+    } else {
+      const std::uint32_t lhs_u = reg32(rn);
+      const std::uint32_t rhs_u = reg32(rm);
+      if (rhs_u == 0) {
+        set_reg32(rd, 0);
+        return true;
+      }
+      if (is_signed) {
+        const std::int32_t lhs = static_cast<std::int32_t>(lhs_u);
+        const std::int32_t rhs = static_cast<std::int32_t>(rhs_u);
+        if (lhs == static_cast<std::int32_t>(0x80000000u) && rhs == -1) {
+          set_reg32(rd, static_cast<std::uint32_t>(lhs));
+        } else {
+          set_reg32(rd, static_cast<std::uint32_t>(lhs / rhs));
+        }
+      } else {
+        set_reg32(rd, lhs_u / rhs_u);
+      }
+    }
+    return true;
+  }
+
+  // Variable shift (32/64-bit): LSLV/LSRV/ASRV/RORV
+  if ((insn & 0x7FE0FC00u) == 0x1AC02000u ||
+      (insn & 0x7FE0FC00u) == 0x1AC02400u ||
+      (insn & 0x7FE0FC00u) == 0x1AC02800u ||
+      (insn & 0x7FE0FC00u) == 0x1AC02C00u) {
+    const bool sf = (insn >> 31) != 0;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t shift_type = (insn >> 10) & 0x3u; // 0:LSLV 1:LSRV 2:ASRV 3:RORV
+    const std::uint32_t width = sf ? 64u : 32u;
+    const std::uint32_t mask_bits = sf ? 63u : 31u;
+    const std::uint32_t amount = static_cast<std::uint32_t>((sf ? reg(rm) : reg32(rm)) & mask_bits);
+    const std::uint64_t src = sf ? reg(rn) : static_cast<std::uint64_t>(reg32(rn));
+    const std::uint64_t mask = ones(width);
+    std::uint64_t result = 0;
+
+    if (shift_type == 0u) {
+      result = (src << amount) & mask;
+    } else if (shift_type == 1u) {
+      result = (src & mask) >> amount;
+    } else if (shift_type == 2u) {
+      if (sf) {
+        result = static_cast<std::uint64_t>(static_cast<std::int64_t>(src) >> amount);
+      } else {
+        result = static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::uint32_t>(src)) >> amount);
+      }
+    } else {
+      result = ror(src, amount, width);
+    }
+
+    if (sf) {
+      set_reg(rd, result);
+    } else {
+      set_reg32(rd, static_cast<std::uint32_t>(result));
+    }
+    return true;
+  }
+
+  // MADD / MSUB (32/64-bit), including MUL alias (Ra = XZR/WZR)
+  if ((insn & 0x1FE08000u) == 0x1B000000u || (insn & 0x1FE08000u) == 0x1B008000u) {
+    const bool sf = (insn >> 31) != 0;
+    const bool is_sub = ((insn >> 15) & 0x1u) != 0;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t ra = (insn >> 10) & 0x1Fu;
+    if (sf) {
+      const std::uint64_t prod = reg(rn) * reg(rm);
+      const std::uint64_t acc = reg(ra);
+      set_reg(rd, is_sub ? (acc - prod) : (acc + prod));
+    } else {
+      const std::uint32_t prod = reg32(rn) * reg32(rm);
+      const std::uint32_t acc = reg32(ra);
+      set_reg32(rd, is_sub ? static_cast<std::uint32_t>(acc - prod) : static_cast<std::uint32_t>(acc + prod));
+    }
+    return true;
+  }
+
+  // UMADDL/UMSUBL/SMADDL/SMSUBL (includes UMULL/SMULL aliases with Ra=XZR)
+  if ((insn & 0xFFE08000u) == 0x9B200000u || // SMADDL
+      (insn & 0xFFE08000u) == 0x9B208000u || // SMSUBL
+      (insn & 0xFFE08000u) == 0x9BA00000u || // UMADDL
+      (insn & 0xFFE08000u) == 0x9BA08000u) { // UMSUBL
+    const bool is_unsigned = ((insn & 0x00800000u) != 0);
+    const bool is_sub = ((insn & 0x00008000u) != 0);
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t ra = (insn >> 10) & 0x1Fu;
+    const std::uint64_t acc = reg(ra);
+    std::uint64_t prod = 0;
+
+    if (is_unsigned) {
+      prod = static_cast<std::uint64_t>(reg32(rn)) * static_cast<std::uint64_t>(reg32(rm));
+    } else {
+      const std::int64_t lhs = static_cast<std::int64_t>(static_cast<std::int32_t>(reg32(rn)));
+      const std::int64_t rhs = static_cast<std::int64_t>(static_cast<std::int32_t>(reg32(rm)));
+      prod = static_cast<std::uint64_t>(lhs * rhs);
+    }
+    set_reg(rd, is_sub ? (acc - prod) : (acc + prod));
+    return true;
+  }
+
+  // CCMP / CCMN (register + immediate, 32/64-bit)
+  if ((insn & 0x1FE00010u) == 0x1A400000u) {
+    const bool sf = (insn >> 31) != 0;
+    const bool is_ccmn = ((insn >> 30) & 0x1u) == 0u;
+    const bool imm_form = ((insn >> 11) & 0x1u) != 0;
+    const std::uint32_t cond = (insn >> 12) & 0xFu;
+    const std::uint32_t nzcv_imm = insn & 0xFu;
+    const std::uint64_t lhs = sf ? reg(rn) : static_cast<std::uint64_t>(reg32(rn));
+    const std::uint64_t rhs = imm_form
+        ? static_cast<std::uint64_t>((insn >> 16) & 0x1Fu)
+        : (sf ? reg((insn >> 16) & 0x1Fu) : static_cast<std::uint64_t>(reg32((insn >> 16) & 0x1Fu)));
+
+    if (condition_holds(cond)) {
+      auto p = sysregs_.pstate();
+      if (sf) {
+        if (is_ccmn) {
+          const std::uint64_t result = lhs + rhs;
+          p.n = ((result >> 63) & 1u) != 0;
+          p.z = result == 0;
+          p.c = result < lhs;
+          const bool lhs_sign = ((lhs >> 63) & 1u) != 0;
+          const bool rhs_sign = ((rhs >> 63) & 1u) != 0;
+          const bool res_sign = ((result >> 63) & 1u) != 0;
+          p.v = (lhs_sign == rhs_sign) && (lhs_sign != res_sign);
+        } else {
+          const std::uint64_t result = lhs - rhs;
+          p.n = ((result >> 63) & 1u) != 0;
+          p.z = result == 0;
+          p.c = lhs >= rhs;
+          const bool lhs_sign = ((lhs >> 63) & 1u) != 0;
+          const bool rhs_sign = ((rhs >> 63) & 1u) != 0;
+          const bool res_sign = ((result >> 63) & 1u) != 0;
+          p.v = (lhs_sign != rhs_sign) && (lhs_sign != res_sign);
+        }
+      } else {
+        const std::uint32_t l32 = static_cast<std::uint32_t>(lhs);
+        const std::uint32_t r32 = static_cast<std::uint32_t>(rhs);
+        if (is_ccmn) {
+          const std::uint32_t result = static_cast<std::uint32_t>(l32 + r32);
+          p.n = ((result >> 31) & 1u) != 0;
+          p.z = result == 0;
+          p.c = result < l32;
+          const bool lhs_sign = ((l32 >> 31) & 1u) != 0;
+          const bool rhs_sign = ((r32 >> 31) & 1u) != 0;
+          const bool res_sign = ((result >> 31) & 1u) != 0;
+          p.v = (lhs_sign == rhs_sign) && (lhs_sign != res_sign);
+        } else {
+          const std::uint32_t result = static_cast<std::uint32_t>(l32 - r32);
+          p.n = ((result >> 31) & 1u) != 0;
+          p.z = result == 0;
+          p.c = l32 >= r32;
+          const bool lhs_sign = ((l32 >> 31) & 1u) != 0;
+          const bool rhs_sign = ((r32 >> 31) & 1u) != 0;
+          const bool res_sign = ((result >> 31) & 1u) != 0;
+          p.v = (lhs_sign != rhs_sign) && (lhs_sign != res_sign);
+        }
+      }
+      sysregs_.set_pstate(p);
+    } else {
+      sysregs_.set_nzcv(static_cast<std::uint64_t>(nzcv_imm) << 28);
+    }
+    return true;
+  }
+
+  // EXTR / ROR (immediate) (32/64-bit)
+  if ((insn & 0x1F800000u) == 0x13800000u) {
+    const bool sf = (insn >> 31) != 0;
+    const std::uint32_t n = (insn >> 22) & 0x1u;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t lsb = (insn >> 10) & 0x3Fu;
+    const std::uint32_t width = sf ? 64u : 32u;
+    if ((sf && n != 1u) || (!sf && n != 0u)) {
+      return false;
+    }
+    if ((!sf && lsb >= 32u) || lsb >= 64u) {
+      return false;
+    }
+    const std::uint64_t mask = ones(width);
+    const std::uint64_t rn_val = (sf ? reg(rn) : static_cast<std::uint64_t>(reg32(rn))) & mask;
+    const std::uint64_t rm_val = (sf ? reg(rm) : static_cast<std::uint64_t>(reg32(rm))) & mask;
+    const std::uint64_t result = (lsb == 0u)
+        ? rm_val
+        : ((rm_val >> lsb) | ((rn_val << (width - lsb)) & mask));
+    if (sf) {
+      set_reg(rd, result);
+    } else {
+      set_reg32(rd, static_cast<std::uint32_t>(result));
+    }
+    return true;
+  }
+
+  // Logical shifted register (32/64-bit): AND/BIC/ORR/ORN/EOR/EON/ANDS/BICS
+  if ((insn & 0x1F000000u) == 0x0A000000u) {
+    const bool sf = (insn >> 31) != 0;
+    const bool n = ((insn >> 21) & 0x1u) != 0;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t shift_type = (insn >> 22) & 0x3u;
+    const std::uint32_t imm6 = (insn >> 10) & 0x3Fu;
+    if (!sf && (imm6 & 0x20u)) {
+      return false;
+    }
+
+    const std::uint64_t width_mask = sf ? ~0ull : 0xFFFFFFFFull;
+    const std::uint32_t sh = sf ? (imm6 & 63u) : (imm6 & 31u);
+    const std::uint64_t rhs_src = sf ? reg(rm) : static_cast<std::uint64_t>(reg32(rm));
+    std::uint64_t rhs = 0;
+    if (shift_type == 0u) {        // LSL
+      rhs = (rhs_src << sh);
+    } else if (shift_type == 1u) { // LSR
+      rhs = (rhs_src & width_mask) >> sh;
+    } else if (shift_type == 2u) { // ASR
+      if (sf) {
+        rhs = static_cast<std::uint64_t>(static_cast<std::int64_t>(rhs_src) >> sh);
+      } else {
+        rhs = static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::uint32_t>(rhs_src)) >> sh);
+      }
+    } else { // ROR
+      rhs = ror(rhs_src, sh, sf ? 64u : 32u);
+    }
+    rhs &= width_mask;
+    if (n) {
+      rhs = (~rhs) & width_mask;
+    }
+    const std::uint64_t lhs = sf ? reg(rn) : static_cast<std::uint64_t>(reg32(rn));
+    const std::uint32_t opc = (insn >> 29) & 0x3u;
+    std::uint64_t value = 0;
+
+    if (opc == 0u) {
+      value = lhs & rhs;
+    } else if (opc == 1u) {
+      value = lhs | rhs;
+    } else if (opc == 2u) {
+      value = lhs ^ rhs;
+    } else if (opc == 3u) {
+      value = lhs & rhs;
+    } else {
+      return false;
+    }
+
+    if (opc == 3u) {
+      set_flags_logic(value, !sf);
+      if (rd != 31) {
+        if (sf) {
+          set_reg(rd, value);
+        } else {
+          set_reg32(rd, static_cast<std::uint32_t>(value));
+        }
+      }
+    } else {
+      if (sf) {
+        set_reg(rd, value);
+      } else {
+        set_reg32(rd, static_cast<std::uint32_t>(value));
+      }
+    }
+    return true;
+  }
+
+  // Logical immediate (32/64-bit): AND/ORR/EOR/ANDS
+  if ((insn & 0x1F000000u) == 0x12000000u) {
+    const bool sf = (insn >> 31) != 0;
+    const std::uint32_t opc = (insn >> 29) & 0x3u;
+    const std::uint32_t n = (insn >> 22) & 0x1u;
+    const std::uint32_t immr = (insn >> 16) & 0x3Fu;
+    const std::uint32_t imms = (insn >> 10) & 0x3Fu;
+    const std::uint32_t datasize = sf ? 64u : 32u;
+    if (!sf && n != 0u) {
+      return false;
+    }
+    std::uint64_t wmask = 0;
+    std::uint64_t tmask = 0;
+    if (!decode_bit_masks(n, imms, immr, datasize, wmask, tmask)) {
+      return false;
+    }
+    (void)tmask;
+    const std::uint64_t lhs = sf ? reg(rn) : static_cast<std::uint64_t>(reg32(rn));
+    std::uint64_t value = 0;
+    if (opc == 0u) {
+      value = lhs & wmask;
+    } else if (opc == 1u) {
+      value = lhs | wmask;
+    } else if (opc == 2u) {
+      value = lhs ^ wmask;
+    } else if (opc == 3u) {
+      value = lhs & wmask;
+      set_flags_logic(value, !sf);
+      if (rd == 31u) {
+        return true;
+      }
+    } else {
+      return false;
+    }
+    if (sf) {
+      set_reg(rd, value);
+    } else {
+      set_reg32(rd, static_cast<std::uint32_t>(value));
+    }
+    return true;
+  }
+
+  // Bitfield (32/64-bit): SBFM/BFM/UBFM (+ aliases: ASR/SBFX/BFI/BFXIL/LSL/LSR/UBFX)
+  if ((insn & 0x1F800000u) == 0x13000000u) {
+    const bool sf = (insn >> 31) != 0;
+    const std::uint32_t opc = (insn >> 29) & 0x3u;
+    const std::uint32_t n = (insn >> 22) & 0x1u;
+    const std::uint32_t immr = (insn >> 16) & 0x3Fu;
+    const std::uint32_t imms = (insn >> 10) & 0x3Fu;
+    const std::uint32_t datasize = sf ? 64u : 32u;
+    if ((sf && n != 1u) || (!sf && n != 0u)) {
+      return false;
+    }
+
+    std::uint64_t wmask = 0;
+    std::uint64_t tmask = 0;
+    if (!decode_bit_masks(n, imms, immr, datasize, wmask, tmask)) {
+      return false;
+    }
+
+    const std::uint64_t src = sf ? reg(rn) : static_cast<std::uint64_t>(reg32(rn));
+    const std::uint64_t dst = sf ? reg(rd) : static_cast<std::uint64_t>(reg32(rd));
+    const std::uint64_t bot = ror(src, immr, datasize) & wmask;
+    std::uint64_t result = 0;
+
+    if (opc == 0u) { // SBFM
+      const bool sign = ((src >> (imms & (datasize - 1u))) & 1u) != 0;
+      const std::uint64_t top = sign ? ones(datasize) : 0;
+      result = (top & ~tmask) | (bot & tmask);
+    } else if (opc == 1u) { // BFM
+      const std::uint64_t merged = (dst & ~wmask) | bot;
+      result = (dst & ~tmask) | (merged & tmask);
+    } else if (opc == 2u) { // UBFM
+      result = bot & tmask;
+    } else {
+      return false;
+    }
+
+    if (sf) {
+      set_reg(rd, result);
+    } else {
+      set_reg32(rd, static_cast<std::uint32_t>(result));
+    }
+    return true;
+  }
+
+  return false;
+}
+
+bool Cpu::exec_load_store(std::uint32_t insn) {
+  const std::uint32_t rt = insn & 0x1Fu;
+  const std::uint32_t rn = (insn >> 5) & 0x1Fu;
+  const auto data_abort = [this](std::uint64_t va) {
+    enter_sync_exception(pc_ - 4, 0x25u, 0u, true, va);
+  };
+  const auto mmu_read = [this](std::uint64_t va, std::size_t size) -> std::optional<std::uint64_t> {
+    const auto pa = translate_address(va, AccessType::Read, true);
+    if (!pa.has_value()) {
+      return std::nullopt;
+    }
+    return bus_.read(*pa, size);
+  };
+  const auto mmu_write = [this](std::uint64_t va, std::uint64_t value, std::size_t size) -> bool {
+    const auto pa = translate_address(va, AccessType::Write, true);
+    if (!pa.has_value()) {
+      return false;
+    }
+    return bus_.write(*pa, value, size);
+  };
+
+  // LDR/STR (register offset), minimal subset used by U-Boot.
+  if (((insn & 0x3FE00C00u) == 0x38200800u || (insn & 0x3FE00C00u) == 0x38600800u) &&
+      ((((insn >> 13) & 0x7u) == 0x2u) || (((insn >> 13) & 0x7u) == 0x3u) ||
+       (((insn >> 13) & 0x7u) == 0x6u) || (((insn >> 13) & 0x7u) == 0x7u))) {
+    const bool is_load = ((insn >> 22) & 0x1u) != 0;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t size_code = (insn >> 30) & 0x3u;
+    const std::uint32_t option = (insn >> 13) & 0x7u;
+    const bool s = ((insn >> 12) & 0x1u) != 0;
+    const std::size_t size = (size_code == 0u) ? 1u : (size_code == 1u) ? 2u : (size_code == 2u) ? 4u : 8u;
+    std::uint64_t off = 0;
+    if (option == 0x2u) {         // UXTW
+      off = reg32(rm);
+    } else if (option == 0x3u) {  // LSL/UXTX
+      off = reg(rm);
+    } else if (option == 0x6u) {  // SXTW
+      off = static_cast<std::uint64_t>(sign_extend(reg32(rm), 32));
+    } else {                      // SXTX
+      off = reg(rm);
+    }
+    off <<= (s ? size_code : 0u);
+    const std::uint64_t addr = sp_or_reg(rn) + off;
+    if (is_load) {
+      const auto value = mmu_read(addr, size);
+      if (!value.has_value()) {
+        data_abort(addr);
+        return true;
+      }
+      if (size == 8u) {
+        set_reg(rt, *value);
+      } else if (size == 4u) {
+        set_reg32(rt, static_cast<std::uint32_t>(*value));
+      } else if (size == 2u) {
+        set_reg32(rt, static_cast<std::uint16_t>(*value));
+      } else {
+        set_reg32(rt, static_cast<std::uint8_t>(*value));
+      }
+    } else {
+      const std::uint64_t value = (size == 8u) ? reg(rt) : (size == 4u) ? reg32(rt) : (size == 2u) ? (reg32(rt) & 0xFFFFu) : (reg32(rt) & 0xFFu);
+      if (!mmu_write(addr, value, size)) {
+        data_abort(addr);
+        return true;
+      }
+    }
+    return true;
+  }
+
+  // LDR Xt, #imm19 (literal)
+  if ((insn & 0xFF000000u) == 0x58000000u) {
+    const std::int64_t imm19 = sign_extend((insn >> 5) & 0x7FFFFu, 19) << 2u;
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(pc_ - 4) + imm19);
+    const auto value = mmu_read(addr, 8);
+    if (!value.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_reg(rt, *value);
+    return true;
+  }
+
+  // LDR Wt, #imm19 (literal)
+  if ((insn & 0xFF000000u) == 0x18000000u) {
+    const std::int64_t imm19 = sign_extend((insn >> 5) & 0x7FFFFu, 19) << 2u;
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(pc_ - 4) + imm19);
+    const auto value = mmu_read(addr, 4);
+    if (!value.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_reg32(rt, static_cast<std::uint32_t>(*value));
+    return true;
+  }
+
+  // LDRSW Xt, #imm19 (literal)
+  if ((insn & 0xFF000000u) == 0x98000000u) {
+    const std::int64_t imm19 = sign_extend((insn >> 5) & 0x7FFFFu, 19) << 2u;
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(pc_ - 4) + imm19);
+    const auto value = mmu_read(addr, 4);
+    if (!value.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_reg(rt, static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(*value & 0xFFFFFFFFu))));
+    return true;
+  }
+
+  // Post-index / pre-index loads-stores (minimal no-sign-extend family).
+  auto post_pre = [&](std::size_t size, bool is_load, bool is_pre) -> bool {
+    const std::int64_t simm9 = sign_extend((insn >> 12) & 0x1FFu, 9);
+    const std::uint64_t base = sp_or_reg(rn);
+    const std::uint64_t addr = is_pre
+        ? static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + simm9)
+        : base;
+    if (is_load) {
+      const auto value = mmu_read(addr, size);
+      if (!value.has_value()) {
+        data_abort(addr);
+        return true;
+      }
+      if (size == 8u) {
+        set_reg(rt, *value);
+      } else if (size == 4u) {
+        set_reg32(rt, static_cast<std::uint32_t>(*value));
+      } else if (size == 2u) {
+        set_reg32(rt, static_cast<std::uint16_t>(*value));
+      } else {
+        set_reg32(rt, static_cast<std::uint8_t>(*value));
+      }
+    } else {
+      const std::uint64_t value = (size == 8u) ? reg(rt) : (size == 4u) ? reg32(rt) : (size == 2u) ? (reg32(rt) & 0xFFFFu) : (reg32(rt) & 0xFFu);
+      if (!mmu_write(addr, value, size)) {
+        data_abort(addr);
+        return true;
+      }
+    }
+    if (is_pre) {
+      set_sp_or_reg(rn, addr, false);
+    } else {
+      set_sp_or_reg(rn, static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + simm9), false);
+    }
+    return true;
+  };
+
+  // LDRB/STRB post/pre-index
+  if ((insn & 0xFFC00C00u) == 0x38400400u) return post_pre(1, true, false);
+  if ((insn & 0xFFC00C00u) == 0x38000400u) return post_pre(1, false, false);
+  if ((insn & 0xFFC00C00u) == 0x38400C00u) return post_pre(1, true, true);
+  if ((insn & 0xFFC00C00u) == 0x38000C00u) return post_pre(1, false, true);
+
+  // LDRH/STRH post/pre-index
+  if ((insn & 0xFFC00C00u) == 0x78400400u) return post_pre(2, true, false);
+  if ((insn & 0xFFC00C00u) == 0x78000400u) return post_pre(2, false, false);
+  if ((insn & 0xFFC00C00u) == 0x78400C00u) return post_pre(2, true, true);
+  if ((insn & 0xFFC00C00u) == 0x78000C00u) return post_pre(2, false, true);
+
+  // LDR/STR W post/pre-index
+  if ((insn & 0xFFC00C00u) == 0xB8400400u) return post_pre(4, true, false);
+  if ((insn & 0xFFC00C00u) == 0xB8000400u) return post_pre(4, false, false);
+  if ((insn & 0xFFC00C00u) == 0xB8400C00u) return post_pre(4, true, true);
+  if ((insn & 0xFFC00C00u) == 0xB8000C00u) return post_pre(4, false, true);
+
+  // LDR/STR X post/pre-index
+  if ((insn & 0xFFC00C00u) == 0xF8400400u) return post_pre(8, true, false);
+  if ((insn & 0xFFC00C00u) == 0xF8000400u) return post_pre(8, false, false);
+  if ((insn & 0xFFC00C00u) == 0xF8400C00u) return post_pre(8, true, true);
+  if ((insn & 0xFFC00C00u) == 0xF8000C00u) return post_pre(8, false, true);
+
+  // LDUR Xt, [Xn|SP, #simm9]
+  if ((insn & 0xFFC00C00u) == 0xF8400000u) {
+    const std::int64_t simm9 = sign_extend((insn >> 12) & 0x1FFu, 9);
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + simm9);
+    const auto value = mmu_read(addr, 8);
+    if (!value.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_reg(rt, *value);
+    return true;
+  }
+
+  // LDURB Wt, [Xn|SP, #simm9]
+  if ((insn & 0xFFC00C00u) == 0x38400000u) {
+    const std::int64_t simm9 = sign_extend((insn >> 12) & 0x1FFu, 9);
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + simm9);
+    const auto value = mmu_read(addr, 1);
+    if (!value.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_reg32(rt, static_cast<std::uint8_t>(*value));
+    return true;
+  }
+
+  // STURB Wt, [Xn|SP, #simm9]
+  if ((insn & 0xFFC00C00u) == 0x38000000u) {
+    const std::int64_t simm9 = sign_extend((insn >> 12) & 0x1FFu, 9);
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + simm9);
+    if (!mmu_write(addr, reg32(rt) & 0xFFu, 1)) {
+      data_abort(addr);
+      return true;
+    }
+    return true;
+  }
+
+  // LDURH Wt, [Xn|SP, #simm9]
+  if ((insn & 0xFFC00C00u) == 0x78400000u) {
+    const std::int64_t simm9 = sign_extend((insn >> 12) & 0x1FFu, 9);
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + simm9);
+    const auto value = mmu_read(addr, 2);
+    if (!value.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_reg32(rt, static_cast<std::uint16_t>(*value));
+    return true;
+  }
+
+  // STURH Wt, [Xn|SP, #simm9]
+  if ((insn & 0xFFC00C00u) == 0x78000000u) {
+    const std::int64_t simm9 = sign_extend((insn >> 12) & 0x1FFu, 9);
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + simm9);
+    if (!mmu_write(addr, reg32(rt) & 0xFFFFu, 2)) {
+      data_abort(addr);
+      return true;
+    }
+    return true;
+  }
+
+  // STUR Xt, [Xn|SP, #simm9]
+  if ((insn & 0xFFC00C00u) == 0xF8000000u) {
+    const std::int64_t simm9 = sign_extend((insn >> 12) & 0x1FFu, 9);
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + simm9);
+    if (!mmu_write(addr, reg(rt), 8)) {
+      data_abort(addr);
+      return true;
+    }
+    return true;
+  }
+
+  // LDUR Wt, [Xn|SP, #simm9]
+  if ((insn & 0xFFC00C00u) == 0xB8400000u) {
+    const std::int64_t simm9 = sign_extend((insn >> 12) & 0x1FFu, 9);
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + simm9);
+    const auto value = mmu_read(addr, 4);
+    if (!value.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_reg32(rt, static_cast<std::uint32_t>(*value));
+    return true;
+  }
+
+  // STUR Wt, [Xn|SP, #simm9]
+  if ((insn & 0xFFC00C00u) == 0xB8000000u) {
+    const std::int64_t simm9 = sign_extend((insn >> 12) & 0x1FFu, 9);
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + simm9);
+    if (!mmu_write(addr, reg32(rt), 4)) {
+      data_abort(addr);
+      return true;
+    }
+    return true;
+  }
+
+  // STP Xt1, Xt2, [Xn|SP, #imm]!
+  if ((insn & 0xFFC00000u) == 0xA9800000u && ((insn >> 23) & 0x3u) == 0x3u) {
+    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
+    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 3u;
+    const std::uint64_t base = sp_or_reg(rn);
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + imm7);
+    if (!mmu_write(addr, reg(rt), 8) || !mmu_write(addr + 8, reg(rt2), 8)) {
+      data_abort(addr);
+      return true;
+    }
+    set_sp_or_reg(rn, addr, false);
+    return true;
+  }
+
+  // STP Wt1, Wt2, [Xn|SP, #imm]!  
+  if ((insn & 0xFFC00000u) == 0x29800000u && ((insn >> 23) & 0x3u) == 0x3u) {
+    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
+    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 2u;
+    const std::uint64_t base = sp_or_reg(rn);
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + imm7);
+    if (!mmu_write(addr, reg32(rt), 4) || !mmu_write(addr + 4, reg32(rt2), 4)) {
+      data_abort(addr);
+      return true;
+    }
+    set_sp_or_reg(rn, addr, false);
+    return true;
+  }
+
+  // STP Xt1, Xt2, [Xn|SP], #imm
+  if ((insn & 0xFFC00000u) == 0xA8800000u) {
+    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
+    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 3u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    if (!mmu_write(addr, reg(rt), 8) || !mmu_write(addr + 8, reg(rt2), 8)) {
+      data_abort(addr);
+      return true;
+    }
+    set_sp_or_reg(rn, static_cast<std::uint64_t>(static_cast<std::int64_t>(addr) + imm7), false);
+    return true;
+  }
+
+  // STP Wt1, Wt2, [Xn|SP], #imm
+  if ((insn & 0xFFC00000u) == 0x28800000u) {
+    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
+    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 2u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    if (!mmu_write(addr, reg32(rt), 4) || !mmu_write(addr + 4, reg32(rt2), 4)) {
+      data_abort(addr);
+      return true;
+    }
+    set_sp_or_reg(rn, static_cast<std::uint64_t>(static_cast<std::int64_t>(addr) + imm7), false);
+    return true;
+  }
+
+  // STP Xt1, Xt2, [Xn|SP, #imm] (signed offset, no writeback)
+  if ((insn & 0xFFC00000u) == 0xA9000000u) {
+    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
+    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 3u;
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + imm7);
+    if (!mmu_write(addr, reg(rt), 8) || !mmu_write(addr + 8, reg(rt2), 8)) {
+      data_abort(addr);
+      return true;
+    }
+    return true;
+  }
+
+  // STP Wt1, Wt2, [Xn|SP, #imm] (signed offset, no writeback)
+  if ((insn & 0xFFC00000u) == 0x29000000u) {
+    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
+    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 2u;
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + imm7);
+    if (!mmu_write(addr, reg32(rt), 4) || !mmu_write(addr + 4, reg32(rt2), 4)) {
+      data_abort(addr);
+      return true;
+    }
+    return true;
+  }
+
+  // LDP Xt1, Xt2, [Xn|SP], #imm
+  if ((insn & 0xFFC00000u) == 0xA8C00000u) {
+    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
+    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 3u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    const auto v1 = mmu_read(addr, 8);
+    const auto v2 = mmu_read(addr + 8, 8);
+    if (!v1.has_value() || !v2.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_reg(rt, *v1);
+    set_reg(rt2, *v2);
+    set_sp_or_reg(rn, static_cast<std::uint64_t>(static_cast<std::int64_t>(addr) + imm7), false);
+    return true;
+  }
+
+  // LDP Wt1, Wt2, [Xn|SP], #imm
+  if ((insn & 0xFFC00000u) == 0x28C00000u) {
+    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
+    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 2u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    const auto v1 = mmu_read(addr, 4);
+    const auto v2 = mmu_read(addr + 4, 4);
+    if (!v1.has_value() || !v2.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_reg32(rt, static_cast<std::uint32_t>(*v1));
+    set_reg32(rt2, static_cast<std::uint32_t>(*v2));
+    set_sp_or_reg(rn, static_cast<std::uint64_t>(static_cast<std::int64_t>(addr) + imm7), false);
+    return true;
+  }
+
+  // LDP Xt1, Xt2, [Xn|SP, #imm] (signed offset, no writeback)
+  if ((insn & 0xFFC00000u) == 0xA9400000u) {
+    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
+    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 3u;
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + imm7);
+    const auto v1 = mmu_read(addr, 8);
+    const auto v2 = mmu_read(addr + 8, 8);
+    if (!v1.has_value() || !v2.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_reg(rt, *v1);
+    set_reg(rt2, *v2);
+    return true;
+  }
+
+  // LDP Wt1, Wt2, [Xn|SP, #imm] (signed offset, no writeback)
+  if ((insn & 0xFFC00000u) == 0x29400000u) {
+    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
+    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 2u;
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + imm7);
+    const auto v1 = mmu_read(addr, 4);
+    const auto v2 = mmu_read(addr + 4, 4);
+    if (!v1.has_value() || !v2.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_reg32(rt, static_cast<std::uint32_t>(*v1));
+    set_reg32(rt2, static_cast<std::uint32_t>(*v2));
+    return true;
+  }
+
+  // LDR Xt, [Xn, #imm12]
+  if ((insn & 0xFFC00000u) == 0xF9400000u) {
+    const std::uint64_t imm12 = (insn >> 10) & 0xFFFu;
+    const std::uint64_t addr = sp_or_reg(rn) + (imm12 << 3u);
+    const auto value = mmu_read(addr, 8);
+    if (!value.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_reg(rt, *value);
+    return true;
+  }
+
+  // STR Xt, [Xn, #imm12]
+  if ((insn & 0xFFC00000u) == 0xF9000000u) {
+    const std::uint64_t imm12 = (insn >> 10) & 0xFFFu;
+    const std::uint64_t addr = sp_or_reg(rn) + (imm12 << 3u);
+    if (!mmu_write(addr, reg(rt), 8)) {
+      data_abort(addr);
+      return true;
+    }
+    return true;
+  }
+
+  // LDR Wt, [Xn, #imm12]
+  if ((insn & 0xFFC00000u) == 0xB9400000u) {
+    const std::uint64_t imm12 = (insn >> 10) & 0xFFFu;
+    const std::uint64_t addr = sp_or_reg(rn) + (imm12 << 2u);
+    const auto value = mmu_read(addr, 4);
+    if (!value.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_reg(rt, *value & 0xFFFFFFFFu);
+    return true;
+  }
+
+  // LDRSW Xt, [Xn|SP, #imm12] (unsigned offset, scaled by 4)
+  if ((insn & 0xFFC00000u) == 0xB9800000u) {
+    const std::uint64_t imm12 = (insn >> 10) & 0xFFFu;
+    const std::uint64_t addr = sp_or_reg(rn) + (imm12 << 2u);
+    const auto value = mmu_read(addr, 4);
+    if (!value.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_reg(rt, static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(*value & 0xFFFFFFFFu))));
+    return true;
+  }
+
+  // LDURSW Xt, [Xn|SP, #simm9] (unscaled)
+  if ((insn & 0xFFC00C00u) == 0xB8800000u) {
+    const std::int64_t simm9 = sign_extend((insn >> 12) & 0x1FFu, 9);
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + simm9);
+    const auto value = mmu_read(addr, 4);
+    if (!value.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_reg(rt, static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(*value & 0xFFFFFFFFu))));
+    return true;
+  }
+
+  // LDRSW Xt, [Xn|SP, #simm9]! (pre-index)
+  if ((insn & 0xFFC00C00u) == 0xB8800C00u) {
+    const std::int64_t simm9 = sign_extend((insn >> 12) & 0x1FFu, 9);
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + simm9);
+    const auto value = mmu_read(addr, 4);
+    if (!value.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_reg(rt, static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(*value & 0xFFFFFFFFu))));
+    set_sp_or_reg(rn, addr, false);
+    return true;
+  }
+
+  // LDRSW Xt, [Xn|SP], #simm9 (post-index)
+  if ((insn & 0xFFC00C00u) == 0xB8800400u) {
+    const std::int64_t simm9 = sign_extend((insn >> 12) & 0x1FFu, 9);
+    const std::uint64_t base = sp_or_reg(rn);
+    const auto value = mmu_read(base, 4);
+    if (!value.has_value()) {
+      data_abort(base);
+      return true;
+    }
+    set_reg(rt, static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(*value & 0xFFFFFFFFu))));
+    set_sp_or_reg(rn, static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + simm9), false);
+    return true;
+  }
+
+  // STR Wt, [Xn, #imm12]
+  if ((insn & 0xFFC00000u) == 0xB9000000u) {
+    const std::uint64_t imm12 = (insn >> 10) & 0xFFFu;
+    const std::uint64_t addr = sp_or_reg(rn) + (imm12 << 2u);
+    if (!mmu_write(addr, reg(rt) & 0xFFFFFFFFu, 4)) {
+      data_abort(addr);
+      return true;
+    }
+    return true;
+  }
+
+  // LDRB Wt, [Xn|SP, #imm12]
+  if ((insn & 0xFFC00000u) == 0x39400000u) {
+    const std::uint64_t imm12 = (insn >> 10) & 0xFFFu;
+    const std::uint64_t addr = sp_or_reg(rn) + imm12;
+    const auto value = mmu_read(addr, 1);
+    if (!value.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_reg32(rt, static_cast<std::uint8_t>(*value));
+    return true;
+  }
+
+  // STRB Wt, [Xn|SP, #imm12]
+  if ((insn & 0xFFC00000u) == 0x39000000u) {
+    const std::uint64_t imm12 = (insn >> 10) & 0xFFFu;
+    const std::uint64_t addr = sp_or_reg(rn) + imm12;
+    if (!mmu_write(addr, reg32(rt) & 0xFFu, 1)) {
+      data_abort(addr);
+      return true;
+    }
+    return true;
+  }
+
+  // LDRH Wt, [Xn|SP, #imm12]
+  if ((insn & 0xFFC00000u) == 0x79400000u) {
+    const std::uint64_t imm12 = (insn >> 10) & 0xFFFu;
+    const std::uint64_t addr = sp_or_reg(rn) + (imm12 << 1u);
+    const auto value = mmu_read(addr, 2);
+    if (!value.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_reg32(rt, static_cast<std::uint16_t>(*value));
+    return true;
+  }
+
+  // STRH Wt, [Xn|SP, #imm12]
+  if ((insn & 0xFFC00000u) == 0x79000000u) {
+    const std::uint64_t imm12 = (insn >> 10) & 0xFFFu;
+    const std::uint64_t addr = sp_or_reg(rn) + (imm12 << 1u);
+    if (!mmu_write(addr, reg32(rt) & 0xFFFFu, 2)) {
+      data_abort(addr);
+      return true;
+    }
+    return true;
+  }
+
+  return false;
+}
+
+bool Cpu::condition_holds(std::uint32_t cond) const {
+  const auto p = sysregs_.pstate();
+  switch (cond & 0xFu) {
+  case 0x0: return p.z;
+  case 0x1: return !p.z;
+  case 0x2: return p.c;
+  case 0x3: return !p.c;
+  case 0x4: return p.n;
+  case 0x5: return !p.n;
+  case 0x6: return p.v;
+  case 0x7: return !p.v;
+  case 0x8: return p.c && !p.z;
+  case 0x9: return !p.c || p.z;
+  case 0xA: return p.n == p.v;
+  case 0xB: return p.n != p.v;
+  case 0xC: return !p.z && (p.n == p.v);
+  case 0xD: return p.z || (p.n != p.v);
+  case 0xE: return true;
+  default: return false;
+  }
+}
+
+void Cpu::set_flags_add(std::uint64_t lhs, std::uint64_t rhs, std::uint64_t result, bool is_32bit) {
+  auto p = sysregs_.pstate();
+  const std::uint32_t sign_bit = is_32bit ? 31u : 63u;
+  const std::uint64_t mask = is_32bit ? 0xFFFFFFFFull : ~0ull;
+  const std::uint64_t l = lhs & mask;
+  const std::uint64_t r = rhs & mask;
+  const std::uint64_t res = result & mask;
+  p.n = ((res >> sign_bit) & 1u) != 0;
+  p.z = res == 0;
+  p.c = is_32bit ? (static_cast<std::uint32_t>(res) < static_cast<std::uint32_t>(l)) : (res < l);
+  const bool lhs_sign = ((l >> sign_bit) & 1u) != 0;
+  const bool rhs_sign = ((r >> sign_bit) & 1u) != 0;
+  const bool res_sign = ((res >> sign_bit) & 1u) != 0;
+  p.v = (lhs_sign == rhs_sign) && (lhs_sign != res_sign);
+  sysregs_.set_pstate(p);
+}
+
+void Cpu::set_flags_sub(std::uint64_t lhs, std::uint64_t rhs, std::uint64_t result, bool is_32bit) {
+  auto p = sysregs_.pstate();
+  const std::uint32_t sign_bit = is_32bit ? 31u : 63u;
+  const std::uint64_t mask = is_32bit ? 0xFFFFFFFFull : ~0ull;
+  const std::uint64_t l = lhs & mask;
+  const std::uint64_t r = rhs & mask;
+  const std::uint64_t res = result & mask;
+  p.n = ((res >> sign_bit) & 1u) != 0;
+  p.z = res == 0;
+  p.c = is_32bit ? (static_cast<std::uint32_t>(l) >= static_cast<std::uint32_t>(r)) : (l >= r);
+  const bool lhs_sign = ((l >> sign_bit) & 1u) != 0;
+  const bool rhs_sign = ((r >> sign_bit) & 1u) != 0;
+  const bool res_sign = ((res >> sign_bit) & 1u) != 0;
+  p.v = (lhs_sign != rhs_sign) && (lhs_sign != res_sign);
+  sysregs_.set_pstate(p);
+}
+
+void Cpu::set_flags_logic(std::uint64_t result, bool is_32bit) {
+  const std::uint64_t masked = is_32bit ? (result & 0xFFFFFFFFu) : result;
+  auto p = sysregs_.pstate();
+  p.n = is_32bit ? (((masked >> 31) & 1u) != 0) : (((masked >> 63) & 1u) != 0);
+  p.z = masked == 0;
+  p.c = false;
+  p.v = false;
+  sysregs_.set_pstate(p);
+}
+
+std::int64_t Cpu::sign_extend(std::uint64_t value, std::uint32_t bits) {
+  const std::uint64_t sign = 1ull << (bits - 1);
+  const std::uint64_t mask = (1ull << bits) - 1;
+  value &= mask;
+  return static_cast<std::int64_t>((value ^ sign) - sign);
+}
+
+} // namespace aarchvm
