@@ -1,0 +1,5 @@
+.cache/
+**/*.dtb
+**/*.bak
+u-boot-2026.01/
+build/
