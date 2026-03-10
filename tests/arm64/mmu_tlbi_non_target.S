@@ -29,43 +29,44 @@ _start:
     str  x2, [x22]
     orr  x2, x25, x9
     str  x2, [x24]
+    movz x15, #0x0403
 
     // Keep low VA identity for code + page tables.
     movz x3, #0x0000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #0]
     movz x3, #0x1000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #8]
     movz x3, #0x2000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #16]
     movz x3, #0x3000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #24]
     movz x3, #0x4000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #32]
     movz x3, #0x7000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #56]
     movz x3, #0x8000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #64]
 
     // VA0=0x40000000 -> PA 0x500000 (0x11)
     movz x3, #0x0050, lsl #16
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x25]
 
     // VA1=0x40001000 -> PA 0x510000 (0x22)
     movz x3, #0x0051, lsl #16
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x25, #8]
 
     // Alternate target for VA0: PA 0x520000 (0x33)
     movz x3, #0x0052, lsl #16
-    orr  x26, x3, x9
+    orr  x26, x3, x15
 
     movz x10, #0x0050, lsl #16
     movz x11, #0x11

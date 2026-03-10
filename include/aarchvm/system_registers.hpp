@@ -44,6 +44,7 @@ public:
   [[nodiscard]] std::uint64_t ttbr0_el1() const { return ttbr0_el1_; }
   [[nodiscard]] std::uint64_t ttbr1_el1() const { return ttbr1_el1_; }
   [[nodiscard]] std::uint64_t tcr_el1() const { return tcr_el1_; }
+  [[nodiscard]] std::uint64_t mair_el1() const { return mair_el1_; }
   void set_par_el1(std::uint64_t value) { par_el1_ = value; }
   [[nodiscard]] std::uint64_t elr_el1() const { return elr_el1_; }
   void set_elr_el1(std::uint64_t value) { elr_el1_ = value; }
@@ -75,6 +76,8 @@ private:
   std::uint64_t midr_el1_ = 0x00000000410FD034ull; // Cortex-A53 r0p4-like default
   std::uint64_t clidr_el1_ = 0;
   std::uint64_t ctr_el0_ = 0x8444C004ull;
+  std::uint64_t id_aa64mmfr0_el1_ = 0x0000000000000F05ull;
+  std::uint64_t id_aa64mmfr1_el1_ = 0;
   std::uint64_t id_aa64mmfr2_el1_ = 0;
   std::uint64_t csselr_el1_ = 0;
   std::uint64_t ccsidr_el1_ = 0;

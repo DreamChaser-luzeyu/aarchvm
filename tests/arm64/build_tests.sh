@@ -37,6 +37,12 @@ build_asm_prog mmu_tlbi_non_target
 build_asm_prog mmu_l2_block_vmalle1
 build_asm_prog mmu_at_tlb_observe
 build_asm_prog mmu_ttbr_asid_mask
+build_asm_prog mmu_perm_ro_write_abort
+build_asm_prog mmu_xn_fetch_abort
+build_asm_prog mmu_table_ap_inherit
+build_asm_prog mmu_table_pxn_inherit
+build_asm_prog mmu_tcr_ips_mair_decode
+build_asm_prog mmu_af_fault
 build_asm_prog sync_exception_regs
 build_asm_prog gic_timer_sysreg
 build_asm_prog bitfield_basic

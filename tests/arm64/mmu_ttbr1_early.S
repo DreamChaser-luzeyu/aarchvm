@@ -3,6 +3,7 @@
 _start:
     movz x1, #0
     movk x1, #0x0900, lsl #16      // UART
+    adr  x29, print_target
 
     movz x9, #3                     // descriptor bits
 
@@ -16,7 +17,7 @@ _start:
 
     // L1[0] block -> PA 0x0 (1GB block)
     movz x3, #0
-    movz x2, #1                     // valid block (bit1=0)
+    movz x2, #0x0401                  // valid block + AF
     add  x2, x3, x2
     str  x2, [x21]
 
@@ -49,6 +50,12 @@ _start:
     br   x14
 
 high_target:
+    br   x29
+
+print_target:
+    movz x2, #0
+    msr  sctlr_el1, x2
+    isb
     movz x0, #'K'
     str  x0, [x1]
     movz x0, #'\n'
@@ -56,6 +63,9 @@ high_target:
     brk  #0
 
 fail:
+    movz x2, #0
+    msr  sctlr_el1, x2
+    isb
     movz x0, #'F'
     str  x0, [x1]
     brk  #0

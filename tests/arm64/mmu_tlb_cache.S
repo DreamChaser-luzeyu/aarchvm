@@ -30,33 +30,34 @@ _start:
     str  x2, [x22]
     orr  x2, x25, x9
     str  x2, [x24]
+    movz x15, #0x0403
 
     // L3 low identity map required pages (code + page tables): 0x0..0x8fff
     movz x3, #0x0000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #0]
     movz x3, #0x1000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #8]
     movz x3, #0x2000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #16]
     movz x3, #0x3000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #24]
     movz x3, #0x4000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #32]
     movz x3, #0x7000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #56]
     movz x3, #0x8000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #64]
 
     // L3 high[0]: VA 0x40000000 -> PA 0x500000 (initial)
     movz x3, #0x0050, lsl #16       // 0x500000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x25]
 
     // Prepare physical pages data at 0x500000/0x600000/0x700000
@@ -99,7 +100,7 @@ _start:
 
     // Remap VA->PA 0x600000 but do not TLBI yet
     movz x3, #0x0060, lsl #16
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x25]
 
     // Should still hit old TLB mapping (0x11)
@@ -117,7 +118,7 @@ _start:
 
     // Remap to 0x700000 and global invalidate
     movz x3, #0x0070, lsl #16
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x25]
 
     tlbi vmalle1

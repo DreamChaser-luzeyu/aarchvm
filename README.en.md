@@ -10,7 +10,7 @@ This project is still a bring-up prototype, but now includes:
 - Minimal SoC model with RAM, PL011 UART, Generic Timer, and minimal GICv3.
 - Minimal IRQ closed loop (timer -> GIC -> vector -> `ERET`).
 - Minimal sync-exception closed loop with `ESR_EL1/FAR_EL1/ELR_EL1/SPSR_EL1`.
-- Minimal MMU/TLB path for Stage-1 translation with `TTBR0_EL1/TTBR1_EL1` (4KB-granule style).
+- Linux-oriented minimal MMU/TLB path for Stage-1 translation with `TTBR0_EL1/TTBR1_EL1` (4KB granule), including leaf permission/AF/XN checks, table-attribute inheritance, and `TCR.IPS` PA-size checks.
 - Minimal GICv3 system-register CPU interface + virtual timer sysreg path (`ICC_*`, `CNTV_*`).
 
 ## Build
@@ -69,7 +69,9 @@ System and maintenance:
 - `MSR DAIFSet/DAIFClr`, `MRS/MSR DAIF`
 - `MRS/MSR SPSel`, `MSR SPSel, #imm`
 - `DMB`, `DSB`, `ISB`, `CLREX`
-- `TLBI VMALLE1`, `TLBI VAE1, Xt`
+- `TLBI VMALLE1/VMALLE1IS`
+- `TLBI VAE1/VAE1IS/VALE1/VALE1IS, Xt`
+- `TLBI ASIDE1/ASIDE1IS, Xt`
 - `AT S1E1R`, `AT S1E1W`
 - `IC IALLU`, `IC IVAU, Xt`
 - `DC IVAC/CVAC/CIVAC, Xt`
@@ -79,23 +81,30 @@ System and maintenance:
 - `SCTLR_EL1`, `TTBR0_EL1`, `TTBR1_EL1`, `TCR_EL1`, `MAIR_EL1`, `VBAR_EL1`
 - `ELR_EL1`, `SPSR_EL1`, `ESR_EL1`, `FAR_EL1`, `SP_EL0`, `SP_EL1`, `SPSel`
 - `DAIF`, `NZCV`, `CURRENTEL`, `PAR_EL1`
+- `ID_AA64MMFR0_EL1`, `ID_AA64MMFR1_EL1`, `ID_AA64MMFR2_EL1`
 - `CNTFRQ_EL0`, `CNTPCT_EL0` (minimal alias), `CNTVCT_EL0`
 - `CNTV_CTL_EL0`, `CNTV_CVAL_EL0`, `CNTV_TVAL_EL0`
 - `ICC_IAR1_EL1`, `ICC_EOIR1_EL1`, `ICC_PMR_EL1`, `ICC_CTLR_EL1`, `ICC_SRE_EL1`
 
 ## MMU/TLB/Cache-Maintenance Model
 
-Current MMU model is intentionally minimal:
+Current MMU model is still intentionally scoped, but it now covers the Linux-relevant early pieces:
 - Stage-1 translation supports both `TTBR0_EL1` and `TTBR1_EL1`.
 - Simplified 4-level walk model with 4KB page granularity assumptions.
-- Supports 4KB-granule style start-level derivation from `TCR_EL1` (`T0SZ/T1SZ`).
-- Supports table descriptors and block/page descriptors for early-boot mappings.
-- Valid descriptors treated as table/page descriptors in a reduced form.
-- Software TLB cache exists and is affected by `TLBI` instructions.
-- `AT` updates `PAR_EL1` in a minimal way.
+- Start-level derivation from `TCR_EL1` (`T0SZ/T1SZ`) plus `EPD0/EPD1` gating.
+- `TCR.IPS` is decoded and used to reject output addresses or next-level table bases that exceed the configured PA size.
+- Translation-walk attributes from `TCR_EL1` (`IRGNx/ORGNx/SHx`) are decoded and carried through translation results/TLB entries.
+- Leaf memory attributes from `MAIR_EL1` (`AttrIndx -> MAIR byte`) are decoded and stored in the translation result/TLB entry.
+- Table descriptors and block/page descriptors are supported for early-boot mappings.
+- Table-attribute inheritance is modelled for `APTable[1]` (write-protect) and `PXNTable/UXNTable`.
+- Leaf attribute checks cover `AF`, `AP[2]` (EL1 read-only), and execute-never handling.
+- Software TLB entries cache translated PA plus effective permission/attribute state after inheritance.
+- `TLBI` invalidation supports the common EL1 local/inner-shareable aliases used by early firmware/kernel code.
+- `AT S1E1R/S1E1W` bypasses the software TLB, performs a fresh walk, and reports success/fault state through `PAR_EL1`.
+- Translation/access-flag/permission/address-size faults are reflected into abort ISS low bits so ESR is useful during bring-up.
 - `IC/DC` maintenance instructions are decoded and executed with minimal functional semantics.
 
-This is not a full architectural MMU/cache implementation yet.
+This is still not a full architectural MMU/cache implementation: shareability and memory type are decoded but not yet driving real memory ordering/device side effects, DBM/dirty-state updates are absent, table attribute coverage is partial, and ASID-tagged TLB behavior remains simplified.
 
 ## Test Suite
 
@@ -115,15 +124,38 @@ Key outputs (in order):
 - `E` (`instr_legacy_each.bin`: previously implemented instructions checked one-by-one)
 - `Q` (`mmu_tlb_cache.bin`: MMU/TLB/cache-maintenance path)
 - `K` (`mmu_ttbr1_early.bin`: TTBR1 high-VA early mapping/fetch path)
+- `1` (`mmu_tlb_vae1_scope.bin`: per-VA invalidation only changes the targeted page)
+- `2` (`mmu_ttbr_switch.bin`: TTBR0 switch updates the active translation regime)
+- `3` (`mmu_unmap_data_abort.bin`: unmap + `TLBI` produces a data abort)
 - `4` (`mmu_tlbi_non_target.bin`: `TLBI VAE1` invalidates only the target VA)
 - `5` (`mmu_l2_block_vmalle1.bin`: L2 block remap + `TLBI VMALLE1` visibility)
-- `6` (`mmu_at_tlb_observe.bin`: `AT/PAR_EL1` behavior before/after TLB invalidation)
+- `6` (`mmu_at_tlb_observe.bin`: `AT/PAR_EL1` observes fresh page walks while data access still sees stale TLB state before invalidation)
 - `7` (`mmu_ttbr_asid_mask.bin`: `TTBR0_EL1` ASID bits + table-base masking behavior)
+- `8` (`mmu_perm_ro_write_abort.bin`: EL1 read-only mapping rejects writes with a permission fault)
+- `9` (`mmu_xn_fetch_abort.bin`: execute-never mapping blocks fetch until PTE update + `TLBI`)
+- `H` (`mmu_table_ap_inherit.bin`: `APTable` write-protect is inherited by lower-level leaves)
+- `Y` (`mmu_table_pxn_inherit.bin`: `PXNTable` blocks fetch until the upper table descriptor is fixed and invalidated)
+- `Z` (`mmu_tcr_ips_mair_decode.bin`: `TCR.IPS` is enforced on translated PA size, while `AttrIndx/MAIR` paths are exercised)
+- `0` (`mmu_af_fault.bin`: access-flag fault is reported until `AF` is set and `TLBI` is issued)
 - `X` (`sync_exception_regs.bin`: sync exception + ESR/FAR/ELR/SPSR path)
 - `G` (`gic_timer_sysreg.bin`: minimal GICv3 sysreg + CNTV sysreg IRQ path)
 - `U` (`bitfield_basic.bin`: bitfield-immediate/shift aliases + CNTPCT path)
 - `V` (`p1_core.bin`: EXTR/ROR + CSINC/CSET + UDIV/SDIV + LDRSW family)
 - `ASM B C S IM T D W P L M R` (existing functional tests)
+
+## What Still Blocks Linux Boot
+
+The MMU/TLB path is now strong enough for early page-table bring-up, but Linux still needs several major pieces before a real kernel boot is realistic:
+- A larger AArch64 ISA subset, especially atomics/exclusive sequences (`LDXR/STXR`, `LDAXR/STLXR`, CAS-style atomics), more system instructions, and additional load/store forms used deeper in kernel init.
+- More complete exception-level and privilege handling: EL2/EL3 boot paths, `HCR_EL2`, `SCR_EL3`, `VBAR_EL2/EL3`, and realistic `ERET` flows when entering the kernel from different firmware paths.
+- More complete system register coverage, especially ID registers, timer/control registers, and MMU-related sysregs that Linux probes during CPU feature detection.
+- Richer MMU semantics: full MAIR memory-type behavior, more complete table attribute propagation, ASID-aware TLB behavior, dirty/DBM handling, break-before-make corner cases, and eventually EL0 permission semantics.
+- A more complete GICv3 model, especially MMIO distributor/redistributor coverage beyond the current minimal sysreg CPU interface.
+- PSCI/SMCCC support for the boot chain and for the kernel's power-management / CPU-interface expectations.
+- More complete timer support beyond the current minimal virtual timer path.
+- Additional device models needed after very early boot: storage, block/network, and often virtio if a practical Linux userspace boot is the goal.
+- Multi-core/SMP support.
+- Real cache and barrier side effects. Decoding maintenance instructions is no longer enough once Linux starts relying on stronger memory-model interactions.
 
 ## Reference
 

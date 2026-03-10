@@ -25,36 +25,39 @@ _start:
     // L2 low[0] -> L3 low.
     orr  x2, x23, x9
     str  x2, [x22]
+    movz x15, #0x0403
 
     // Keep low VA identity for code + page tables.
     movz x3, #0x0000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #0]
     movz x3, #0x1000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #8]
     movz x3, #0x2000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #16]
     movz x3, #0x3000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #24]
     movz x3, #0x4000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #32]
     movz x3, #0x7000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #56]
 
     // L2 high[0] block descriptor: bit1=0, bit0=1.
     // VA 0x40000000..+2MB -> PA 0x600000 (A)
     movz x3, #0x0060, lsl #16
-    orr  x2, x3, #1
+    movz x2, #0x0401
+    add  x2, x3, x2
     str  x2, [x24]
 
     // Alternate block target B.
     movz x3, #0x0080, lsl #16
-    orr  x25, x3, #1
+    movz x25, #0x0401
+    add  x25, x3, x25
 
     // Place payload at +0x1000 inside each 2MB block.
     movz x10, #0x0060, lsl #16

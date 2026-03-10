@@ -24,6 +24,12 @@ run mmu_tlbi_non_target.bin 4000000
 run mmu_l2_block_vmalle1.bin 4000000
 run mmu_at_tlb_observe.bin 4000000
 run mmu_ttbr_asid_mask.bin 4000000
+run mmu_perm_ro_write_abort.bin 4000000
+run mmu_xn_fetch_abort.bin 4000000
+run mmu_table_ap_inherit.bin 4000000
+run mmu_table_pxn_inherit.bin 4000000
+run mmu_tcr_ips_mair_decode.bin 4000000
+run mmu_af_fault.bin 4000000
 run sync_exception_regs.bin 2000000
 run gic_timer_sysreg.bin 2000000
 run bitfield_basic.bin 400000

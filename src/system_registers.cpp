@@ -20,6 +20,8 @@ void SystemRegisters::reset() {
   midr_el1_ = 0x00000000410FD034ull;
   clidr_el1_ = 0;
   ctr_el0_ = 0x8444C004ull;
+  id_aa64mmfr0_el1_ = 0x0000000000000F05ull;
+  id_aa64mmfr1_el1_ = 0;
   id_aa64mmfr2_el1_ = 0;
   csselr_el1_ = 0;
   ccsidr_el1_ = 0;
@@ -57,6 +59,8 @@ bool SystemRegisters::read(std::uint32_t op0,
   case SysReg(3, 0, 2, 0, 1): value = ttbr1_el1_; return true;
   case SysReg(3, 0, 2, 0, 2): value = tcr_el1_; return true;
   case SysReg(3, 1, 0, 0, 1): value = clidr_el1_; return true;
+  case SysReg(3, 0, 0, 7, 0): value = id_aa64mmfr0_el1_; return true;
+  case SysReg(3, 0, 0, 7, 1): value = id_aa64mmfr1_el1_; return true;
   case SysReg(3, 0, 0, 7, 2): value = id_aa64mmfr2_el1_; return true;
   case SysReg(3, 0, 10, 2, 0): value = mair_el1_; return true;
   case SysReg(3, 0, 12, 0, 0): value = vbar_el1_; return true;

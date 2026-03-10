@@ -128,6 +128,7 @@ void Cpu::reset(std::uint64_t pc) {
   icc_ctlr_el1_ = 0;
   icc_sre_el1_ = 0;
   tlb_page_map_.clear();
+  last_translation_fault_.reset();
   pc_ = pc;
   steps_ = 0;
   halted_ = false;
@@ -166,13 +167,14 @@ bool Cpu::step() {
     return true;
   }
 
-  const auto fetch_pa = translate_address(pc_, AccessType::Fetch, true);
-  if (!fetch_pa.has_value()) {
-    enter_sync_exception(pc_, 0x21u, 0u, true, pc_);
+  const auto fetch_result = translate_address(pc_, AccessType::Fetch, true);
+  if (!fetch_result.has_value()) {
+    const std::uint32_t iss = last_translation_fault_.has_value() ? fault_status_code(*last_translation_fault_) : 0u;
+    enter_sync_exception(pc_, 0x21u, iss, true, pc_);
     return true;
   }
 
-  const auto fetch = bus_.read(*fetch_pa, 4);
+  const auto fetch = bus_.read(fetch_result->pa, 4);
   if (!fetch.has_value()) {
     enter_sync_exception(pc_, 0x21u, 0u, true, pc_);
     return true;
@@ -282,45 +284,102 @@ void Cpu::enter_sync_exception(std::uint64_t fault_pc,
   pc_ = sysregs_.vbar_el1() + (sysregs_.use_sp_elx() ? 0x200 : 0x0);
 }
 
-std::optional<std::uint64_t> Cpu::translate_address(std::uint64_t va, AccessType access, bool allow_tlb_fill) {
-  (void)access;
+std::optional<Cpu::TranslationResult> Cpu::translate_address(std::uint64_t va,
+                                                             AccessType access,
+                                                             bool allow_tlb_fill,
+                                                             bool use_tlb) {
+  last_translation_fault_.reset();
 
   if (!sysregs_.mmu_enabled()) {
-    return va;
+    TranslationResult result{};
+    result.pa = va;
+    result.level = 3;
+    result.attr_index = 0;
+    result.mair_attr = 0;
+    result.writable = true;
+    result.executable = true;
+    result.pxn = false;
+    result.uxn = false;
+    result.memory_type = MemoryType::Normal;
+    result.leaf_shareability = Shareability::InnerShareable;
+    result.walk_attrs = decode_walk_attributes(false);
+    return result;
   }
 
   const std::uint64_t page = va >> 12;
   const std::uint64_t off = va & 0xFFFull;
 
-  const auto hit = tlb_page_map_.find(page);
-  if (hit != tlb_page_map_.end()) {
-    return (hit->second << 12) | off;
+  if (use_tlb) {
+    const auto hit = tlb_page_map_.find(page);
+    if (hit != tlb_page_map_.end()) {
+      TranslationResult result{};
+      result.pa = (hit->second.pa_page << 12) | off;
+      result.level = hit->second.level;
+      result.attr_index = hit->second.attr_index;
+      result.mair_attr = hit->second.mair_attr;
+      result.writable = hit->second.writable;
+      result.executable = hit->second.executable;
+      result.pxn = hit->second.pxn;
+      result.uxn = hit->second.uxn;
+      result.memory_type = hit->second.memory_type;
+      result.leaf_shareability = hit->second.leaf_shareability;
+      result.walk_attrs = hit->second.walk_attrs;
+      TranslationFault fault{};
+      if (!access_permitted(result, access, result.level, &fault)) {
+        last_translation_fault_ = fault;
+        return std::nullopt;
+      }
+      return result;
+    }
   }
 
-  const auto pa = walk_page_tables(va);
-  if (!pa.has_value()) {
+  TranslationFault fault{};
+  const auto result = walk_page_tables(va, access, &fault);
+  if (!result.has_value()) {
+    last_translation_fault_ = fault;
     return std::nullopt;
   }
 
   if (allow_tlb_fill) {
-    tlb_page_map_[page] = (*pa >> 12);
+    tlb_page_map_[page] = TlbEntry{
+        .pa_page = result->pa >> 12,
+        .level = result->level,
+        .attr_index = result->attr_index,
+        .mair_attr = result->mair_attr,
+        .writable = result->writable,
+        .executable = result->executable,
+        .pxn = result->pxn,
+        .uxn = result->uxn,
+        .memory_type = result->memory_type,
+        .leaf_shareability = result->leaf_shareability,
+        .walk_attrs = result->walk_attrs,
+    };
   }
-  return *pa;
+  return result;
 }
 
-std::optional<std::uint64_t> Cpu::walk_page_tables(std::uint64_t va) {
+std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
+                                                            AccessType access,
+                                                            TranslationFault* fault) {
   const std::uint64_t tcr = sysregs_.tcr_el1();
   const bool va_upper = (va >> 63) != 0;
+  const WalkAttributes walk_attrs = decode_walk_attributes(va_upper);
 
   const std::uint32_t txsz = va_upper
       ? static_cast<std::uint32_t>((tcr >> 16) & 0x3Fu)
       : static_cast<std::uint32_t>(tcr & 0x3Fu);
   if (txsz > 39) {
+    if (fault != nullptr) {
+      *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize, .level = 0, .write = access == AccessType::Write};
+    }
     return std::nullopt;
   }
 
   const std::uint32_t va_bits = 64u - txsz;
   if (va_bits < 12u || va_bits > 48u) {
+    if (fault != nullptr) {
+      *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize, .level = 0, .write = access == AccessType::Write};
+    }
     return std::nullopt;
   }
 
@@ -329,28 +388,52 @@ std::optional<std::uint64_t> Cpu::walk_page_tables(std::uint64_t va) {
       : static_cast<std::uint32_t>((tcr >> 14) & 0x3u);
   // 4KB granule only: TG0==00, TG1==10.
   if ((!va_upper && tg != 0u) || (va_upper && tg != 2u)) {
+    if (fault != nullptr) {
+      *fault = TranslationFault{.kind = TranslationFault::Kind::Translation, .level = 0, .write = access == AccessType::Write};
+    }
     return std::nullopt;
   }
 
-  // Address-space range check for TTBR0/TTBR1 selection.
+  const bool epd = va_upper ? (((tcr >> 23) & 0x1u) != 0) : (((tcr >> 7) & 0x1u) != 0);
+  if (epd) {
+    if (fault != nullptr) {
+      *fault = TranslationFault{.kind = TranslationFault::Kind::Translation, .level = 0, .write = access == AccessType::Write};
+    }
+    return std::nullopt;
+  }
+
   const std::uint64_t low_limit = (va_bits == 64u) ? ~0ull : ((1ull << va_bits) - 1ull);
   if (!va_upper && va > low_limit) {
+    if (fault != nullptr) {
+      *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize, .level = 0, .write = access == AccessType::Write};
+    }
     return std::nullopt;
   }
   if (va_upper && va_bits < 64u) {
     const std::uint64_t upper_tag_mask = ~low_limit;
     if ((va & upper_tag_mask) != upper_tag_mask) {
+      if (fault != nullptr) {
+        *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize, .level = 0, .write = access == AccessType::Write};
+      }
       return std::nullopt;
     }
   }
 
   std::uint64_t table_base = va_upper ? sysregs_.ttbr1_el1() : sysregs_.ttbr0_el1();
-  // TTBR contains non-address fields (e.g. ASID). Keep only PA[47:12].
   table_base &= 0x0000FFFFFFFFF000ull;
+  if (!pa_within_ips(table_base, walk_attrs.ips_bits)) {
+    if (fault != nullptr) {
+      *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize, .level = 0, .write = access == AccessType::Write};
+    }
+    return std::nullopt;
+  }
 
   const std::uint32_t levels = (va_bits <= 12u) ? 1u : ((va_bits - 12u + 8u) / 9u);
   const std::uint32_t start_level = 4u - levels;
   if (start_level > 3u) {
+    if (fault != nullptr) {
+      *fault = TranslationFault{.kind = TranslationFault::Kind::Translation, .level = 0, .write = access == AccessType::Write};
+    }
     return std::nullopt;
   }
 
@@ -361,45 +444,243 @@ std::optional<std::uint64_t> Cpu::walk_page_tables(std::uint64_t va) {
       (va >> 12) & 0x1FFu,
   };
 
+  TableAttrs inherited{};
   for (std::uint32_t level = start_level; level < 4u; ++level) {
     const std::uint64_t desc_addr = table_base + idx[level] * 8u;
     const auto desc_opt = bus_.read(desc_addr, 8);
     if (!desc_opt.has_value()) {
+      if (fault != nullptr) {
+        *fault = TranslationFault{.kind = TranslationFault::Kind::Translation,
+                                  .level = static_cast<std::uint8_t>(level),
+                                  .write = access == AccessType::Write};
+      }
       return std::nullopt;
     }
+
     const std::uint64_t desc = *desc_opt;
     const bool valid = (desc & 1u) != 0;
     const bool bit1 = (desc & 2u) != 0;
     if (!valid) {
+      if (fault != nullptr) {
+        *fault = TranslationFault{.kind = TranslationFault::Kind::Translation,
+                                  .level = static_cast<std::uint8_t>(level),
+                                  .write = access == AccessType::Write};
+      }
       return std::nullopt;
     }
 
     if (level == 3u) {
       if (!bit1) {
+        if (fault != nullptr) {
+          *fault = TranslationFault{.kind = TranslationFault::Kind::Translation,
+                                    .level = static_cast<std::uint8_t>(level),
+                                    .write = access == AccessType::Write};
+        }
         return std::nullopt;
       }
+
+      const bool af = ((desc >> 10) & 0x1u) != 0;
+      const bool leaf_ro = ((desc >> 7) & 0x1u) != 0;
+      const bool pxn = ((desc >> 53) & 0x1u) != 0;
+      const bool uxn = ((desc >> 54) & 0x1u) != 0;
+      const std::uint8_t attr_index = static_cast<std::uint8_t>((desc >> 2) & 0x7u);
+      const std::uint8_t mair_attr = static_cast<std::uint8_t>((sysregs_.mair_el1() >> (attr_index * 8u)) & 0xFFu);
       const std::uint64_t page_base = desc & 0x0000FFFFFFFFF000ull;
-      return page_base | (va & 0xFFFull);
+      if (!pa_within_ips(page_base, walk_attrs.ips_bits)) {
+        if (fault != nullptr) {
+          *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize,
+                                    .level = static_cast<std::uint8_t>(level),
+                                    .write = access == AccessType::Write};
+        }
+        return std::nullopt;
+      }
+
+      TranslationResult result{};
+      result.pa = page_base | (va & 0xFFFull);
+      result.level = static_cast<std::uint8_t>(level);
+      result.attr_index = attr_index;
+      result.mair_attr = mair_attr;
+      result.writable = !(leaf_ro || inherited.write_protect);
+      result.pxn = pxn || inherited.pxn;
+      result.uxn = uxn || inherited.uxn;
+      result.executable = !(result.pxn || result.uxn);
+      result.memory_type = decode_memory_type(mair_attr);
+      result.leaf_shareability = static_cast<Shareability>((desc >> 8) & 0x3u);
+      result.walk_attrs = walk_attrs;
+      if (!af) {
+        if (fault != nullptr) {
+          *fault = TranslationFault{.kind = TranslationFault::Kind::AccessFlag,
+                                    .level = static_cast<std::uint8_t>(level),
+                                    .write = access == AccessType::Write};
+        }
+        return std::nullopt;
+      }
+      if (!access_permitted(result, access, static_cast<std::uint8_t>(level), fault)) {
+        return std::nullopt;
+      }
+      return result;
     }
 
     if (bit1) {
+      inherited.write_protect = inherited.write_protect || (((desc >> 62) & 0x1u) != 0);
+      inherited.uxn = inherited.uxn || (((desc >> 60) & 0x1u) != 0);
+      inherited.pxn = inherited.pxn || (((desc >> 59) & 0x1u) != 0);
       table_base = desc & 0x0000FFFFFFFFF000ull;
+      if (!pa_within_ips(table_base, walk_attrs.ips_bits)) {
+        if (fault != nullptr) {
+          *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize,
+                                    .level = static_cast<std::uint8_t>(level),
+                                    .write = access == AccessType::Write};
+        }
+        return std::nullopt;
+      }
       continue;
     }
 
-    // Block descriptor (L1:1GB, L2:2MB). L0 block unsupported for 4KB granule.
     if (level == 0u) {
+      if (fault != nullptr) {
+        *fault = TranslationFault{.kind = TranslationFault::Kind::Translation,
+                                  .level = static_cast<std::uint8_t>(level),
+                                  .write = access == AccessType::Write};
+      }
       return std::nullopt;
     }
+
+    const bool af = ((desc >> 10) & 0x1u) != 0;
+    const bool leaf_ro = ((desc >> 7) & 0x1u) != 0;
+    const bool pxn = ((desc >> 53) & 0x1u) != 0;
+    const bool uxn = ((desc >> 54) & 0x1u) != 0;
+    const std::uint8_t attr_index = static_cast<std::uint8_t>((desc >> 2) & 0x7u);
+    const std::uint8_t mair_attr = static_cast<std::uint8_t>((sysregs_.mair_el1() >> (attr_index * 8u)) & 0xFFu);
     const std::uint32_t page_off_bits = 12u + 9u * (3u - level);
     const std::uint64_t block_mask = (1ull << page_off_bits) - 1ull;
-    // Block address is in PA bits, while high bits may hold attributes.
     std::uint64_t pa_base = desc & 0x0000FFFFFFFFF000ull;
     pa_base &= ~block_mask;
-    return pa_base | (va & block_mask);
+    if (!pa_within_ips(pa_base, walk_attrs.ips_bits)) {
+      if (fault != nullptr) {
+        *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize,
+                                  .level = static_cast<std::uint8_t>(level),
+                                  .write = access == AccessType::Write};
+      }
+      return std::nullopt;
+    }
+
+    TranslationResult result{};
+    result.pa = pa_base | (va & block_mask);
+    result.level = static_cast<std::uint8_t>(level);
+    result.attr_index = attr_index;
+    result.mair_attr = mair_attr;
+    result.writable = !(leaf_ro || inherited.write_protect);
+    result.pxn = pxn || inherited.pxn;
+    result.uxn = uxn || inherited.uxn;
+    result.executable = !(result.pxn || result.uxn);
+    result.memory_type = decode_memory_type(mair_attr);
+    result.leaf_shareability = static_cast<Shareability>((desc >> 8) & 0x3u);
+    result.walk_attrs = walk_attrs;
+    if (!af) {
+      if (fault != nullptr) {
+        *fault = TranslationFault{.kind = TranslationFault::Kind::AccessFlag,
+                                  .level = static_cast<std::uint8_t>(level),
+                                  .write = access == AccessType::Write};
+      }
+      return std::nullopt;
+    }
+    if (!access_permitted(result, access, static_cast<std::uint8_t>(level), fault)) {
+      return std::nullopt;
+    }
+    return result;
   }
 
   return std::nullopt;
+}
+
+bool Cpu::access_permitted(const TranslationResult& result,
+                           AccessType access,
+                           std::uint8_t level,
+                           TranslationFault* fault) const {
+  if (access == AccessType::Write && !result.writable) {
+    if (fault != nullptr) {
+      *fault = TranslationFault{.kind = TranslationFault::Kind::Permission, .level = level, .write = true};
+    }
+    return false;
+  }
+  if (access == AccessType::Fetch && !result.executable) {
+    if (fault != nullptr) {
+      *fault = TranslationFault{.kind = TranslationFault::Kind::Permission, .level = level, .write = false};
+    }
+    return false;
+  }
+  return true;
+}
+
+std::uint32_t Cpu::fault_status_code(const TranslationFault& fault) const {
+  const std::uint32_t level = fault.level & 0x3u;
+  std::uint32_t fsc = 0;
+  switch (fault.kind) {
+  case TranslationFault::Kind::AddressSize:
+    fsc = level;
+    break;
+  case TranslationFault::Kind::Translation:
+    fsc = 0x4u + level;
+    break;
+  case TranslationFault::Kind::AccessFlag:
+    fsc = 0x8u + level;
+    break;
+  case TranslationFault::Kind::Permission:
+    fsc = 0xCu + level;
+    break;
+  }
+  return fsc | (fault.write ? (1u << 6) : 0u);
+}
+
+void Cpu::set_par_el1_for_fault(const TranslationFault& fault) {
+  sysregs_.set_par_el1(1ull | (static_cast<std::uint64_t>(fault_status_code(fault) & 0x7Fu) << 1));
+}
+
+Cpu::WalkAttributes Cpu::decode_walk_attributes(bool va_upper) const {
+  const std::uint64_t tcr = sysregs_.tcr_el1();
+  const std::uint32_t irgn = va_upper ? static_cast<std::uint32_t>((tcr >> 24) & 0x3u)
+                                      : static_cast<std::uint32_t>((tcr >> 8) & 0x3u);
+  const std::uint32_t orgn = va_upper ? static_cast<std::uint32_t>((tcr >> 26) & 0x3u)
+                                      : static_cast<std::uint32_t>((tcr >> 10) & 0x3u);
+  const std::uint32_t sh = va_upper ? static_cast<std::uint32_t>((tcr >> 28) & 0x3u)
+                                    : static_cast<std::uint32_t>((tcr >> 12) & 0x3u);
+  WalkAttributes attrs{};
+  attrs.inner = static_cast<Cacheability>(irgn);
+  attrs.outer = static_cast<Cacheability>(orgn);
+  attrs.shareability = static_cast<Shareability>(sh);
+  attrs.ips_bits = decode_ips_bits();
+  return attrs;
+}
+
+Cpu::MemoryType Cpu::decode_memory_type(std::uint8_t mair_attr) const {
+  if ((mair_attr & 0xF0u) == 0x00u) {
+    return MemoryType::Device;
+  }
+  if ((mair_attr & 0xF0u) != 0x00u) {
+    return MemoryType::Normal;
+  }
+  return MemoryType::Unknown;
+}
+
+std::uint8_t Cpu::decode_ips_bits() const {
+  switch ((sysregs_.tcr_el1() >> 32) & 0x7u) {
+  case 0u: return 32;
+  case 1u: return 36;
+  case 2u: return 40;
+  case 3u: return 42;
+  case 4u: return 44;
+  case 5u: return 48;
+  case 6u: return 52;
+  default: return 48;
+  }
+}
+
+bool Cpu::pa_within_ips(std::uint64_t pa, std::uint8_t ips_bits) const {
+  if (ips_bits >= 64u) {
+    return true;
+  }
+  return (pa >> ips_bits) == 0;
 }
 
 void Cpu::tlb_flush_all() {
@@ -527,16 +808,27 @@ bool Cpu::exec_system(std::uint32_t insn) {
     return true;
   }
 
-  // TLBI VMALLE1
-  if (insn == 0xD508871Fu) {
+  // TLBI VMALLE1 / VMALLE1IS
+  if (insn == 0xD508871Fu || insn == 0xD508831Fu) {
     tlb_flush_all();
     return true;
   }
 
-  // TLBI VAE1, Xt
-  if ((insn & 0xFFFFFFE0u) == 0xD5088720u) {
+  // TLBI VAE1/VAE1IS/VALE1/VALE1IS, Xt
+  if ((insn & 0xFFFFFFE0u) == 0xD5088720u ||
+      (insn & 0xFFFFFFE0u) == 0xD5088320u ||
+      (insn & 0xFFFFFFE0u) == 0xD50887A0u ||
+      (insn & 0xFFFFFFE0u) == 0xD50883A0u) {
     const std::uint32_t rt = insn & 0x1Fu;
     tlb_flush_va(reg(rt));
+    return true;
+  }
+
+  // TLBI ASIDE1 / ASIDE1IS, Xt.
+  // ASID tagging is not modelled yet, so invalidate the whole software TLB.
+  if ((insn & 0xFFFFFFE0u) == 0xD5088740u ||
+      (insn & 0xFFFFFFE0u) == 0xD5088340u) {
+    tlb_flush_all();
     return true;
   }
 
@@ -583,16 +875,28 @@ bool Cpu::exec_system(std::uint32_t insn) {
   // AT S1E1R, Xt
   if ((insn & 0xFFFFFFE0u) == 0xD5087800u) {
     const std::uint32_t rt = insn & 0x1Fu;
-    const auto pa = translate_address(reg(rt), AccessType::Read, false);
-    sysregs_.set_par_el1(pa.has_value() ? (*pa & 0x0000FFFFFFFFF000ull) : 1ull);
+    const auto result = translate_address(reg(rt), AccessType::Read, false, false);
+    if (result.has_value()) {
+      sysregs_.set_par_el1(result->pa & 0x0000FFFFFFFFF000ull);
+    } else if (last_translation_fault_.has_value()) {
+      set_par_el1_for_fault(*last_translation_fault_);
+    } else {
+      sysregs_.set_par_el1(1ull);
+    }
     return true;
   }
 
   // AT S1E1W, Xt
   if ((insn & 0xFFFFFFE0u) == 0xD5087820u) {
     const std::uint32_t rt = insn & 0x1Fu;
-    const auto pa = translate_address(reg(rt), AccessType::Write, false);
-    sysregs_.set_par_el1(pa.has_value() ? (*pa & 0x0000FFFFFFFFF000ull) : 1ull);
+    const auto result = translate_address(reg(rt), AccessType::Write, false, false);
+    if (result.has_value()) {
+      sysregs_.set_par_el1(result->pa & 0x0000FFFFFFFFF000ull);
+    } else if (last_translation_fault_.has_value()) {
+      set_par_el1_for_fault(*last_translation_fault_);
+    } else {
+      sysregs_.set_par_el1(1ull);
+    }
     return true;
   }
 
@@ -1535,21 +1839,22 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
   const std::uint32_t rt = insn & 0x1Fu;
   const std::uint32_t rn = (insn >> 5) & 0x1Fu;
   const auto data_abort = [this](std::uint64_t va) {
-    enter_sync_exception(pc_ - 4, 0x25u, 0u, true, va);
+    const std::uint32_t iss = last_translation_fault_.has_value() ? fault_status_code(*last_translation_fault_) : 0u;
+    enter_sync_exception(pc_ - 4, 0x25u, iss, true, va);
   };
   const auto mmu_read = [this](std::uint64_t va, std::size_t size) -> std::optional<std::uint64_t> {
-    const auto pa = translate_address(va, AccessType::Read, true);
-    if (!pa.has_value()) {
+    const auto result = translate_address(va, AccessType::Read, true);
+    if (!result.has_value()) {
       return std::nullopt;
     }
-    return bus_.read(*pa, size);
+    return bus_.read(result->pa, size);
   };
   const auto mmu_write = [this](std::uint64_t va, std::uint64_t value, std::size_t size) -> bool {
-    const auto pa = translate_address(va, AccessType::Write, true);
-    if (!pa.has_value()) {
+    const auto result = translate_address(va, AccessType::Write, true);
+    if (!result.has_value()) {
       return false;
     }
-    return bus_.write(*pa, value, size);
+    return bus_.write(result->pa, value, size);
   };
 
   // LDR/STR (register offset), minimal subset used by U-Boot.

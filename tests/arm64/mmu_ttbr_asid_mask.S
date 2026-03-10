@@ -23,32 +23,33 @@ _start:
     str  x2, [x22]
     orr  x2, x25, x9
     str  x2, [x24]
+    movz x15, #0x0403
 
     // Keep low VA identity for code + page tables.
     movz x3, #0x0000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #0]
     movz x3, #0x1000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #8]
     movz x3, #0x2000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #16]
     movz x3, #0x3000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #24]
     movz x3, #0x4000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #32]
     movz x3, #0x7000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #56]
     movz x3, #0x8000
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x23, #64]
 
     movz x3, #0x0050, lsl #16
-    orr  x2, x3, x9
+    orr  x2, x3, x15
     str  x2, [x25]
 
     movz x10, #0x0050, lsl #16
