@@ -1,3 +1,5 @@
+#include <cstdlib>
+
 #include "aarchvm/soc.hpp"
 
 namespace aarchvm {
@@ -26,6 +28,13 @@ SoC::SoC()
   bus_.map(kUartBase, kUartSize, uart_);
   bus_.map(kGicBase, kGicSize, gic_);
   bus_.map(kTimerBase, kTimerSize, timer_);
+
+  if (const char* scale_env = std::getenv("AARCHVM_TIMER_SCALE")) {
+    const unsigned long long scale = std::strtoull(scale_env, nullptr, 0);
+    if (scale > 0) {
+      timer_tick_scale_ = static_cast<std::uint64_t>(scale);
+    }
+  }
 
   cpu_.reset(kBootRamBase);
 }
@@ -70,7 +79,7 @@ void SoC::inject_uart_rx(std::uint8_t byte) {
 
 bool SoC::run(std::size_t max_steps) {
   for (std::size_t i = 0; i < max_steps; ++i) {
-    timer_->tick(1);
+    timer_->tick(timer_tick_scale_);
     if (timer_->irq_pending()) {
       gic_->set_pending(kTimerIntId);
       timer_->clear_irq();
@@ -97,6 +106,34 @@ std::uint64_t SoC::pc() const {
 
 std::uint64_t SoC::steps() const {
   return cpu_.steps();
+}
+
+std::uint64_t SoC::x(std::uint32_t idx) const {
+  return cpu_.x(idx);
+}
+
+std::uint64_t SoC::sp() const {
+  return cpu_.sp();
+}
+
+std::uint64_t SoC::uart_tx_count() const {
+  return uart_->tx_count();
+}
+
+std::uint64_t SoC::uart_mmio_reads() const {
+  return uart_->mmio_reads();
+}
+
+std::uint64_t SoC::uart_mmio_writes() const {
+  return uart_->mmio_writes();
+}
+
+std::uint64_t SoC::uart_config_writes() const {
+  return uart_->config_writes();
+}
+
+std::uint64_t SoC::uart_id_reads() const {
+  return uart_->id_reads();
 }
 
 } // namespace aarchvm

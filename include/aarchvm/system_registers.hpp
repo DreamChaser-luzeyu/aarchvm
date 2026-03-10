@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 
 namespace aarchvm {
@@ -45,12 +46,18 @@ public:
   [[nodiscard]] std::uint64_t ttbr1_el1() const { return ttbr1_el1_; }
   [[nodiscard]] std::uint64_t tcr_el1() const { return tcr_el1_; }
   [[nodiscard]] std::uint64_t mair_el1() const { return mair_el1_; }
+  [[nodiscard]] std::uint64_t contextidr_el1() const { return contextidr_el1_; }
   void set_par_el1(std::uint64_t value) { par_el1_ = value; }
   [[nodiscard]] std::uint64_t elr_el1() const { return elr_el1_; }
   void set_elr_el1(std::uint64_t value) { elr_el1_ = value; }
   [[nodiscard]] std::uint64_t spsr_el1() const { return spsr_el1_; }
   [[nodiscard]] std::uint64_t esr_el1() const { return esr_el1_; }
   [[nodiscard]] std::uint64_t far_el1() const { return far_el1_; }
+  [[nodiscard]] std::uint64_t mdscr_el1() const { return mdscr_el1_; }
+  [[nodiscard]] std::uint64_t tpidr_el0() const { return tpidr_el0_; }
+  [[nodiscard]] std::uint64_t tpidrro_el0() const { return tpidrro_el0_; }
+  [[nodiscard]] std::uint64_t tpidr_el1() const { return tpidr_el1_; }
+  [[nodiscard]] std::uint64_t tpidr_el2() const { return tpidr_el2_; }
 
   void set_cntvct(std::uint64_t value) { cntvct_el0_ = value; }
   [[nodiscard]] std::uint64_t vbar_el1() const { return vbar_el1_; }
@@ -74,17 +81,37 @@ private:
   std::uint64_t sctlr_el1_ = 0x30D00800;
   std::uint64_t cpacr_el1_ = 0;
   std::uint64_t midr_el1_ = 0x00000000410FD034ull; // Cortex-A53 r0p4-like default
+  std::uint64_t mpidr_el1_ = 0x0000000080000000ull;
+  std::uint64_t revidr_el1_ = 0;
   std::uint64_t clidr_el1_ = 0;
   std::uint64_t ctr_el0_ = 0x8444C004ull;
+  std::uint64_t dczid_el0_ = 0x4ull;
+  std::uint64_t id_aa64pfr0_el1_ = 0x0000000000000011ull;
+  std::uint64_t id_aa64pfr1_el1_ = 0;
+  std::uint64_t id_aa64dfr0_el1_ = 0;
+  std::uint64_t id_aa64dfr1_el1_ = 0;
+  std::uint64_t id_aa64isar0_el1_ = 0;
+  std::uint64_t id_aa64isar1_el1_ = 0;
+  std::uint64_t id_aa64isar2_el1_ = 0;
+  std::uint64_t id_aa64isar3_el1_ = 0;
+  std::uint64_t id_aa64zfr0_el1_ = 0;
   std::uint64_t id_aa64mmfr0_el1_ = 0x0000000000000F05ull;
   std::uint64_t id_aa64mmfr1_el1_ = 0;
   std::uint64_t id_aa64mmfr2_el1_ = 0;
+  std::uint64_t id_aa64mmfr3_el1_ = 0;
   std::uint64_t csselr_el1_ = 0;
   std::uint64_t ccsidr_el1_ = 0;
   std::uint64_t ttbr0_el1_ = 0;
   std::uint64_t ttbr1_el1_ = 0;
   std::uint64_t tcr_el1_ = 0;
   std::uint64_t mair_el1_ = 0;
+  std::uint64_t contextidr_el1_ = 0;
+  std::uint64_t osdlr_el1_ = 0;
+  std::uint64_t oslar_el1_ = 0;
+  std::array<std::uint64_t, 16> dbgbvr_el1_{};
+  std::array<std::uint64_t, 16> dbgbcr_el1_{};
+  std::array<std::uint64_t, 16> dbgwvr_el1_{};
+  std::array<std::uint64_t, 16> dbgwcr_el1_{};
   std::uint64_t vbar_el1_ = 0;
   std::uint64_t elr_el1_ = 0;
   std::uint64_t spsr_el1_ = 0;
@@ -94,6 +121,13 @@ private:
   std::uint64_t par_el1_ = 0;
   std::uint64_t esr_el1_ = 0;
   std::uint64_t far_el1_ = 0;
+  std::uint64_t mdscr_el1_ = 0;
+  std::uint64_t pmuserenr_el0_ = 0;
+  std::uint64_t amuserenr_el0_ = 0;
+  std::uint64_t tpidr_el0_ = 0;
+  std::uint64_t tpidrro_el0_ = 0;
+  std::uint64_t tpidr_el1_ = 0;
+  std::uint64_t tpidr_el2_ = 0;
   std::uint64_t cntfrq_el0_ = 100000000;
   std::uint64_t cntvct_el0_ = 0;
   PState pstate_{};

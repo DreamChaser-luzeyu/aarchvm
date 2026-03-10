@@ -193,6 +193,17 @@ movn_ok:
     subs xzr, x2, #4
     b.ne fail
 
+    mrs  x24, revidr_el1
+    cbnz x24, fail
+    mrs  x24, S3_0_C0_C7_4
+    cbnz x24, fail
+    mrs  x24, S3_0_C0_C4_2
+    cbnz x24, fail
+    mrs  x24, S3_0_C0_C4_5
+    cbnz x24, fail
+    mrs  x24, S3_0_C0_C4_7
+    cbnz x24, fail
+
     subs xzr, x2, x2
     mrs  x2, nzcv
     tbz  x2, #30, fail
@@ -234,6 +245,59 @@ movn_ok:
     wfe
     sev
     wfe
+    adr  x24, mem
+    .inst 0xD50B7B38              // dc cvau, x24
+    .inst 0xD50B7C38              // dc cvap, x24
+    .inst 0xD50B7D38              // dc cvadp, x24
+
+    // Minimal debug/OS-lock sysregs Linux probes and clears.
+    movz x21, #0x55aa
+    msr  contextidr_el1, x21
+    mrs  x22, contextidr_el1
+    cmp  x22, x21
+    b.ne fail
+
+    movz x21, #0x1234
+    msr  osdlr_el1, x21
+    mrs  x22, osdlr_el1
+    cmp  x22, x21
+    b.ne fail
+
+    movz x21, #1
+    msr  oslar_el1, x21
+    mrs  x22, oslsr_el1
+    tst  x22, #0x2
+    b.eq fail
+
+    movz x21, #0
+    msr  oslar_el1, x21
+    mrs  x22, oslsr_el1
+    tst  x22, #0x2
+    b.ne fail
+
+    movz x21, #0x3456
+    msr  dbgbcr0_el1, x21
+    mrs  x22, dbgbcr0_el1
+    cmp  x22, x21
+    b.ne fail
+
+    movz x21, #0x789a
+    msr  dbgbvr0_el1, x21
+    mrs  x22, dbgbvr0_el1
+    cmp  x22, x21
+    b.ne fail
+
+    movz x21, #0xabcd
+    msr  dbgwcr0_el1, x21
+    mrs  x22, dbgwcr0_el1
+    cmp  x22, x21
+    b.ne fail
+
+    movz x21, #0xbcde
+    msr  dbgwvr0_el1, x21
+    mrs  x22, dbgwvr0_el1
+    cmp  x22, x21
+    b.ne fail
 
     movz x0, #'E'
     str  x0, [x1]

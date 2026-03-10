@@ -53,9 +53,9 @@ irq_spx:
     b irq_handler
 
 irq_handler:
-    // Read active INTID via system register interface and verify timer SPI 30.
+    // Read active INTID via system register interface and verify virtual timer PPI 11.
     mrs  x8, icc_iar1_el1
-    movz x9, #30
+    movz x9, #11
     subs xzr, x8, x9
     b.ne fail_from_handler
 

@@ -47,6 +47,17 @@ build_asm_prog sync_exception_regs
 build_asm_prog gic_timer_sysreg
 build_asm_prog bitfield_basic
 build_asm_prog p1_core
+build_asm_prog atomics_minimal
+build_asm_prog signext_loads
+build_asm_prog atomics_small
+build_asm_prog mul_high
+build_asm_prog pair_non_temporal
+build_asm_prog dc_zva
+build_asm_prog atomics_sp_base
+build_asm_prog ldrsw_regoffset
+build_asm_prog signed_regoffset
+build_asm_prog ldpsw_pair
+build_asm_prog pair_exclusive
 
 if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
   aarch64-linux-gnu-gcc -nostdlib -static -ffreestanding -fomit-frame-pointer -fno-stack-protector \

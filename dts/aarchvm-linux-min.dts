@@ -41,6 +41,13 @@
 		ranges;
 	};
 
+	timer {
+		compatible = "arm,armv8-timer";
+		interrupt-parent = <&intc>;
+		interrupts = <1 13 8>, <1 14 8>, <1 11 8>, <1 10 8>;
+		always-on;
+	};
+
 	uart0: serial@9000000 {
 		compatible = "arm,pl011", "arm,primecell";
 		reg = <0x0 0x09000000 0x0 0x00001000>;

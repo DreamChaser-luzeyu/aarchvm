@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <unordered_map>
 
 namespace aarchvm {
@@ -30,6 +31,8 @@ public:
   [[nodiscard]] bool halted() const { return halted_; }
   [[nodiscard]] std::uint64_t pc() const { return pc_; }
   [[nodiscard]] std::uint64_t steps() const { return steps_; }
+  [[nodiscard]] std::uint64_t x(std::uint32_t idx) const { return reg(idx); }
+  [[nodiscard]] std::uint64_t sp() const { return regs_[31]; }
 
 private:
   enum class AccessType {
@@ -133,6 +136,7 @@ private:
   [[nodiscard]] bool pa_within_ips(std::uint64_t pa, std::uint8_t ips_bits) const;
   void tlb_flush_all();
   void tlb_flush_va(std::uint64_t va);
+  void parse_pc_watch_list();
 
   [[nodiscard]] std::uint64_t reg(std::uint32_t idx) const;
   [[nodiscard]] std::uint32_t reg32(std::uint32_t idx) const;
@@ -161,6 +165,8 @@ private:
   bool active_exception_is_irq_ = false;
   bool sync_reported_ = false;
   bool trace_exceptions_ = false;
+  bool trace_brk_ = false;
+  std::unordered_map<std::uint64_t, bool> pc_watch_hits_;
   std::uint32_t active_intid_ = 0;
   bool waiting_for_interrupt_ = false;
   bool waiting_for_event_ = false;
@@ -168,6 +174,9 @@ private:
   std::uint64_t icc_pmr_el1_ = 0xFF;
   std::uint64_t icc_ctlr_el1_ = 0;
   std::uint64_t icc_sre_el1_ = 0;
+  bool exclusive_valid_ = false;
+  std::uint64_t exclusive_addr_ = 0;
+  std::uint8_t exclusive_size_ = 0;
   std::unordered_map<std::uint64_t, TlbEntry> tlb_page_map_;
   std::optional<TranslationFault> last_translation_fault_;
   std::uint64_t pc_ = 0;

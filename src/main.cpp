@@ -332,6 +332,22 @@ int main(int argc, char** argv) {
     std::cerr << "SUMMARY: steps=" << soc.steps()
               << " pc=0x" << std::hex << soc.pc() << std::dec << '\n';
   }
+  if (std::getenv("AARCHVM_PRINT_UART_SUMMARY") != nullptr) {
+    std::cerr << "UART-SUMMARY tx=" << soc.uart_tx_count()
+              << " reads=" << soc.uart_mmio_reads()
+              << " writes=" << soc.uart_mmio_writes()
+              << " config_writes=" << soc.uart_config_writes()
+              << " id_reads=" << soc.uart_id_reads() << "\n";
+  }
+  if (std::getenv("AARCHVM_PRINT_REGS") != nullptr) {
+    std::cerr << std::hex << std::setfill('0');
+    for (std::uint32_t i = 0; i < 31; ++i) {
+      std::cerr << "REG x" << std::dec << i << std::hex
+                << "=0x" << std::setw(16) << soc.x(i) << '\n';
+    }
+    std::cerr << "REG sp=0x" << std::setw(16) << soc.sp() << '\n';
+    std::cerr << std::dec << std::setfill(' ');
+  }
 
   return 0;
 }

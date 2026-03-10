@@ -34,6 +34,17 @@ run sync_exception_regs.bin 2000000
 run gic_timer_sysreg.bin 2000000
 run bitfield_basic.bin 400000
 run p1_core.bin 600000
+run atomics_minimal.bin 400000
+run signext_loads.bin 400000
+run atomics_small.bin 400000
+run mul_high.bin 400000
+run pair_non_temporal.bin 400000
+run dc_zva.bin 400000
+run atomics_sp_base.bin 400000
+run ldrsw_regoffset.bin 400000
+run signed_regoffset.bin 400000
+run ldpsw_pair.bin 400000
+run pair_exclusive.bin 400000
 run hello_uart.bin 4000
 run branch_arith.bin 4000
 run hello_c.bin 400000

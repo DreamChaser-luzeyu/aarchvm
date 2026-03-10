@@ -18,17 +18,37 @@ void SystemRegisters::reset() {
   sctlr_el1_ = 0x30D00800;
   cpacr_el1_ = 0;
   midr_el1_ = 0x00000000410FD034ull;
+  mpidr_el1_ = 0x0000000080000000ull;
+  revidr_el1_ = 0;
   clidr_el1_ = 0;
   ctr_el0_ = 0x8444C004ull;
+  dczid_el0_ = 0x4ull;
+  id_aa64pfr0_el1_ = 0x0000000000000011ull;
+  id_aa64pfr1_el1_ = 0;
+  id_aa64dfr0_el1_ = 0;
+  id_aa64dfr1_el1_ = 0;
+  id_aa64isar0_el1_ = 0;
+  id_aa64isar1_el1_ = 0;
+  id_aa64isar2_el1_ = 0;
+  id_aa64isar3_el1_ = 0;
+  id_aa64zfr0_el1_ = 0;
   id_aa64mmfr0_el1_ = 0x0000000000000F05ull;
   id_aa64mmfr1_el1_ = 0;
   id_aa64mmfr2_el1_ = 0;
+  id_aa64mmfr3_el1_ = 0;
   csselr_el1_ = 0;
   ccsidr_el1_ = 0;
   ttbr0_el1_ = 0;
   ttbr1_el1_ = 0;
   tcr_el1_ = 0;
   mair_el1_ = 0;
+  contextidr_el1_ = 0;
+  osdlr_el1_ = 0;
+  oslar_el1_ = 0;
+  dbgbvr_el1_.fill(0);
+  dbgbcr_el1_.fill(0);
+  dbgwvr_el1_.fill(0);
+  dbgwcr_el1_.fill(0);
   vbar_el1_ = 0;
   elr_el1_ = 0;
   spsr_el1_ = 0;
@@ -38,6 +58,13 @@ void SystemRegisters::reset() {
   par_el1_ = 0;
   esr_el1_ = 0;
   far_el1_ = 0;
+  mdscr_el1_ = 0;
+  pmuserenr_el0_ = 0;
+  amuserenr_el0_ = 0;
+  tpidr_el0_ = 0;
+  tpidrro_el0_ = 0;
+  tpidr_el1_ = 0;
+  tpidr_el2_ = 0;
   cntfrq_el0_ = 100000000;
   cntvct_el0_ = 0;
   pstate_ = {};
@@ -49,8 +76,19 @@ bool SystemRegisters::read(std::uint32_t op0,
                            std::uint32_t crm,
                            std::uint32_t op2,
                            std::uint64_t& value) const {
+  if (op0 == 2u && op1 == 0u && crn == 0u && crm < 16u) {
+    switch (op2) {
+    case 4u: value = dbgbvr_el1_[crm]; return true;
+    case 5u: value = dbgbcr_el1_[crm]; return true;
+    case 6u: value = dbgwvr_el1_[crm]; return true;
+    case 7u: value = dbgwcr_el1_[crm]; return true;
+    default: break;
+    }
+  }
   switch (make_key(op0, op1, crn, crm, op2)) {
   case SysReg(3, 0, 0, 0, 0): value = midr_el1_; return true;
+  case SysReg(3, 0, 0, 0, 5): value = mpidr_el1_; return true;
+  case SysReg(3, 0, 0, 0, 6): value = revidr_el1_; return true;
   case SysReg(3, 1, 0, 0, 0): value = ccsidr_el1_; return true;
   case SysReg(3, 0, 1, 0, 0): value = sctlr_el1_; return true;
   case SysReg(3, 0, 1, 0, 2): value = cpacr_el1_; return true;
@@ -59,21 +97,46 @@ bool SystemRegisters::read(std::uint32_t op0,
   case SysReg(3, 0, 2, 0, 1): value = ttbr1_el1_; return true;
   case SysReg(3, 0, 2, 0, 2): value = tcr_el1_; return true;
   case SysReg(3, 1, 0, 0, 1): value = clidr_el1_; return true;
+  case SysReg(3, 0, 0, 4, 0): value = id_aa64pfr0_el1_; return true;
+  case SysReg(3, 0, 0, 4, 1): value = id_aa64pfr1_el1_; return true;
+  case SysReg(3, 0, 0, 5, 0): value = id_aa64dfr0_el1_; return true;
+  case SysReg(3, 0, 0, 5, 1): value = id_aa64dfr1_el1_; return true;
+  case SysReg(3, 0, 0, 6, 0): value = id_aa64isar0_el1_; return true;
+  case SysReg(3, 0, 0, 6, 1): value = id_aa64isar1_el1_; return true;
+  case SysReg(3, 0, 0, 6, 2): value = id_aa64isar2_el1_; return true;
+  case SysReg(3, 0, 0, 6, 3): value = id_aa64isar3_el1_; return true;
+  case SysReg(3, 0, 0, 4, 4): value = id_aa64zfr0_el1_; return true;
   case SysReg(3, 0, 0, 7, 0): value = id_aa64mmfr0_el1_; return true;
   case SysReg(3, 0, 0, 7, 1): value = id_aa64mmfr1_el1_; return true;
   case SysReg(3, 0, 0, 7, 2): value = id_aa64mmfr2_el1_; return true;
+  case SysReg(3, 0, 0, 7, 3): value = id_aa64mmfr3_el1_; return true;
+  case SysReg(3, 0, 0, 7, 4): value = 0; return true; // ID_AA64MMFR4_EL1
+  case SysReg(3, 0, 0, 4, 2): value = 0; return true; // ID_AA64PFR2_EL1
+  case SysReg(3, 0, 0, 4, 5): value = 0; return true; // ID_AA64SMFR0_EL1
+  case SysReg(3, 0, 0, 4, 7): value = 0; return true; // Reserved/unknown feature ID, keep disabled
   case SysReg(3, 0, 10, 2, 0): value = mair_el1_; return true;
+  case SysReg(3, 0, 13, 0, 1): value = contextidr_el1_; return true;
+  case SysReg(2, 0, 1, 3, 4): value = osdlr_el1_; return true;
+  case SysReg(2, 0, 1, 1, 4): value = 0x8ull | ((oslar_el1_ & 1ull) << 1); return true;
   case SysReg(3, 0, 12, 0, 0): value = vbar_el1_; return true;
   case SysReg(3, 0, 4, 0, 1): value = elr_el1_; return true;
   case SysReg(3, 0, 4, 0, 0): value = spsr_el1_; return true;
   case SysReg(3, 0, 5, 2, 0): value = esr_el1_; return true;
   case SysReg(3, 0, 6, 0, 0): value = far_el1_; return true;
+  case SysReg(2, 0, 0, 2, 2): value = mdscr_el1_; return true;
+  case SysReg(3, 3, 9, 14, 0): value = pmuserenr_el0_; return true;
+  case SysReg(3, 3, 13, 2, 3): value = amuserenr_el0_; return true;
+  case SysReg(3, 3, 13, 0, 2): value = tpidr_el0_; return true;
+  case SysReg(3, 3, 13, 0, 3): value = tpidrro_el0_; return true;
+  case SysReg(3, 0, 13, 0, 4): value = tpidr_el1_; return true;
+  case SysReg(3, 4, 13, 0, 2): value = tpidr_el2_; return true;
   case SysReg(3, 0, 4, 1, 0): value = sp_el0_; return true;
   case SysReg(3, 4, 4, 1, 0): value = sp_el1_; return true;
   case SysReg(3, 0, 7, 4, 0): value = par_el1_; return true;
   case SysReg(3, 3, 4, 2, 1): value = daif(); return true;
   case SysReg(3, 0, 4, 2, 0): value = spsel_; return true;
   case SysReg(3, 3, 0, 0, 1): value = ctr_el0_; return true;
+  case SysReg(3, 3, 0, 0, 7): value = dczid_el0_; return true;
   case SysReg(3, 3, 14, 0, 0): value = cntfrq_el0_; return true;
   case SysReg(3, 3, 14, 0, 1): value = cntvct_el0_; return true; // CNTPCT_EL0 (minimal alias)
   case SysReg(3, 3, 14, 0, 2): value = cntvct_el0_; return true;
@@ -90,6 +153,15 @@ bool SystemRegisters::write(std::uint32_t op0,
                             std::uint32_t crm,
                             std::uint32_t op2,
                             std::uint64_t value) {
+  if (op0 == 2u && op1 == 0u && crn == 0u && crm < 16u) {
+    switch (op2) {
+    case 4u: dbgbvr_el1_[crm] = value; return true;
+    case 5u: dbgbcr_el1_[crm] = value; return true;
+    case 6u: dbgwvr_el1_[crm] = value; return true;
+    case 7u: dbgwcr_el1_[crm] = value; return true;
+    default: break;
+    }
+  }
   switch (make_key(op0, op1, crn, crm, op2)) {
   case SysReg(3, 0, 1, 0, 0): sctlr_el1_ = value; return true;
   case SysReg(3, 0, 1, 0, 2): cpacr_el1_ = value; return true;
@@ -98,11 +170,21 @@ bool SystemRegisters::write(std::uint32_t op0,
   case SysReg(3, 0, 2, 0, 1): ttbr1_el1_ = value; return true;
   case SysReg(3, 0, 2, 0, 2): tcr_el1_ = value; return true;
   case SysReg(3, 0, 10, 2, 0): mair_el1_ = value; return true;
+  case SysReg(3, 0, 13, 0, 1): contextidr_el1_ = value; return true;
+  case SysReg(2, 0, 1, 3, 4): osdlr_el1_ = value; return true;
+  case SysReg(2, 0, 1, 0, 4): oslar_el1_ = value & 1ull; return true;
   case SysReg(3, 0, 12, 0, 0): vbar_el1_ = value; return true;
   case SysReg(3, 0, 4, 0, 1): elr_el1_ = value; return true;
   case SysReg(3, 0, 4, 0, 0): spsr_el1_ = value; return true;
   case SysReg(3, 0, 5, 2, 0): esr_el1_ = value; return true;
   case SysReg(3, 0, 6, 0, 0): far_el1_ = value; return true;
+  case SysReg(2, 0, 0, 2, 2): mdscr_el1_ = value; return true;
+  case SysReg(3, 3, 9, 14, 0): pmuserenr_el0_ = value; return true;
+  case SysReg(3, 3, 13, 2, 3): amuserenr_el0_ = value; return true;
+  case SysReg(3, 3, 13, 0, 2): tpidr_el0_ = value; return true;
+  case SysReg(3, 3, 13, 0, 3): tpidrro_el0_ = value; return true;
+  case SysReg(3, 0, 13, 0, 4): tpidr_el1_ = value; return true;
+  case SysReg(3, 4, 13, 0, 2): tpidr_el2_ = value; return true;
   case SysReg(3, 0, 4, 1, 0): sp_el0_ = value; return true;
   case SysReg(3, 4, 4, 1, 0): sp_el1_ = value; return true;
   case SysReg(3, 0, 7, 4, 0): par_el1_ = value; return true;

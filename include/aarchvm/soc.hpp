@@ -29,6 +29,13 @@ public:
   [[nodiscard]] std::optional<std::uint8_t> read_u8(std::uint64_t addr) const;
   [[nodiscard]] std::uint64_t pc() const;
   [[nodiscard]] std::uint64_t steps() const;
+  [[nodiscard]] std::uint64_t x(std::uint32_t idx) const;
+  [[nodiscard]] std::uint64_t sp() const;
+  [[nodiscard]] std::uint64_t uart_tx_count() const;
+  [[nodiscard]] std::uint64_t uart_mmio_reads() const;
+  [[nodiscard]] std::uint64_t uart_mmio_writes() const;
+  [[nodiscard]] std::uint64_t uart_config_writes() const;
+  [[nodiscard]] std::uint64_t uart_id_reads() const;
 
 private:
   static constexpr std::uint64_t kBootRamBase = 0x00000000;
@@ -41,7 +48,7 @@ private:
   static constexpr std::uint64_t kGicSize = 0x10000;
   static constexpr std::uint64_t kTimerBase = 0x0A000000;
   static constexpr std::uint64_t kTimerSize = 0x1000;
-  static constexpr std::uint32_t kTimerIntId = 30;
+  static constexpr std::uint32_t kTimerIntId = 11;
 
   Bus bus_;
   std::shared_ptr<Ram> boot_ram_;
@@ -50,6 +57,7 @@ private:
   std::shared_ptr<GicV3> gic_;
   std::shared_ptr<GenericTimer> timer_;
   Cpu cpu_;
+  std::uint64_t timer_tick_scale_ = 1;
 };
 
 } // namespace aarchvm
