@@ -1,112 +1,324 @@
-# aarchvm (Stage-0)
+# aarchvm
 
-A minimal full-system AArch64 simulator written in C++ with CMake, using an interpreter execution model.
+`aarchvm` is a C++ / CMake AArch64 full-system emulator prototype using an interpreter execution model.
+The current tree is already able to boot U-Boot, hand off to a Linux `Image`, and print Linux boot logs through the emulated PL011 UART.
 
-## Status
+## Validated Status
 
-This project is still a bring-up prototype, but now includes:
-- A single-core AArch64 interpreter.
-- Basic EL1-oriented system register model.
-- Minimal SoC model with RAM, PL011 UART, Generic Timer, and minimal GICv3.
-- Minimal IRQ closed loop (timer -> GIC -> vector -> `ERET`).
-- Minimal sync-exception closed loop with `ESR_EL1/FAR_EL1/ELR_EL1/SPSR_EL1`.
-- Linux-oriented minimal MMU/TLB path for Stage-1 translation with `TTBR0_EL1/TTBR1_EL1` (4KB granule), including leaf permission/AF/XN checks, table-attribute inheritance, and `TCR.IPS` PA-size checks.
-- Minimal GICv3 system-register CPU interface + virtual timer sysreg path (`ICC_*`, `CNTV_*`).
+The current repository has been validated for the following paths:
+- Single-core AArch64 EL1 interpreter execution.
+- Minimal SoC model: RAM, PL011 UART, Generic Timer, and minimal GICv3.
+- Minimal IRQ loop: timer -> GIC -> EL1 vector -> `ERET`.
+- Minimal synchronous exception loop with `ESR_EL1/FAR_EL1/ELR_EL1/SPSR_EL1`.
+- Minimal MMU/TLB path needed by early Linux page-table bring-up.
+- U-Boot boot and serial output inside the emulator.
+- U-Boot `booti` hand-off to a Linux `Image`.
+- Linux serial output through both `earlycon=pl011,...` and the normal `ttyAMA0` path.
+
+Linux log lines already observed on the emulated serial port include:
+- `Booting Linux on physical CPU ...`
+- `Linux version 6.12.76 ...`
+- `earlycon: pl11 at MMIO 0x0000000009000000`
+- `printk: legacy bootconsole [pl11] enabled`
+- `Serial: AMBA PL011 UART driver`
+- plus a large amount of later kernel initialization output
+
+This means the project has already moved past the earlier "kernel entered but no visible output" stage and is now in the Linux bring-up phase proper.
+
+## Layout and Artifacts
+
+The repository currently uses the following artifacts:
+- Emulator sources: `src/`, `include/`
+- Emulator build directory: `build/`
+- U-Boot sources: `u-boot-2026.01/`
+- U-Boot build directory: `u-boot-2026.01/build-qemu_arm64/`
+- Linux sources: `linux-6.12.76/`
+- Linux build directory: `linux-6.12.76/build-aarchvm/`
+- U-Boot control DTB: `dts/aarchvm-current.dtb`
+- Linux boot DTB: `dts/aarchvm-linux-min.dtb`
+
+## Toolchain Version
+
+The cross toolchain actually used and validated in this workspace is:
+
+```text
+aarch64-linux-gnu-gcc (Debian 14.2.0-19) 14.2.0
+GNU ld (GNU Binutils for Debian) 2.44
+GNU as (GNU Binutils for Debian) 2.44
+```
+
+You can verify this on the host with:
+
+```bash
+aarch64-linux-gnu-gcc --version | head -n 1
+aarch64-linux-gnu-ld --version | head -n 1
+aarch64-linux-gnu-as --version | head -n 1
+```
 
 ## Build
+
+### 1. Build the Emulator
 
 ```bash
 cmake -S . -B build
 cmake --build build -j
 ```
 
+### 2. Build U-Boot
+
+The current tree uses the `qemu_arm64` U-Boot configuration and loads the generated `u-boot.bin` in the emulator:
+
+```bash
+make -C u-boot-2026.01 \
+  O=build-qemu_arm64 \
+  CROSS_COMPILE=aarch64-linux-gnu- \
+  qemu_arm64_defconfig
+
+make -C u-boot-2026.01 \
+  O=build-qemu_arm64 \
+  CROSS_COMPILE=aarch64-linux-gnu- \
+  -j"$(nproc)"
+```
+
+Build artifact:
+- `u-boot-2026.01/build-qemu_arm64/u-boot.bin`
+
+### 3. Build Linux
+
+A reproducible flow is to start from `defconfig` and then override the options needed by the current emulator path:
+
+```bash
+make -C linux-6.12.76 \
+  O=build-aarchvm \
+  ARCH=arm64 \
+  CROSS_COMPILE=aarch64-linux-gnu- \
+  defconfig
+```
+
+Then apply the key options used by the current repository:
+
+```bash
+linux-6.12.76/scripts/config --file linux-6.12.76/build-aarchvm/.config \
+  --set-str CMDLINE "console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel" \
+  --enable CMDLINE_FORCE \
+  --enable PRINTK \
+  --enable ARM_AMBA \
+  --enable SERIAL_AMBA_PL011 \
+  --enable SERIAL_AMBA_PL011_CONSOLE \
+  --enable ARM_GIC_V3 \
+  --enable ARM_ARCH_TIMER \
+  --enable DEVTMPFS \
+  --enable DEVTMPFS_MOUNT \
+  --enable VIRTIO \
+  --enable VIRTIO_BLK \
+  --enable BLK_DEV_INITRD \
+  --enable RD_GZIP \
+  --enable EXT4_FS \
+  --enable TMPFS \
+  --enable TMPFS_POSIX_ACL
+
+make -C linux-6.12.76 \
+  O=build-aarchvm \
+  ARCH=arm64 \
+  CROSS_COMPILE=aarch64-linux-gnu- \
+  olddefconfig
+
+make -C linux-6.12.76 \
+  O=build-aarchvm \
+  ARCH=arm64 \
+  CROSS_COMPILE=aarch64-linux-gnu- \
+  Image -j"$(nproc)"
+```
+
+Build artifacts:
+- `linux-6.12.76/build-aarchvm/arch/arm64/boot/Image`
+- `linux-6.12.76/build-aarchvm/vmlinux`
+
+### 4. Generate DTBs
+
+If `dtc` is not installed globally, you can directly use the one built inside the Linux tree:
+
+```bash
+linux-6.12.76/build-aarchvm/scripts/dtc/dtc \
+  -I dts -O dtb \
+  -o dts/aarchvm-linux-min.dtb \
+  dts/aarchvm-linux-min.dts
+```
+
+Likewise, regenerate the U-Boot-facing DTB if needed:
+
+```bash
+linux-6.12.76/build-aarchvm/scripts/dtc/dtc \
+  -I dts -O dtb \
+  -o dts/aarchvm-current.dtb \
+  dts/aarchvm-current.dts
+```
+
+## Key Configuration Options in Use
+
+### U-Boot Key Options
+
+These options come from the currently used
+`u-boot-2026.01/build-qemu_arm64/.config`:
+
+```text
+CONFIG_ARM=y
+CONFIG_ARM64=y
+CONFIG_DEFAULT_DEVICE_TREE="qemu-arm64"
+CONFIG_SYS_LOAD_ADDR=0x40200000
+CONFIG_NR_DRAM_BANKS=4
+CONFIG_BOOTDELAY=2
+CONFIG_CMD_BOOTI=y
+CONFIG_CMD_FDT=y
+CONFIG_FIT=y
+CONFIG_LEGACY_IMAGE_FORMAT=y
+CONFIG_OF_CONTROL=y
+CONFIG_OF_BOARD=y
+CONFIG_DM_SERIAL=y
+CONFIG_BAUDRATE=115200
+CONFIG_DM_KEYBOARD=y
+CONFIG_USB_KEYBOARD=y
+```
+
+Why these matter in the current setup:
+- `CONFIG_CMD_BOOTI=y` allows direct boot of an AArch64 Linux `Image`.
+- `CONFIG_OF_CONTROL=y` and `CONFIG_OF_BOARD=y` let U-Boot consume the board DTB provided by the emulator.
+- `CONFIG_DM_SERIAL=y` and `CONFIG_BAUDRATE=115200` match the current PL011 UART model.
+- `CONFIG_DEFAULT_DEVICE_TREE="qemu-arm64"` is the current U-Boot base configuration.
+
+### Linux Key Options
+
+These options come from the currently used
+`linux-6.12.76/build-aarchvm/.config`:
+
+```text
+CONFIG_64BIT=y
+CONFIG_MMU=y
+CONFIG_SMP=y
+CONFIG_PRINTK=y
+CONFIG_CMDLINE="console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel"
+CONFIG_CMDLINE_FORCE=y
+CONFIG_OF=y
+CONFIG_ARM_AMBA=y
+CONFIG_ARM_GIC_V3=y
+CONFIG_ARM_ARCH_TIMER=y
+CONFIG_SERIAL_AMBA_PL011=y
+CONFIG_SERIAL_AMBA_PL011_CONSOLE=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+CONFIG_PCI=y
+CONFIG_VIRTIO=y
+CONFIG_VIRTIO_BLK=y
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_RD_GZIP=y
+CONFIG_EXT4_FS=y
+CONFIG_TMPFS=y
+CONFIG_TMPFS_POSIX_ACL=y
+```
+
+Why these matter here:
+- `CONFIG_CMDLINE` and `CONFIG_CMDLINE_FORCE` ensure the kernel uses the serial command line matching the emulator.
+- `CONFIG_SERIAL_AMBA_PL011` and `CONFIG_SERIAL_AMBA_PL011_CONSOLE` enable the PL011 driver and console.
+- `CONFIG_ARM_GIC_V3` and `CONFIG_ARM_ARCH_TIMER` match the current minimal GIC/timer bring-up path.
+- `CONFIG_DEVTMPFS*`, `CONFIG_EXT4_FS`, `CONFIG_TMPFS`, `CONFIG_BLK_DEV_INITRD` are useful for later rootfs-oriented boot flows.
+- `CONFIG_VIRTIO` and `CONFIG_VIRTIO_BLK` keep the configuration aligned with later block-device work.
+
 ## Run
 
-Embedded demo:
+### 1. Built-in Demo
 
 ```bash
 ./build/aarchvm
 ```
 
-External raw binary:
+### 2. External Raw Binary
 
 ```bash
-./build/aarchvm -bin <program.bin> -load <load_addr> -entry <entry_pc> -steps <max_steps>
+./build/aarchvm \
+  -bin <program.bin> \
+  -load <load_addr> \
+  -entry <entry_pc> \
+  -steps <max_steps>
 ```
 
 Common optional arguments:
-- `-sp <addr>`: initialize startup stack pointer (optional)
-- `-dtb <file> -dtb-addr <addr>`: load DTB and pass DTB pointer via `x0` (optional)
+- `-sp <addr>`: initialize the startup stack pointer
+- `-dtb <file>`: load a DTB
+- `-dtb-addr <addr>`: load the DTB at a given address and pass it to the guest in `x0`
+- `-segment <file@addr>`: load an extra raw segment at a specific address
 
-## Implemented Instruction Set (Current)
+### 3. Run U-Boot
 
-Control flow:
-- `NOP`, `B`, `BL`, `BR`, `BLR`, `RET`, `B.cond`, `CBZ`, `CBNZ`, `TBZ`, `TBNZ`, `BRK`, `ERET`
-- `WFI`, `WFE`, `SEV`, `SEVL`
+```bash
+./build/aarchvm \
+  -bin u-boot-2026.01/build-qemu_arm64/u-boot.bin \
+  -load 0x0 \
+  -entry 0x0 \
+  -sp 0x47fff000 \
+  -dtb dts/aarchvm-current.dtb \
+  -dtb-addr 0x40000000 \
+  -steps 50000000
+```
 
-Data processing:
-- `ADR`, `ADRP`
-- `MOVZ`, `MOVK`, `MOVN` (32/64-bit)
-- `ADD/SUB/ADDS/SUBS` (immediate + shifted register, 32/64-bit)
-- `CSEL` (32/64-bit)
-- Bitfield immediate family (32/64-bit): `UBFM`, `SBFM`, `BFM`
-  with common aliases (`LSR`, `LSL`, `UBFX`, `SBFX`, `BFXIL`)
-- Extract/rotate immediate: `EXTR`, `ROR` (immediate alias)
-- Conditional select family: `CSEL`, `CSINC` (thus `CSET` alias path)
-- Integer divide: `UDIV`, `SDIV`
-- Logical shifted-register family (32/64-bit):
-  `AND`, `BIC`, `ORR`, `ORN`, `EOR`, `EON`, `ANDS`, `BICS`
+### 4. Boot Linux via U-Boot
 
-Load/store:
-- `LDR/STR Xt`, `LDR/STR Wt` (`[Xn, #imm12]`)
-- `LDRSW` / `LDURSW` (unsigned + unscaled + pre/post-index forms used by tests)
-- `LDRB/STRB`, `LDRH/STRH` (`[Xn, #imm12]`)
-- `LDUR/STUR Xt`, `LDUR/STUR Wt` (`[Xn, #simm9]`)
-- `LDP/STP` (forms used by tests)
+This is the Linux hand-off command currently used and validated in the repository:
 
-System and maintenance:
-- `MRS/MSR` subset for key EL1 registers
-- `MSR DAIFSet/DAIFClr`, `MRS/MSR DAIF`
-- `MRS/MSR SPSel`, `MSR SPSel, #imm`
-- `DMB`, `DSB`, `ISB`, `CLREX`
-- `TLBI VMALLE1/VMALLE1IS`
-- `TLBI VAE1/VAE1IS/VALE1/VALE1IS, Xt`
-- `TLBI ASIDE1/ASIDE1IS, Xt`
-- `AT S1E1R`, `AT S1E1W`
-- `IC IALLU`, `IC IVAU, Xt`
-- `DC IVAC/CVAC/CIVAC, Xt`
+```bash
+printf ' \nsetenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel\nbooti 0x40400000 - 0x47f00000\n' | \
+AARCHVM_TIMER_SCALE=100000 \
+./build/aarchvm \
+  -bin u-boot-2026.01/build-qemu_arm64/u-boot.bin \
+  -load 0x0 \
+  -entry 0x0 \
+  -sp 0x47fff000 \
+  -dtb dts/aarchvm-current.dtb \
+  -dtb-addr 0x40000000 \
+  -segment linux-6.12.76/build-aarchvm/arch/arm64/boot/Image@0x40400000 \
+  -segment dts/aarchvm-linux-min.dtb@0x47f00000 \
+  -steps 100000000
+```
 
-## System Register Subset
+Meaning of the artifacts used here:
+- Main DTB: `dts/aarchvm-current.dtb`, used so that U-Boot recognizes the current emulated board layout.
+- Linux DTB: `dts/aarchvm-linux-min.dtb`, passed as the third `booti` argument.
+- Kernel `Image`: loaded at `0x40400000`.
+- Linux DTB: loaded at `0x47f00000`.
+- Initial U-Boot `sp`: `0x47fff000`.
+- `AARCHVM_TIMER_SCALE=100000`: used to accelerate Linux progress under the interpreter model.
 
-- `SCTLR_EL1`, `TTBR0_EL1`, `TTBR1_EL1`, `TCR_EL1`, `MAIR_EL1`, `VBAR_EL1`
-- `ELR_EL1`, `SPSR_EL1`, `ESR_EL1`, `FAR_EL1`, `SP_EL0`, `SP_EL1`, `SPSel`
-- `DAIF`, `NZCV`, `CURRENTEL`, `PAR_EL1`
-- `ID_AA64MMFR0_EL1`, `ID_AA64MMFR1_EL1`, `ID_AA64MMFR2_EL1`
-- `CNTFRQ_EL0`, `CNTPCT_EL0` (minimal alias), `CNTVCT_EL0`
-- `CNTV_CTL_EL0`, `CNTV_CVAL_EL0`, `CNTV_TVAL_EL0`
-- `ICC_IAR1_EL1`, `ICC_EOIR1_EL1`, `ICC_PMR_EL1`, `ICC_CTLR_EL1`, `ICC_SRE_EL1`
+## Current DT Conventions
 
-## MMU/TLB/Cache-Maintenance Model
+### Linux DTB: `dts/aarchvm-linux-min.dts`
 
-Current MMU model is still intentionally scoped, but it now covers the Linux-relevant early pieces:
-- Stage-1 translation supports both `TTBR0_EL1` and `TTBR1_EL1`.
-- Simplified 4-level walk model with 4KB page granularity assumptions.
-- Start-level derivation from `TCR_EL1` (`T0SZ/T1SZ`) plus `EPD0/EPD1` gating.
-- `TCR.IPS` is decoded and used to reject output addresses or next-level table bases that exceed the configured PA size.
-- Translation-walk attributes from `TCR_EL1` (`IRGNx/ORGNx/SHx`) are decoded and carried through translation results/TLB entries.
-- Leaf memory attributes from `MAIR_EL1` (`AttrIndx -> MAIR byte`) are decoded and stored in the translation result/TLB entry.
-- Table descriptors and block/page descriptors are supported for early-boot mappings.
-- Table-attribute inheritance is modelled for `APTable[1]` (write-protect) and `PXNTable/UXNTable`.
-- Leaf attribute checks cover `AF`, `AP[2]` (EL1 read-only), and execute-never handling.
-- Software TLB entries cache translated PA plus effective permission/attribute state after inheritance.
-- `TLBI` invalidation supports the common EL1 local/inner-shareable aliases used by early firmware/kernel code.
-- `AT S1E1R/S1E1W` bypasses the software TLB, performs a fresh walk, and reports success/fault state through `PAR_EL1`.
-- Translation/access-flag/permission/address-size faults are reflected into abort ISS low bits so ESR is useful during bring-up.
-- `IC/DC` maintenance instructions are decoded and executed with minimal functional semantics.
+The current Linux boot DTB uses:
+- RAM at `0x40000000`, size `128 MiB`
+- GICv3 at `0x08000000`
+- PL011 UART at `0x09000000`
+- architected timer DT node with PPIs `<13, 14, 11, 10>`
+- serial command line `console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel`
 
-This is still not a full architectural MMU/cache implementation: shareability and memory type are decoded but not yet driving real memory ordering/device side effects, DBM/dirty-state updates are absent, table attribute coverage is partial, and ASID-tagged TLB behavior remains simplified.
+### U-Boot DTB: `dts/aarchvm-current.dts`
 
-## Test Suite
+This DTB is currently used to:
+- let U-Boot understand the RAM / UART / GIC layout of the emulator
+- keep U-Boot serial output aligned with the PL011 model
+- preserve a consistent physical-address layout across the U-Boot -> Linux chain
+
+## MMU / Interrupt / Serial Summary
+
+The current implementation already covers and validates:
+- `TTBR0_EL1/TTBR1_EL1` Stage-1 translation
+- 4KB-granule page-table walks
+- table-attribute inheritance
+- software TLB behavior and `TLBI`
+- synchronous exception handling via `ESR_EL1/FAR_EL1/ELR_EL1/SPSR_EL1`
+- minimal GICv3 system-register CPU interface
+- minimal Generic Timer sysreg path
+- PL011 earlycon and normal console output paths
+- a growing set of atomics, sysregs, cache-maintenance instructions, and load/store forms encountered during Linux bring-up
+
+## Tests
 
 Build all test binaries:
 
@@ -114,48 +326,28 @@ Build all test binaries:
 tests/arm64/build_tests.sh
 ```
 
-Run full regression:
+Run the full regression suite:
 
 ```bash
 tests/arm64/run_all.sh
 ```
 
-Key outputs (in order):
-- `E` (`instr_legacy_each.bin`: previously implemented instructions checked one-by-one)
-- `Q` (`mmu_tlb_cache.bin`: MMU/TLB/cache-maintenance path)
-- `K` (`mmu_ttbr1_early.bin`: TTBR1 high-VA early mapping/fetch path)
-- `1` (`mmu_tlb_vae1_scope.bin`: per-VA invalidation only changes the targeted page)
-- `2` (`mmu_ttbr_switch.bin`: TTBR0 switch updates the active translation regime)
-- `3` (`mmu_unmap_data_abort.bin`: unmap + `TLBI` produces a data abort)
-- `4` (`mmu_tlbi_non_target.bin`: `TLBI VAE1` invalidates only the target VA)
-- `5` (`mmu_l2_block_vmalle1.bin`: L2 block remap + `TLBI VMALLE1` visibility)
-- `6` (`mmu_at_tlb_observe.bin`: `AT/PAR_EL1` observes fresh page walks while data access still sees stale TLB state before invalidation)
-- `7` (`mmu_ttbr_asid_mask.bin`: `TTBR0_EL1` ASID bits + table-base masking behavior)
-- `8` (`mmu_perm_ro_write_abort.bin`: EL1 read-only mapping rejects writes with a permission fault)
-- `9` (`mmu_xn_fetch_abort.bin`: execute-never mapping blocks fetch until PTE update + `TLBI`)
-- `H` (`mmu_table_ap_inherit.bin`: `APTable` write-protect is inherited by lower-level leaves)
-- `Y` (`mmu_table_pxn_inherit.bin`: `PXNTable` blocks fetch until the upper table descriptor is fixed and invalidated)
-- `Z` (`mmu_tcr_ips_mair_decode.bin`: `TCR.IPS` is enforced on translated PA size, while `AttrIndx/MAIR` paths are exercised)
-- `0` (`mmu_af_fault.bin`: access-flag fault is reported until `AF` is set and `TLBI` is issued)
-- `X` (`sync_exception_regs.bin`: sync exception + ESR/FAR/ELR/SPSR path)
-- `G` (`gic_timer_sysreg.bin`: minimal GICv3 sysreg + CNTV sysreg IRQ path)
-- `U` (`bitfield_basic.bin`: bitfield-immediate/shift aliases + CNTPCT path)
-- `V` (`p1_core.bin`: EXTR/ROR + CSINC/CSET + UDIV/SDIV + LDRSW family)
-- `ASM B C S IM T D W P L M R` (existing functional tests)
+The current regression suite covers:
+- per-instruction bring-up tests for previously implemented ISA subsets
+- MMU/TLB/cache-maintenance tests
+- synchronous exception register tests
+- GICv3 + timer sysreg IRQ tests
+- atomic / exclusive-access tests
+- additional instruction samples added during Linux bring-up
 
-## What Still Blocks Linux Boot
+## Current Limitations and Next Steps
 
-The MMU/TLB path is now strong enough for early page-table bring-up, but Linux still needs several major pieces before a real kernel boot is realistic:
-- A larger AArch64 ISA subset, especially atomics/exclusive sequences (`LDXR/STXR`, `LDAXR/STLXR`, CAS-style atomics), more system instructions, and additional load/store forms used deeper in kernel init.
-- More complete exception-level and privilege handling: EL2/EL3 boot paths, `HCR_EL2`, `SCR_EL3`, `VBAR_EL2/EL3`, and realistic `ERET` flows when entering the kernel from different firmware paths.
-- More complete system register coverage, especially ID registers, timer/control registers, and MMU-related sysregs that Linux probes during CPU feature detection.
-- Richer MMU semantics: full MAIR memory-type behavior, more complete table attribute propagation, ASID-aware TLB behavior, dirty/DBM handling, break-before-make corner cases, and eventually EL0 permission semantics.
-- A more complete GICv3 model, especially MMIO distributor/redistributor coverage beyond the current minimal sysreg CPU interface.
-- PSCI/SMCCC support for the boot chain and for the kernel's power-management / CPU-interface expectations.
-- More complete timer support beyond the current minimal virtual timer path.
-- Additional device models needed after very early boot: storage, block/network, and often virtio if a practical Linux userspace boot is the goal.
-- Multi-core/SMP support.
-- Real cache and barrier side effects. Decoding maintenance instructions is no longer enough once Linux starts relying on stronger memory-model interactions.
+Even though the current tree can already print Linux boot logs reliably, several platform-level pieces still matter for a full Linux-to-rootfs path:
+- more complete GICv3 distributor / redistributor MMIO behavior
+- more complete architected timer interrupt integration
+- storage / block-device models required by rootfs mounting
+- more complete PSCI / SMCCC / power-management flows
+- continued ISA and sysreg expansion for deeper Linux init paths
 
 ## Reference
 
