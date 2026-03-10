@@ -2,6 +2,7 @@
 **/*.dtb
 **/*.bak
 u-boot-2026.01/
+linux-6.12.76/
 build/
 tests/arm64/out/
 **/*.pdf

@@ -16,6 +16,11 @@
 
 namespace {
 
+struct BinaryLoad {
+  std::string path;
+  std::uint64_t addr = 0;
+};
+
 struct Options {
   std::string bin_path;
   std::uint64_t load_addr = 0;
@@ -24,6 +29,7 @@ struct Options {
   std::uint64_t init_sp = 0;
   std::optional<std::string> dtb_path;
   std::uint64_t dtb_addr = 0x40000000ull;
+  std::vector<BinaryLoad> extra_bins;
 };
 
 std::uint64_t parse_u64(const std::string& text) {
@@ -76,7 +82,7 @@ void print_usage(const char* argv0) {
   std::cerr
       << "Usage: " << argv0 << " -bin <program.bin> "
       << "[-load <addr>] [-entry <pc>] [-steps <n>] [-sp <addr>] "
-      << "[-dtb <file>] [-dtb-addr <addr>]\n";
+      << "[-dtb <file>] [-dtb-addr <addr>] [-segment <file@addr>]...\n";
 }
 
 std::optional<Options> parse_args(int argc, char** argv) {
@@ -117,6 +123,16 @@ std::optional<Options> parse_args(int argc, char** argv) {
       opt.dtb_path = val;
     } else if (key == "-dtb-addr") {
       opt.dtb_addr = parse_u64(val);
+    } else if (key == "-segment") {
+      const std::size_t at = val.rfind('@');
+      if (at == std::string::npos || at == 0 || at + 1 >= val.size()) {
+        std::cerr << "Invalid -segment value (expected <file@addr>): " << val << '\n';
+        return std::nullopt;
+      }
+      BinaryLoad seg{};
+      seg.path = val.substr(0, at);
+      seg.addr = parse_u64(val.substr(at + 1));
+      opt.extra_bins.push_back(seg);
     } else {
       std::cerr << "Unknown option: " << key << '\n';
       return std::nullopt;
@@ -231,6 +247,19 @@ int main(int argc, char** argv) {
   if (!soc.load_binary(opt.load_addr, program)) {
     std::cerr << "Failed to load binary at 0x" << std::hex << opt.load_addr << std::dec << '\n';
     return 1;
+  }
+
+  for (const auto& seg : opt.extra_bins) {
+    std::vector<std::uint8_t> extra;
+    if (!read_binary_file(seg.path, extra)) {
+      std::cerr << "Failed to read extra binary: " << seg.path << '\n';
+      return 1;
+    }
+    if (!soc.load_binary(seg.addr, extra)) {
+      std::cerr << "Failed to load extra binary at 0x" << std::hex << seg.addr
+                << std::dec << ": " << seg.path << '\n';
+      return 1;
+    }
   }
 
   bool dtb_loaded = false;
