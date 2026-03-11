@@ -19,8 +19,8 @@ public:
   [[nodiscard]] bool has_pending() const;
   [[nodiscard]] std::optional<std::uint32_t> acknowledge();
   void eoi(std::uint32_t intid);
-  [[nodiscard]] bool pending(std::uint32_t intid) const { return intid < pending_.size() ? pending_[intid] : false; }
-  [[nodiscard]] bool enabled(std::uint32_t intid) const { return intid < enabled_.size() ? enabled_[intid] : false; }
+  [[nodiscard]] bool pending(std::uint32_t intid) const;
+  [[nodiscard]] bool enabled(std::uint32_t intid) const;
   [[nodiscard]] std::uint32_t gicd_ctlr() const { return gicd_ctlr_; }
 
   [[nodiscard]] bool save_state(std::ostream& out) const;
@@ -33,6 +33,7 @@ private:
   static constexpr std::uint64_t kRedistSgiBase = kRedistBase + kRedistRdSize;
   static constexpr std::uint64_t kRedistSgiSize = 0x10000;
   static constexpr std::uint32_t kNumIntIds = 1024;
+  static constexpr std::uint32_t kWords = kNumIntIds / 64u;
 
   [[nodiscard]] std::uint32_t read_dist_reg32(std::uint64_t offset) const;
   [[nodiscard]] std::uint32_t read_redist_reg32(std::uint64_t offset) const;
@@ -40,9 +41,18 @@ private:
   void write_redist_reg32(std::uint64_t offset, std::uint32_t value);
   void set_enable_range(std::uint32_t first_intid, std::uint32_t bits, bool enable);
   [[nodiscard]] std::uint32_t get_enable_range(std::uint32_t first_intid) const;
+  void rebuild_bitmaps();
+  void refresh_word(std::uint32_t word_index);
+  void set_pending_bit(std::uint32_t intid, bool value);
+  void set_enabled_bit(std::uint32_t intid, bool value);
+  [[nodiscard]] static std::uint32_t word_index(std::uint32_t intid) { return intid >> 6; }
+  [[nodiscard]] static std::uint64_t bit_mask(std::uint32_t intid) { return 1ull << (intid & 63u); }
 
   std::array<bool, kNumIntIds> pending_{};
   std::array<bool, kNumIntIds> enabled_{};
+  std::array<std::uint64_t, kWords> pending_bits_{};
+  std::array<std::uint64_t, kWords> enabled_bits_{};
+  std::array<std::uint64_t, kWords> pending_enabled_bits_{};
   std::uint32_t gicd_ctlr_ = 0;
   std::uint32_t gicr_waker_ = 0;
 };

@@ -37,6 +37,7 @@ std::uint32_t read_part(std::uint32_t value, std::uint64_t offset, std::size_t s
 
 GicV3::GicV3() {
   enabled_.fill(true);
+  rebuild_bitmaps();
 }
 
 std::uint64_t GicV3::read(std::uint64_t offset, std::size_t size) {
@@ -168,23 +169,74 @@ void GicV3::write_redist_reg32(std::uint64_t offset, std::uint32_t value) {
   }
 }
 
+void GicV3::refresh_word(std::uint32_t word_index_value) {
+  if (word_index_value >= kWords) {
+    return;
+  }
+
+  const std::uint32_t first = word_index_value * 64u;
+  std::uint64_t pending_word = 0;
+  std::uint64_t enabled_word = 0;
+  for (std::uint32_t bit = 0; bit < 64u; ++bit) {
+    const std::uint32_t intid = first + bit;
+    if (intid >= kNumIntIds) {
+      break;
+    }
+    if (pending_[intid]) {
+      pending_word |= (1ull << bit);
+    }
+    if (enabled_[intid]) {
+      enabled_word |= (1ull << bit);
+    }
+  }
+  pending_bits_[word_index_value] = pending_word;
+  enabled_bits_[word_index_value] = enabled_word;
+  pending_enabled_bits_[word_index_value] = pending_word & enabled_word;
+}
+
+void GicV3::rebuild_bitmaps() {
+  pending_bits_.fill(0);
+  enabled_bits_.fill(0);
+  pending_enabled_bits_.fill(0);
+  for (std::uint32_t word = 0; word < kWords; ++word) {
+    refresh_word(word);
+  }
+}
+
+void GicV3::set_pending_bit(std::uint32_t intid, bool value) {
+  if (intid >= kNumIntIds) {
+    return;
+  }
+  pending_[intid] = value;
+  refresh_word(word_index(intid));
+}
+
+void GicV3::set_enabled_bit(std::uint32_t intid, bool value) {
+  if (intid >= kNumIntIds) {
+    return;
+  }
+  enabled_[intid] = value;
+  refresh_word(word_index(intid));
+}
+
 void GicV3::set_enable_range(std::uint32_t first_intid, std::uint32_t bits, bool enable) {
   for (std::uint32_t bit = 0; bit < 32u; ++bit) {
     const std::uint32_t intid = first_intid + bit;
-    if (intid >= enabled_.size()) {
+    if (intid >= kNumIntIds) {
       break;
     }
     if (((bits >> bit) & 1u) != 0u) {
       enabled_[intid] = enable;
     }
   }
+  refresh_word(word_index(first_intid));
 }
 
 std::uint32_t GicV3::get_enable_range(std::uint32_t first_intid) const {
   std::uint32_t bits = 0;
   for (std::uint32_t bit = 0; bit < 32u; ++bit) {
     const std::uint32_t intid = first_intid + bit;
-    if (intid >= enabled_.size()) {
+    if (intid >= kNumIntIds) {
       break;
     }
     if (enabled_[intid]) {
@@ -195,14 +247,12 @@ std::uint32_t GicV3::get_enable_range(std::uint32_t first_intid) const {
 }
 
 void GicV3::set_pending(std::uint32_t intid) {
-  if (intid < pending_.size()) {
-    pending_[intid] = true;
-  }
+  set_pending_bit(intid, true);
 }
 
 bool GicV3::has_pending() const {
-  for (std::uint32_t i = 0; i < pending_.size(); ++i) {
-    if (pending_[i] && enabled_[i]) {
+  for (std::uint64_t word : pending_enabled_bits_) {
+    if (word != 0u) {
       return true;
     }
   }
@@ -210,17 +260,35 @@ bool GicV3::has_pending() const {
 }
 
 std::optional<std::uint32_t> GicV3::acknowledge() {
-  for (std::uint32_t i = 0; i < pending_.size(); ++i) {
-    if (pending_[i] && enabled_[i]) {
-      pending_[i] = false;
-      return i;
+  for (std::uint32_t word = 0; word < kWords; ++word) {
+    const std::uint64_t bits = pending_enabled_bits_[word];
+    if (bits == 0u) {
+      continue;
     }
+    const std::uint32_t bit = static_cast<std::uint32_t>(__builtin_ctzll(bits));
+    const std::uint32_t intid = word * 64u + bit;
+    set_pending_bit(intid, false);
+    return intid;
   }
   return std::nullopt;
 }
 
 void GicV3::eoi(std::uint32_t intid) {
   (void)intid;
+}
+
+bool GicV3::pending(std::uint32_t intid) const {
+  if (intid >= kNumIntIds) {
+    return false;
+  }
+  return (pending_bits_[word_index(intid)] & bit_mask(intid)) != 0u;
+}
+
+bool GicV3::enabled(std::uint32_t intid) const {
+  if (intid >= kNumIntIds) {
+    return false;
+  }
+  return (enabled_bits_[word_index(intid)] & bit_mask(intid)) != 0u;
 }
 
 bool GicV3::save_state(std::ostream& out) const {
@@ -231,10 +299,14 @@ bool GicV3::save_state(std::ostream& out) const {
 }
 
 bool GicV3::load_state(std::istream& in) {
-  return snapshot_io::read_array(in, pending_) &&
-         snapshot_io::read_array(in, enabled_) &&
-         snapshot_io::read(in, gicd_ctlr_) &&
-         snapshot_io::read(in, gicr_waker_);
+  if (!snapshot_io::read_array(in, pending_) ||
+      !snapshot_io::read_array(in, enabled_) ||
+      !snapshot_io::read(in, gicd_ctlr_) ||
+      !snapshot_io::read(in, gicr_waker_)) {
+    return false;
+  }
+  rebuild_bitmaps();
+  return true;
 }
 
 } // namespace aarchvm

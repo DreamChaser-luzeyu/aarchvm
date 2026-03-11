@@ -2,30 +2,41 @@
 
 #include "aarchvm/snapshot_io.hpp"
 
+#include <cstring>
+
 namespace aarchvm {
 
 Ram::Ram(std::size_t size_bytes) : data_(size_bytes, 0) {}
 
 std::uint64_t Ram::read(std::uint64_t offset, std::size_t size) {
-  if (offset + size > data_.size()) {
-    return 0;
-  }
-
   std::uint64_t value = 0;
-  for (std::size_t i = 0; i < size; ++i) {
-    value |= static_cast<std::uint64_t>(data_[static_cast<std::size_t>(offset + i)]) << (8 * i);
-  }
+  const bool ok = read_fast(offset, size, value);
+  (void)ok;
   return value;
 }
 
 void Ram::write(std::uint64_t offset, std::uint64_t value, std::size_t size) {
-  if (offset + size > data_.size()) {
-    return;
+  const bool ok = write_fast(offset, value, size);
+  (void)ok;
+}
+
+bool Ram::read_fast(std::uint64_t offset, std::size_t size, std::uint64_t& value) const {
+  if ((size != 1u && size != 2u && size != 4u && size != 8u) || offset + size > data_.size()) {
+    return false;
   }
 
-  for (std::size_t i = 0; i < size; ++i) {
-    data_[static_cast<std::size_t>(offset + i)] = static_cast<std::uint8_t>((value >> (8 * i)) & 0xFFu);
+  value = 0;
+  std::memcpy(&value, data_.data() + static_cast<std::size_t>(offset), size);
+  return true;
+}
+
+bool Ram::write_fast(std::uint64_t offset, std::uint64_t value, std::size_t size) {
+  if ((size != 1u && size != 2u && size != 4u && size != 8u) || offset + size > data_.size()) {
+    return false;
   }
+
+  std::memcpy(data_.data() + static_cast<std::size_t>(offset), &value, size);
+  return true;
 }
 
 bool Ram::load(std::uint64_t offset, const std::vector<std::uint32_t>& words) {
@@ -34,8 +45,8 @@ bool Ram::load(std::uint64_t offset, const std::vector<std::uint32_t>& words) {
     return false;
   }
 
-  for (std::size_t i = 0; i < words.size(); ++i) {
-    write(offset + i * 4, words[i], 4);
+  if (!words.empty()) {
+    std::memcpy(data_.data() + static_cast<std::size_t>(offset), words.data(), bytes);
   }
   return true;
 }
@@ -44,8 +55,8 @@ bool Ram::load_bytes(std::uint64_t offset, const std::vector<std::uint8_t>& byte
   if (offset + bytes.size() > data_.size()) {
     return false;
   }
-  for (std::size_t i = 0; i < bytes.size(); ++i) {
-    data_[offset + i] = bytes[i];
+  if (!bytes.empty()) {
+    std::memcpy(data_.data() + static_cast<std::size_t>(offset), bytes.data(), bytes.size());
   }
   return true;
 }

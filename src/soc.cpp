@@ -16,6 +16,11 @@ bool in_range(std::uint64_t addr, std::uint64_t base, std::uint64_t size, std::u
   return true;
 }
 
+bool env_enabled(const char* name) {
+  const char* value = std::getenv(name);
+  return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
 } // namespace
 
 SoC::SoC()
@@ -31,6 +36,11 @@ SoC::SoC()
   bus_.map(kGicBase, kGicSize, gic_);
   bus_.map(kTimerBase, kTimerSize, timer_);
 
+  if (env_enabled("AARCHVM_BUS_FASTPATH") || env_enabled("AARCHVM_RAM_FASTPATH")) {
+    fast_path_ = std::make_shared<BusFastPath>(*boot_ram_, *sdram_);
+    bus_.set_fast_path(fast_path_);
+  }
+
   if (const char* scale_env = std::getenv("AARCHVM_TIMER_SCALE")) {
     const unsigned long long scale = std::strtoull(scale_env, nullptr, 0);
     if (scale > 0) {
@@ -38,7 +48,9 @@ SoC::SoC()
     }
   }
 
+  timer_->set_cycles_per_step(timer_tick_scale_);
   cpu_.reset(kBootRamBase);
+  timer_->rebase_to_steps(cpu_.steps());
 }
 
 bool SoC::load_image(std::uint64_t addr, const std::vector<std::uint32_t>& words) {
@@ -65,6 +77,8 @@ bool SoC::load_binary(std::uint64_t addr, const std::vector<std::uint8_t>& bytes
 
 void SoC::reset(std::uint64_t entry_pc) {
   cpu_.reset(entry_pc);
+  timer_->set_cycles_per_step(timer_tick_scale_);
+  timer_->rebase_to_steps(cpu_.steps());
 }
 
 void SoC::set_sp(std::uint64_t sp) {
@@ -77,11 +91,14 @@ void SoC::set_x(std::uint32_t idx, std::uint64_t value) {
 
 void SoC::inject_uart_rx(std::uint8_t byte) {
   uart_->inject_rx(byte);
+  if (uart_->irq_pending()) {
+    gic_->set_pending(kUartIntId);
+  }
 }
 
 bool SoC::run(std::size_t max_steps) {
-  for (std::size_t i = 0; i < max_steps; ++i) {
-    timer_->tick(timer_tick_scale_);
+  auto sync_devices = [&]() {
+    timer_->sync_to_steps(cpu_.steps());
     if (timer_->irq_pending()) {
       gic_->set_pending(kTimerIntId);
       timer_->clear_irq();
@@ -89,11 +106,34 @@ bool SoC::run(std::size_t max_steps) {
     if (uart_->irq_pending()) {
       gic_->set_pending(kUartIntId);
     }
-    cpu_.set_cntvct(timer_->counter());
-    if (!cpu_.step()) {
-      return cpu_.halted();
+  };
+
+  static constexpr std::size_t kMaxInternalChunk = 65536;
+  std::size_t remaining = max_steps;
+  while (remaining > 0) {
+    sync_devices();
+
+    std::size_t chunk = std::min<std::size_t>(remaining, kMaxInternalChunk);
+    if (uart_->irq_pending()) {
+      chunk = 1;
+    } else {
+      const std::uint64_t timer_limit = timer_->steps_until_irq(cpu_.steps(), chunk);
+      if (timer_limit == 0u) {
+        chunk = 1;
+      } else {
+        chunk = static_cast<std::size_t>(std::min<std::uint64_t>(chunk, timer_limit));
+      }
     }
+
+    for (std::size_t i = 0; i < chunk; ++i) {
+      if (!cpu_.step()) {
+        return cpu_.halted();
+      }
+    }
+    remaining -= chunk;
   }
+
+  sync_devices();
   return true;
 }
 
@@ -141,7 +181,6 @@ std::uint64_t SoC::uart_id_reads() const {
   return uart_->id_reads();
 }
 
-
 std::size_t SoC::uart_rx_fifo_size() const {
   return uart_->rx_fifo_size();
 }
@@ -161,7 +200,6 @@ std::uint32_t SoC::uart_imsc() const {
 std::uint32_t SoC::uart_ris() const {
   return uart_->ris();
 }
-
 
 std::uint64_t SoC::pstate_bits() const {
   return cpu_.pstate_bits();
@@ -204,6 +242,8 @@ std::uint32_t SoC::gicd_ctlr() const {
 }
 
 bool SoC::save_snapshot(const std::string& path) const {
+  const_cast<GenericTimer&>(*timer_).sync_to_steps(cpu_.steps());
+
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   if (!out) {
     return false;
@@ -259,8 +299,9 @@ bool SoC::load_snapshot(const std::string& path) {
       !cpu_.load_state(in)) {
     return false;
   }
-  return static_cast<bool>(in);
+  timer_->set_cycles_per_step(timer_tick_scale_);
+  timer_->rebase_to_steps(cpu_.steps());
+  return true;
 }
-
 
 } // namespace aarchvm

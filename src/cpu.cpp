@@ -44,6 +44,46 @@ std::uint64_t replicate(std::uint64_t value, std::uint32_t esize, std::uint32_t 
   return out;
 }
 
+std::uint64_t advsimd_expand_imm(bool op, std::uint32_t cmode, std::uint8_t imm8) {
+  switch ((cmode >> 1u) & 0x7u) {
+    case 0x0u:
+      return replicate(static_cast<std::uint64_t>(imm8), 32u, 64u);
+    case 0x1u:
+      return replicate(static_cast<std::uint64_t>(imm8) << 8u, 32u, 64u);
+    case 0x2u:
+      return replicate(static_cast<std::uint64_t>(imm8) << 16u, 32u, 64u);
+    case 0x3u:
+      return replicate(static_cast<std::uint64_t>(imm8) << 24u, 32u, 64u);
+    case 0x4u:
+      return replicate(static_cast<std::uint64_t>(imm8), 16u, 64u);
+    case 0x5u:
+      return replicate(static_cast<std::uint64_t>(imm8) << 8u, 16u, 64u);
+    case 0x6u:
+      if ((cmode & 1u) == 0u) {
+        return replicate((static_cast<std::uint64_t>(imm8) << 8u) | 0xFFu, 32u, 64u);
+      }
+      return replicate((static_cast<std::uint64_t>(imm8) << 16u) | 0xFFFFu, 32u, 64u);
+    case 0x7u:
+      if ((cmode & 1u) == 0u) {
+        return replicate(static_cast<std::uint64_t>(imm8), 8u, 64u);
+      }
+      if (!op) {
+        const std::uint32_t imm32 =
+            ((static_cast<std::uint32_t>((imm8 >> 7) & 1u)) << 31u) |
+            ((static_cast<std::uint32_t>(((imm8 >> 6) & 1u) ^ 1u)) << 30u) |
+            (static_cast<std::uint32_t>((imm8 >> 6) & 1u ? 0x3Fu : 0u) << 25u) |
+            ((static_cast<std::uint32_t>(imm8) & 0x3Fu) << 19u);
+        return replicate(imm32, 32u, 64u);
+      }
+      std::uint64_t out = 0;
+      for (std::uint32_t bit = 0; bit < 8u; ++bit) {
+        out |= (((imm8 >> bit) & 1u) ? 0xFFull : 0ull) << (bit * 8u);
+      }
+      return out;
+  }
+  return 0;
+}
+
 std::uint64_t bit_reverse(std::uint64_t value, std::uint32_t width) {
   std::uint64_t out = 0;
   for (std::uint32_t i = 0; i < width; ++i) {
@@ -1383,8 +1423,13 @@ bool Cpu::exec_system(std::uint32_t insn) {
       set_reg(rt, icc_ap1r_el1_[3]);
       return true;
     }
+    if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (0u << 3) | 1u) ||
+        key == ((3u << 14) | (3u << 11) | (14u << 7) | (0u << 3) | 2u)) { // CNTVCT_EL0/CNTPCT_EL0 minimal alias
+      set_reg(rt, timer_.counter_at_steps(steps_));
+      return true;
+    }
     if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (3u << 3) | 1u)) { // CNTV_CTL_EL0
-      set_reg(rt, timer_.read_cntv_ctl_el0());
+      set_reg(rt, timer_.read_cntv_ctl_el0(steps_));
       return true;
     }
     if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (3u << 3) | 2u)) { // CNTV_CVAL_EL0
@@ -1392,7 +1437,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
       return true;
     }
     if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (3u << 3) | 0u)) { // CNTV_TVAL_EL0
-      set_reg(rt, timer_.read_cntv_tval_el0());
+      set_reg(rt, timer_.read_cntv_tval_el0(steps_));
       return true;
     }
     if (key == ((3u << 14) | (3u << 11) | (2u << 7) | (5u << 3) | 1u)) { // GCSPR_EL0
@@ -1486,15 +1531,15 @@ bool Cpu::exec_system(std::uint32_t insn) {
       return true;
     }
     if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (3u << 3) | 1u)) { // CNTV_CTL_EL0
-      timer_.write_cntv_ctl_el0(reg(rt));
+      timer_.write_cntv_ctl_el0(steps_, reg(rt));
       return true;
     }
     if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (3u << 3) | 2u)) { // CNTV_CVAL_EL0
-      timer_.write_cntv_cval_el0(reg(rt));
+      timer_.write_cntv_cval_el0(steps_, reg(rt));
       return true;
     }
     if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (3u << 3) | 0u)) { // CNTV_TVAL_EL0
-      timer_.write_cntv_tval_el0(reg(rt));
+      timer_.write_cntv_tval_el0(steps_, reg(rt));
       return true;
     }
     if (key == ((3u << 14) | (0u << 11) | (4u << 7) | (1u << 3) | 0u)) { // SP_EL0
@@ -1552,6 +1597,32 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
+  if ((insn & 0xBF20FC00u) == 0x0E000400u) { // DUP (element)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t imm5 = (insn >> 16) & 0x1Fu;
+    const std::uint32_t imm4 = (insn >> 11) & 0xFu;
+    if (imm5 == 0u || imm4 != 0u) {
+      return false;
+    }
+    const std::uint32_t size_shift = static_cast<std::uint32_t>(__builtin_ctz(imm5));
+    const std::uint32_t esize_bits = 8u << size_shift;
+    if (esize_bits > (q ? 128u : 64u)) {
+      return false;
+    }
+    const std::uint32_t lane = imm5 >> (size_shift + 1u);
+    const std::uint32_t lanes = (q ? 128u : 64u) / esize_bits;
+    if (lane >= lanes) {
+      return false;
+    }
+    const std::uint64_t elem = vector_get_elem(qregs_[rn], esize_bits, lane);
+    auto& dst = qregs_[rd];
+    dst = {0, 0};
+    for (std::uint32_t i = 0; i < lanes; ++i) {
+      vector_set_elem(dst, esize_bits, i, elem);
+    }
+    return true;
+  }
+
   if ((insn & 0xBF20FC00u) == 0x0E000C00u) { // DUP (general)
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::uint32_t imm5 = (insn >> 16) & 0x1Fu;
@@ -1572,36 +1643,69 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
 
   if ((insn & 0xBF80FC00u) == 0x0F00E400u) { // MOVI (byte immediate)
     const bool q = ((insn >> 30) & 1u) != 0u;
-    const std::uint64_t imm8 = (((insn >> 16) & 0x7u) << 5u) | ((insn >> 5) & 0x1Fu);
+    const bool op = ((insn >> 29) & 1u) != 0u;
+    const std::uint32_t cmode = (insn >> 12) & 0xFu;
+    const std::uint8_t imm8 = static_cast<std::uint8_t>((((insn >> 16) & 0x7u) << 5u) | ((insn >> 5) & 0x1Fu));
+    const std::uint64_t imm64 = advsimd_expand_imm(op, cmode, imm8);
     auto& dst = qregs_[rd];
-    dst[0] = replicate(imm8, 8u, 64u);
-    dst[1] = q ? replicate(imm8, 8u, 64u) : 0u;
+    dst[0] = imm64;
+    dst[1] = q ? imm64 : 0u;
     return true;
   }
 
   if ((insn & 0xBF80FC00u) == 0x2F000400u) { // MVNI (2S/4S immediate)
     const bool q = ((insn >> 30) & 1u) != 0u;
-    const std::uint64_t imm8 = (((insn >> 16) & 0x7u) << 5u) | ((insn >> 5) & 0x1Fu);
+    const bool op = ((insn >> 29) & 1u) != 0u;
+    const std::uint32_t cmode = (insn >> 12) & 0xFu;
+    const std::uint8_t imm8 = static_cast<std::uint8_t>((((insn >> 16) & 0x7u) << 5u) | ((insn >> 5) & 0x1Fu));
+    const std::uint64_t imm64 = advsimd_expand_imm(op, cmode, imm8);
     auto& dst = qregs_[rd];
-    dst = {0, 0};
-    const std::uint32_t lanes = q ? 4u : 2u;
-    const std::uint64_t elem = (~imm8) & 0xFFFFFFFFu;
-    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
-      vector_set_elem(dst, 32u, lane, elem);
-    }
+    dst[0] = ~imm64;
+    dst[1] = q ? ~imm64 : 0u;
+    return true;
+  }
+
+  if ((insn & 0xBF80FC00u) == 0x2F001400u) { // BIC (2S/4S immediate)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const bool op = ((insn >> 29) & 1u) != 0u;
+    const std::uint32_t cmode = (insn >> 12) & 0xFu;
+    const std::uint8_t imm8 = static_cast<std::uint8_t>((((insn >> 16) & 0x7u) << 5u) | ((insn >> 5) & 0x1Fu));
+    const std::uint64_t imm64 = advsimd_expand_imm(op, cmode, imm8);
+    const auto old = qregs_[rd];
+    qregs_[rd][0] = old[0] & ~imm64;
+    qregs_[rd][1] = q ? (old[1] & ~imm64) : 0u;
+    return true;
+  }
+
+  if ((insn & 0xBF80FC00u) == 0x2F009400u) { // BIC (4H/8H immediate, low byte)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const auto old = qregs_[rd];
+    const std::uint8_t imm8 = static_cast<std::uint8_t>((((insn >> 16) & 0x7u) << 5u) | ((insn >> 5) & 0x1Fu));
+    const std::uint64_t mask64 = replicate(static_cast<std::uint64_t>(imm8), 16u, 64u);
+    qregs_[rd][0] = old[0] & ~mask64;
+    qregs_[rd][1] = q ? (old[1] & ~mask64) : 0u;
+    return true;
+  }
+
+  if ((insn & 0xBF80FC00u) == 0x2F00B400u) { // BIC (4H/8H immediate, high byte)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const auto old = qregs_[rd];
+    const std::uint8_t imm8 = static_cast<std::uint8_t>((((insn >> 16) & 0x7u) << 5u) | ((insn >> 5) & 0x1Fu));
+    const std::uint64_t mask64 = replicate(static_cast<std::uint64_t>(imm8) << 8u, 16u, 64u);
+    qregs_[rd][0] = old[0] & ~mask64;
+    qregs_[rd][1] = q ? (old[1] & ~mask64) : 0u;
     return true;
   }
 
   if ((insn & 0xBF80FC00u) == 0x2F008400u) { // MVNI (4H/8H immediate)
     const bool q = ((insn >> 30) & 1u) != 0u;
-    const std::uint64_t imm8 = (((insn >> 16) & 0x7u) << 5u) | ((insn >> 5) & 0x1Fu);
+    const bool op = ((insn >> 29) & 1u) != 0u;
+    const std::uint32_t cmode = (insn >> 12) & 0xFu;
+    const std::uint8_t imm8 = static_cast<std::uint8_t>((((insn >> 16) & 0x7u) << 5u) | ((insn >> 5) & 0x1Fu));
+    const std::uint64_t imm64 = advsimd_expand_imm(op, cmode, imm8);
     auto& dst = qregs_[rd];
-    dst = {0, 0};
-    const std::uint32_t lanes = q ? 8u : 4u;
-    const std::uint64_t elem = (~imm8) & 0xFFFFu;
-    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
-      vector_set_elem(dst, 16u, lane, elem);
-    }
+    dst[0] = ~imm64;
+    dst[1] = q ? ~imm64 : 0u;
     return true;
   }
 
@@ -1675,7 +1779,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
-  if ((insn & 0xBF20FC00u) == 0x0E201C00u) { // AND (vector)
+  if ((insn & 0xBFE0FC00u) == 0x0E201C00u) { // AND (vector)
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
     const auto lhs = qregs_[rn];
@@ -1685,7 +1789,17 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
-  if ((insn & 0xBF20FC00u) == 0x2E201C00u) { // BIT (vector)
+  if ((insn & 0xBFE0FC00u) == 0x2E201C00u) { // EOR (vector)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    qregs_[rd][0] = lhs[0] ^ rhs[0];
+    qregs_[rd][1] = q ? (lhs[1] ^ rhs[1]) : 0u;
+    return true;
+  }
+
+  if ((insn & 0xBFE0FC00u) == 0x2EA01C00u) { // BIT (vector)
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
     const auto dst_old = qregs_[rd];
@@ -1693,6 +1807,28 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     const auto mask = qregs_[rm];
     qregs_[rd][0] = (dst_old[0] & ~mask[0]) | (src[0] & mask[0]);
     qregs_[rd][1] = q ? ((dst_old[1] & ~mask[1]) | (src[1] & mask[1])) : 0u;
+    return true;
+  }
+
+  if ((insn & 0xBFE0FC00u) == 0x2EE01C00u) { // BIF (vector)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const auto dst_old = qregs_[rd];
+    const auto src = qregs_[rn];
+    const auto mask = qregs_[rm];
+    qregs_[rd][0] = (dst_old[0] & mask[0]) | (src[0] & ~mask[0]);
+    qregs_[rd][1] = q ? ((dst_old[1] & mask[1]) | (src[1] & ~mask[1])) : 0u;
+    return true;
+  }
+
+  if ((insn & 0xBFE0FC00u) == 0x2E601C00u) { // BSL (vector)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const auto mask = qregs_[rd];
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    qregs_[rd][0] = (mask[0] & lhs[0]) | (~mask[0] & rhs[0]);
+    qregs_[rd][1] = q ? ((mask[1] & lhs[1]) | (~mask[1] & rhs[1])) : 0u;
     return true;
   }
 

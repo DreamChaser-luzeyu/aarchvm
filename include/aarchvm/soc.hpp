@@ -1,6 +1,7 @@
 #pragma once
 
 #include "aarchvm/bus.hpp"
+#include "aarchvm/bus_fast_path.hpp"
 #include "aarchvm/cpu.hpp"
 #include "aarchvm/generic_timer.hpp"
 #include "aarchvm/gicv3.hpp"
@@ -75,6 +76,7 @@ private:
   std::shared_ptr<UartPl011> uart_;
   std::shared_ptr<GicV3> gic_;
   std::shared_ptr<GenericTimer> timer_;
+  std::shared_ptr<BusFastPath> fast_path_;
   Cpu cpu_;
   std::uint64_t timer_tick_scale_ = 1;
 };

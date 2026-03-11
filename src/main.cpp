@@ -321,12 +321,13 @@ int main(int argc, char** argv) {
     }
   }
 
+  const bool interactive_stdin = isatty(STDIN_FILENO);
   RawStdinGuard stdin_guard;
   std::size_t remaining = opt.max_steps;
-  constexpr std::size_t kRunChunk = 2000;
+  const std::size_t run_chunk = interactive_stdin ? 2000u : 200000u;
   while (remaining > 0) {
     pump_stdin_to_uart(soc);
-    const std::size_t n = std::min(kRunChunk, remaining);
+    const std::size_t n = std::min(run_chunk, remaining);
     if (!soc.run(n)) {
       std::cerr << "Simulation stopped unexpectedly\n";
       return 1;
