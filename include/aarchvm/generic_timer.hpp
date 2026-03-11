@@ -3,6 +3,7 @@
 #include "aarchvm/device.hpp"
 
 #include <cstdint>
+#include <iosfwd>
 
 namespace aarchvm {
 
@@ -22,6 +23,9 @@ public:
   void write_cntv_cval_el0(std::uint64_t value);
   [[nodiscard]] std::uint64_t read_cntv_tval_el0() const;
   void write_cntv_tval_el0(std::uint64_t value);
+
+  [[nodiscard]] bool save_state(std::ostream& out) const;
+  [[nodiscard]] bool load_state(std::istream& in);
 
 private:
   std::uint64_t counter_ = 0;

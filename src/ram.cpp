@@ -1,5 +1,7 @@
 #include "aarchvm/ram.hpp"
 
+#include "aarchvm/snapshot_io.hpp"
+
 namespace aarchvm {
 
 Ram::Ram(std::size_t size_bytes) : data_(size_bytes, 0) {}
@@ -45,6 +47,22 @@ bool Ram::load_bytes(std::uint64_t offset, const std::vector<std::uint8_t>& byte
   for (std::size_t i = 0; i < bytes.size(); ++i) {
     data_[offset + i] = bytes[i];
   }
+  return true;
+}
+
+bool Ram::save_state(std::ostream& out) const {
+  return snapshot_io::write_vector(out, data_);
+}
+
+bool Ram::load_state(std::istream& in) {
+  std::vector<std::uint8_t> data;
+  if (!snapshot_io::read_vector(in, data)) {
+    return false;
+  }
+  if (data.size() != data_.size()) {
+    return false;
+  }
+  data_ = std::move(data);
   return true;
 }
 

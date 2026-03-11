@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace aarchvm {
@@ -36,6 +37,23 @@ public:
   [[nodiscard]] std::uint64_t uart_mmio_writes() const;
   [[nodiscard]] std::uint64_t uart_config_writes() const;
   [[nodiscard]] std::uint64_t uart_id_reads() const;
+  [[nodiscard]] std::size_t uart_rx_fifo_size() const;
+  [[nodiscard]] std::uint64_t uart_rx_injected_count() const;
+  [[nodiscard]] std::uint32_t uart_cr() const;
+  [[nodiscard]] std::uint32_t uart_imsc() const;
+  [[nodiscard]] std::uint32_t uart_ris() const;
+  [[nodiscard]] std::uint64_t pstate_bits() const;
+  [[nodiscard]] std::uint64_t icc_igrpen1_el1() const;
+  [[nodiscard]] std::uint32_t exception_depth() const;
+  [[nodiscard]] bool cpu_waiting_for_interrupt() const;
+  [[nodiscard]] bool cpu_waiting_for_event() const;
+  [[nodiscard]] std::uint64_t vbar_el1() const;
+  [[nodiscard]] bool irq_masked() const;
+  [[nodiscard]] bool gic_pending(std::uint32_t intid) const;
+  [[nodiscard]] bool gic_enabled(std::uint32_t intid) const;
+  [[nodiscard]] std::uint32_t gicd_ctlr() const;
+  [[nodiscard]] bool save_snapshot(const std::string& path) const;
+  [[nodiscard]] bool load_snapshot(const std::string& path);
 
 private:
   static constexpr std::uint64_t kBootRamBase = 0x00000000;
@@ -45,10 +63,11 @@ private:
   static constexpr std::uint64_t kUartBase = 0x09000000;
   static constexpr std::uint64_t kUartSize = 0x1000;
   static constexpr std::uint64_t kGicBase = 0x08000000;
-  static constexpr std::uint64_t kGicSize = 0x10000;
+  static constexpr std::uint64_t kGicSize = 0x100000;
   static constexpr std::uint64_t kTimerBase = 0x0A000000;
   static constexpr std::uint64_t kTimerSize = 0x1000;
   static constexpr std::uint32_t kTimerIntId = 11;
+  static constexpr std::uint32_t kUartIntId = 33;
 
   Bus bus_;
   std::shared_ptr<Ram> boot_ram_;

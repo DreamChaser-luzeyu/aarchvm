@@ -36,6 +36,7 @@ run bitfield_basic.bin 400000
 run p1_core.bin 600000
 run atomics_minimal.bin 400000
 run signext_loads.bin 400000
+run signext_postindex.bin 400000
 run atomics_small.bin 400000
 run mul_high.bin 400000
 run pair_non_temporal.bin 400000
@@ -45,6 +46,9 @@ run ldrsw_regoffset.bin 400000
 run signed_regoffset.bin 400000
 run ldpsw_pair.bin 400000
 run pair_exclusive.bin 400000
+run adc_sbc_minimal.bin 200000
+run snapshot_resume.bin 200000
+run irq_nested_el1_wfi.bin 400000
 run hello_uart.bin 4000
 run branch_arith.bin 4000
 run hello_c.bin 400000
@@ -53,7 +57,30 @@ run irq_minimal.bin 1400000
 run irq_twice.bin 2400000
 run irq_disabled.bin 1200000
 run sys_ctrl.bin 1800000
+run cntkctl_el1.bin 300000
+run ldtr_sttr_usercopy.bin 400000
+run fpsimd_minimal.bin 400000
+run fpsimd_mvni.bin 400000
+run fpsimd_logic_more.bin 400000
+run fp_scalar_ls.bin 400000
+run fpsimd_ext.bin 400000
+run fp_scalar_elem_ls.bin 400000
+run fpsimd_uminp.bin 400000
+run fpsimd_umov_lane.bin 400000
+run fpsimd_stringops.bin 600000
+run pstate_pan.bin 200000
+run svc_sysreg_minimal.bin 300000
+run lse_atomics.bin 400000
+run casp_pair.bin 400000
+run lse_atomics_narrow.bin 400000
 run irq_spsel.bin 1800000
 run logic_misc.bin 300000
 run mem_ext.bin 300000
 run branch_reg.bin 300000
+
+SNAP=tests/arm64/out/snapshot_resume.snap
+rm -f "$SNAP"
+./build/aarchvm -bin tests/arm64/out/snapshot_resume.bin -load 0x0 -entry 0x0 -steps 2000 -snapshot-save "$SNAP" > tests/arm64/out/snapshot_pre.log
+./build/aarchvm -snapshot-load "$SNAP" -steps 200000 > tests/arm64/out/snapshot_post.log
+test "$(tr -d '\r\n' < tests/arm64/out/snapshot_pre.log)" = 'A'
+test "$(tr -d '\r\n' < tests/arm64/out/snapshot_post.log)" = 'B'

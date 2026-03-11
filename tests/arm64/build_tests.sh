@@ -26,6 +26,22 @@ build_asm_prog logic_misc
 build_asm_prog mem_ext
 build_asm_prog branch_reg
 build_asm_prog sys_ctrl
+build_asm_prog cntkctl_el1
+build_asm_prog ldtr_sttr_usercopy
+build_asm_prog fpsimd_minimal
+build_asm_prog fpsimd_mvni
+build_asm_prog fpsimd_logic_more
+build_asm_prog fp_scalar_ls
+build_asm_prog fpsimd_ext
+build_asm_prog fp_scalar_elem_ls
+build_asm_prog fpsimd_uminp
+build_asm_prog fpsimd_umov_lane
+build_asm_prog fpsimd_stringops
+build_asm_prog pstate_pan
+build_asm_prog svc_sysreg_minimal
+build_asm_prog lse_atomics
+build_asm_prog casp_pair
+build_asm_prog lse_atomics_narrow
 build_asm_prog irq_spsel
 build_asm_prog instr_legacy_each
 build_asm_prog mmu_tlb_cache
@@ -49,6 +65,7 @@ build_asm_prog bitfield_basic
 build_asm_prog p1_core
 build_asm_prog atomics_minimal
 build_asm_prog signext_loads
+build_asm_prog signext_postindex
 build_asm_prog atomics_small
 build_asm_prog mul_high
 build_asm_prog pair_non_temporal
@@ -58,6 +75,9 @@ build_asm_prog ldrsw_regoffset
 build_asm_prog signed_regoffset
 build_asm_prog ldpsw_pair
 build_asm_prog pair_exclusive
+build_asm_prog adc_sbc_minimal
+build_asm_prog snapshot_resume
+build_asm_prog irq_nested_el1_wfi
 
 if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
   aarch64-linux-gnu-gcc -nostdlib -static -ffreestanding -fomit-frame-pointer -fno-stack-protector \

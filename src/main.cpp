@@ -29,6 +29,8 @@ struct Options {
   std::uint64_t init_sp = 0;
   std::optional<std::string> dtb_path;
   std::uint64_t dtb_addr = 0x40000000ull;
+  std::optional<std::string> snapshot_load_path;
+  std::optional<std::string> snapshot_save_path;
   std::vector<BinaryLoad> extra_bins;
 };
 
@@ -82,7 +84,8 @@ void print_usage(const char* argv0) {
   std::cerr
       << "Usage: " << argv0 << " -bin <program.bin> "
       << "[-load <addr>] [-entry <pc>] [-steps <n>] [-sp <addr>] "
-      << "[-dtb <file>] [-dtb-addr <addr>] [-segment <file@addr>]...\n";
+      << "[-dtb <file>] [-dtb-addr <addr>] [-segment <file@addr>]... "
+      << "[-snapshot-load <file>] [-snapshot-save <file>]\n";
 }
 
 std::optional<Options> parse_args(int argc, char** argv) {
@@ -123,6 +126,10 @@ std::optional<Options> parse_args(int argc, char** argv) {
       opt.dtb_path = val;
     } else if (key == "-dtb-addr") {
       opt.dtb_addr = parse_u64(val);
+    } else if (key == "-snapshot-load") {
+      opt.snapshot_load_path = val;
+    } else if (key == "-snapshot-save") {
+      opt.snapshot_save_path = val;
     } else if (key == "-segment") {
       const std::size_t at = val.rfind('@');
       if (at == std::string::npos || at == 0 || at + 1 >= val.size()) {
@@ -139,8 +146,8 @@ std::optional<Options> parse_args(int argc, char** argv) {
     }
   }
 
-  if (opt.bin_path.empty()) {
-    std::cerr << "Missing required -bin\n";
+  if (opt.bin_path.empty() && !opt.snapshot_load_path.has_value()) {
+    std::cerr << "Missing required -bin or -snapshot-load\n";
     return std::nullopt;
   }
   if (!has_entry) {
@@ -239,72 +246,79 @@ int main(int argc, char** argv) {
 
   aarchvm::SoC soc;
 
-  std::vector<std::uint8_t> program;
-  if (!read_binary_file(opt.bin_path, program)) {
-    std::cerr << "Failed to read program binary: " << opt.bin_path << '\n';
-    return 1;
-  }
-  if (!soc.load_binary(opt.load_addr, program)) {
-    std::cerr << "Failed to load binary at 0x" << std::hex << opt.load_addr << std::dec << '\n';
-    return 1;
-  }
-
-  for (const auto& seg : opt.extra_bins) {
-    std::vector<std::uint8_t> extra;
-    if (!read_binary_file(seg.path, extra)) {
-      std::cerr << "Failed to read extra binary: " << seg.path << '\n';
+  if (opt.snapshot_load_path.has_value()) {
+    if (!soc.load_snapshot(*opt.snapshot_load_path)) {
+      std::cerr << "Failed to load snapshot: " << *opt.snapshot_load_path << '\n';
       return 1;
     }
-    if (!soc.load_binary(seg.addr, extra)) {
-      std::cerr << "Failed to load extra binary at 0x" << std::hex << seg.addr
-                << std::dec << ": " << seg.path << '\n';
+  } else {
+    std::vector<std::uint8_t> program;
+    if (!read_binary_file(opt.bin_path, program)) {
+      std::cerr << "Failed to read program binary: " << opt.bin_path << '\n';
       return 1;
     }
-  }
-
-  bool dtb_loaded = false;
-  if (opt.dtb_path.has_value() || std::getenv("AARCHVM_DTB_PATH") != nullptr) {
-    const std::string dtb_path =
-        opt.dtb_path.has_value() ? *opt.dtb_path : std::string(std::getenv("AARCHVM_DTB_PATH"));
-    const std::uint64_t dtb_addr =
-        opt.dtb_path.has_value()
-            ? opt.dtb_addr
-            : ((std::getenv("AARCHVM_DTB_ADDR") != nullptr)
-                   ? parse_u64(std::string(std::getenv("AARCHVM_DTB_ADDR")))
-                   : 0x40000000ull);
-
-    std::vector<std::uint8_t> dtb;
-    if (!read_binary_file(dtb_path, dtb)) {
-      std::cerr << "Failed to read DTB binary: " << dtb_path << '\n';
+    if (!soc.load_binary(opt.load_addr, program)) {
+      std::cerr << "Failed to load binary at 0x" << std::hex << opt.load_addr << std::dec << '\n';
       return 1;
     }
-    if (!soc.load_binary(dtb_addr, dtb)) {
-      std::cerr << "Failed to load DTB at 0x" << std::hex << dtb_addr << std::dec << '\n';
-      return 1;
-    }
-    dtb_loaded = true;
-    if (const char* dump_addr_env = std::getenv("AARCHVM_DUMP_ADDR"); dump_addr_env != nullptr) {
-      const std::uint64_t dump_addr = parse_u64(std::string(dump_addr_env));
-      const std::size_t dump_len =
-          (std::getenv("AARCHVM_DUMP_LEN") != nullptr)
-              ? static_cast<std::size_t>(parse_u64(std::string(std::getenv("AARCHVM_DUMP_LEN"))))
-              : 64u;
-      dump_bytes(soc, dump_addr, dump_len, "pre-reset");
-    }
-  }
 
-  soc.reset(opt.entry_pc);
-  if (opt.init_sp != 0) {
-    soc.set_sp(opt.init_sp);
-  }
-  if (dtb_loaded) {
-    const std::uint64_t dtb_addr =
-        opt.dtb_path.has_value()
-            ? opt.dtb_addr
-            : ((std::getenv("AARCHVM_DTB_ADDR") != nullptr)
-                   ? parse_u64(std::string(std::getenv("AARCHVM_DTB_ADDR")))
-                   : 0x40000000ull);
-    soc.set_x(0, dtb_addr);
+    for (const auto& seg : opt.extra_bins) {
+      std::vector<std::uint8_t> extra;
+      if (!read_binary_file(seg.path, extra)) {
+        std::cerr << "Failed to read extra binary: " << seg.path << '\n';
+        return 1;
+      }
+      if (!soc.load_binary(seg.addr, extra)) {
+        std::cerr << "Failed to load extra binary at 0x" << std::hex << seg.addr
+                  << std::dec << ": " << seg.path << '\n';
+        return 1;
+      }
+    }
+
+    bool dtb_loaded = false;
+    if (opt.dtb_path.has_value() || std::getenv("AARCHVM_DTB_PATH") != nullptr) {
+      const std::string dtb_path =
+          opt.dtb_path.has_value() ? *opt.dtb_path : std::string(std::getenv("AARCHVM_DTB_PATH"));
+      const std::uint64_t dtb_addr =
+          opt.dtb_path.has_value()
+              ? opt.dtb_addr
+              : ((std::getenv("AARCHVM_DTB_ADDR") != nullptr)
+                     ? parse_u64(std::string(std::getenv("AARCHVM_DTB_ADDR")))
+                     : 0x40000000ull);
+
+      std::vector<std::uint8_t> dtb;
+      if (!read_binary_file(dtb_path, dtb)) {
+        std::cerr << "Failed to read DTB binary: " << dtb_path << '\n';
+        return 1;
+      }
+      if (!soc.load_binary(dtb_addr, dtb)) {
+        std::cerr << "Failed to load DTB at 0x" << std::hex << dtb_addr << std::dec << '\n';
+        return 1;
+      }
+      dtb_loaded = true;
+      if (const char* dump_addr_env = std::getenv("AARCHVM_DUMP_ADDR"); dump_addr_env != nullptr) {
+        const std::uint64_t dump_addr = parse_u64(std::string(dump_addr_env));
+        const std::size_t dump_len =
+            (std::getenv("AARCHVM_DUMP_LEN") != nullptr)
+                ? static_cast<std::size_t>(parse_u64(std::string(std::getenv("AARCHVM_DUMP_LEN"))))
+                : 64u;
+        dump_bytes(soc, dump_addr, dump_len, "pre-reset");
+      }
+    }
+
+    soc.reset(opt.entry_pc);
+    if (opt.init_sp != 0) {
+      soc.set_sp(opt.init_sp);
+    }
+    if (dtb_loaded) {
+      const std::uint64_t dtb_addr =
+          opt.dtb_path.has_value()
+              ? opt.dtb_addr
+              : ((std::getenv("AARCHVM_DTB_ADDR") != nullptr)
+                     ? parse_u64(std::string(std::getenv("AARCHVM_DTB_ADDR")))
+                     : 0x40000000ull);
+      soc.set_x(0, dtb_addr);
+    }
   }
 
   RawStdinGuard stdin_guard;
@@ -328,6 +342,10 @@ int main(int argc, char** argv) {
             : 64u;
     dump_bytes(soc, dump_addr, dump_len, "post-run");
   }
+  if (opt.snapshot_save_path.has_value() && !soc.save_snapshot(*opt.snapshot_save_path)) {
+    std::cerr << "Failed to save snapshot: " << *opt.snapshot_save_path << "\n";
+    return 1;
+  }
   if (std::getenv("AARCHVM_PRINT_SUMMARY") != nullptr) {
     std::cerr << "SUMMARY: steps=" << soc.steps()
               << " pc=0x" << std::hex << soc.pc() << std::dec << '\n';
@@ -337,7 +355,24 @@ int main(int argc, char** argv) {
               << " reads=" << soc.uart_mmio_reads()
               << " writes=" << soc.uart_mmio_writes()
               << " config_writes=" << soc.uart_config_writes()
-              << " id_reads=" << soc.uart_id_reads() << "\n";
+              << " id_reads=" << soc.uart_id_reads()
+              << " rx_injected=" << soc.uart_rx_injected_count()
+              << " fifo=" << soc.uart_rx_fifo_size()
+              << " cr=0x" << std::hex << soc.uart_cr()
+              << " imsc=0x" << soc.uart_imsc()
+              << " ris=0x" << soc.uart_ris()
+              << " irq=" << std::dec << ((soc.uart_ris() & soc.uart_imsc()) != 0 ? 1 : 0)
+              << " pstate=0x" << std::hex << soc.pstate_bits()
+              << " irq_masked=" << std::dec << soc.irq_masked()
+              << " exc_depth=" << soc.exception_depth()
+              << " wfi=" << soc.cpu_waiting_for_interrupt()
+              << " wfe=" << soc.cpu_waiting_for_event()
+              << " icc_igrpen1=" << soc.icc_igrpen1_el1()
+              << " vbar=0x" << std::hex << soc.vbar_el1()
+              << " gicd_ctlr=0x" << soc.gicd_ctlr()
+              << " gic33_p=" << std::dec << soc.gic_pending(33)
+              << " gic33_e=" << soc.gic_enabled(33)
+              << "\n";
   }
   if (std::getenv("AARCHVM_PRINT_REGS") != nullptr) {
     std::cerr << std::hex << std::setfill('0');

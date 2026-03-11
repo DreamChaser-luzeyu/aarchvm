@@ -1,7 +1,7 @@
 # aarchvm
 
 `aarchvm` is a C++ / CMake AArch64 full-system emulator prototype using an interpreter execution model.
-The current tree is already able to boot U-Boot, hand off to a Linux `Image`, and print Linux boot logs through the emulated PL011 UART.
+The current tree is already able to boot U-Boot, hand off to a Linux `Image`, start a BusyBox `initramfs`, and enter an interactive shell through the emulated PL011 UART.
 
 ## Validated Status
 
@@ -14,16 +14,19 @@ The current repository has been validated for the following paths:
 - U-Boot boot and serial output inside the emulator.
 - U-Boot `booti` hand-off to a Linux `Image`.
 - Linux serial output through both `earlycon=pl011,...` and the normal `ttyAMA0` path.
+- Interactive BusyBox `ash` shell input has been validated.
+- Full-machine snapshot save / restore is available for fast Linux repro loops.
 
-Linux log lines already observed on the emulated serial port include:
+Linux / BusyBox output already observed and validated on the emulated serial port includes:
 - `Booting Linux on physical CPU ...`
 - `Linux version 6.12.76 ...`
 - `earlycon: pl11 at MMIO 0x0000000009000000`
-- `printk: legacy bootconsole [pl11] enabled`
 - `Serial: AMBA PL011 UART driver`
-- plus a large amount of later kernel initialization output
+- `Run /init as init process`
+- `BusyBox v1.37.0 ... built-in shell (ash)`
+- the `#` prompt, along with interactive commands such as `echo X` being echoed and executed
 
-This means the project has already moved past the earlier "kernel entered but no visible output" stage and is now in the Linux bring-up phase proper.
+This means the project has moved beyond the earlier "kernel entered but no visible output" stage and into an interactive Linux user-space shell state.
 
 ## Layout and Artifacts
 
@@ -246,6 +249,8 @@ Common optional arguments:
 - `-dtb <file>`: load a DTB
 - `-dtb-addr <addr>`: load the DTB at a given address and pass it to the guest in `x0`
 - `-segment <file@addr>`: load an extra raw segment at a specific address
+- `-snapshot-save <file>`: save a full-machine snapshot at the end of the run
+- `-snapshot-load <file>`: resume directly from a full-machine snapshot instead of cold booting
 
 ### 3. Run U-Boot
 
@@ -260,12 +265,12 @@ Common optional arguments:
   -steps 50000000
 ```
 
-### 4. Boot Linux via U-Boot
+### 4. Boot Linux / BusyBox via U-Boot
 
-This is the Linux hand-off command currently used and validated in the repository:
+If you only want to validate the U-Boot -> Linux hand-off, you can feed the `booti` command through a one-shot pipe:
 
 ```bash
-printf ' \nsetenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel\nbooti 0x40400000 - 0x47f00000\n' | \
+printf 'setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel rdinit=/init\nbooti 0x40400000 0x46000000:0x8abf4 0x47f00000\n' | \
 AARCHVM_TIMER_SCALE=100000 \
 ./build/aarchvm \
   -bin u-boot-2026.01/build-qemu_arm64/u-boot.bin \
@@ -275,17 +280,72 @@ AARCHVM_TIMER_SCALE=100000 \
   -dtb dts/aarchvm-current.dtb \
   -dtb-addr 0x40000000 \
   -segment linux-6.12.76/build-aarchvm/arch/arm64/boot/Image@0x40400000 \
+  -segment out/initramfs-full.cpio.gz@0x46000000 \
   -segment dts/aarchvm-linux-min.dtb@0x47f00000 \
-  -steps 100000000
+  -steps 1200000000
 ```
 
-Meaning of the artifacts used here:
+If you want a truly interactive BusyBox shell, do not consume stdin with `printf | ...`. Start the emulator directly and type the U-Boot commands manually at the prompt:
+
+```bash
+AARCHVM_TIMER_SCALE=100000 \
+./build/aarchvm \
+  -bin u-boot-2026.01/build-qemu_arm64/u-boot.bin \
+  -load 0x0 \
+  -entry 0x0 \
+  -sp 0x47fff000 \
+  -dtb dts/aarchvm-current.dtb \
+  -dtb-addr 0x40000000 \
+  -segment linux-6.12.76/build-aarchvm/arch/arm64/boot/Image@0x40400000 \
+  -segment out/initramfs-full.cpio.gz@0x46000000 \
+  -segment dts/aarchvm-linux-min.dtb@0x47f00000 \
+  -steps 5000000000
+```
+
+Type in U-Boot:
+
+```bash
+setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel rdinit=/init
+booti 0x40400000 0x46000000:0x8abf4 0x47f00000
+```
+
+Artifacts and addresses used by this boot chain:
 - Main DTB: `dts/aarchvm-current.dtb`, used so that U-Boot recognizes the current emulated board layout.
 - Linux DTB: `dts/aarchvm-linux-min.dtb`, passed as the third `booti` argument.
 - Kernel `Image`: loaded at `0x40400000`.
+- BusyBox `initramfs`: loaded at `0x46000000`, current size `0x8abf4`.
 - Linux DTB: loaded at `0x47f00000`.
 - Initial U-Boot `sp`: `0x47fff000`.
 - `AARCHVM_TIMER_SCALE=100000`: used to accelerate Linux progress under the interpreter model.
+
+### 5. Use Snapshots to Speed Up Linux Repro Loops
+
+The emulator now supports full-machine snapshots. A typical workflow is to run up to the BusyBox shell and save a snapshot there:
+
+```bash
+printf 'setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel rdinit=/init\nbooti 0x40400000 0x46000000:0x8abf4 0x47f00000\n' | \
+AARCHVM_TIMER_SCALE=100000 \
+./build/aarchvm \
+  -bin u-boot-2026.01/build-qemu_arm64/u-boot.bin \
+  -load 0x0 \
+  -entry 0x0 \
+  -sp 0x47fff000 \
+  -dtb dts/aarchvm-current.dtb \
+  -dtb-addr 0x40000000 \
+  -segment linux-6.12.76/build-aarchvm/arch/arm64/boot/Image@0x40400000 \
+  -segment out/initramfs-full.cpio.gz@0x46000000 \
+  -segment dts/aarchvm-linux-min.dtb@0x47f00000 \
+  -steps 1200000000 \
+  -snapshot-save out/linux-shell-v2.snap
+```
+
+Then resume directly near the shell with:
+
+```bash
+./build/aarchvm -snapshot-load out/linux-shell-v2.snap -steps 500000000
+```
+
+This is especially useful when debugging serial input, GIC, timer, syscall, or user-space shell issues.
 
 ## Current DT Conventions
 
@@ -315,8 +375,14 @@ The current implementation already covers and validates:
 - synchronous exception handling via `ESR_EL1/FAR_EL1/ELR_EL1/SPSR_EL1`
 - minimal GICv3 system-register CPU interface
 - minimal Generic Timer sysreg path
-- PL011 earlycon and normal console output paths
+- PL011 earlycon, normal console output, and BusyBox shell input
+- `WFI` wakeup semantics plus nested IRQ delivery while already in EL1 exception context
 - a growing set of atomics, sysregs, cache-maintenance instructions, and load/store forms encountered during Linux bring-up
+- full-machine snapshot save / restore
+
+The shell-input fix depended on two concrete behavioral corrections in the CPU model:
+- `WFI/WFE` now leave the wait state as soon as an interrupt becomes pending, even if `PSTATE.I` still delays immediate delivery.
+- IRQ entry is now permitted while Linux is already running inside EL1 exception context, which is required by the kernel idle/console path.
 
 ## Tests
 
@@ -337,14 +403,16 @@ The current regression suite covers:
 - MMU/TLB/cache-maintenance tests
 - synchronous exception register tests
 - GICv3 + timer sysreg IRQ tests
+- `irq_nested_el1_wfi` for `WFI` wakeup plus nested EL1 IRQ delivery
+- `snapshot_resume` for full-machine snapshot save / restore
 - atomic / exclusive-access tests
 - additional instruction samples added during Linux bring-up
 
 ## Current Limitations and Next Steps
 
-Even though the current tree can already print Linux boot logs reliably, several platform-level pieces still matter for a full Linux-to-rootfs path:
+Even though the current tree can already enter a BusyBox shell and handle basic interactive input, several platform-level pieces still matter for a more complete Linux system:
 - more complete GICv3 distributor / redistributor MMIO behavior
-- more complete architected timer interrupt integration
+- more complete architected timer and power-management behavior
 - storage / block-device models required by rootfs mounting
 - more complete PSCI / SMCCC / power-management flows
 - continued ISA and sysreg expansion for deeper Linux init paths

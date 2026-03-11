@@ -1,5 +1,7 @@
 #include <cstdlib>
+#include <fstream>
 
+#include "aarchvm/snapshot_io.hpp"
 #include "aarchvm/soc.hpp"
 
 namespace aarchvm {
@@ -84,6 +86,9 @@ bool SoC::run(std::size_t max_steps) {
       gic_->set_pending(kTimerIntId);
       timer_->clear_irq();
     }
+    if (uart_->irq_pending()) {
+      gic_->set_pending(kUartIntId);
+    }
     cpu_.set_cntvct(timer_->counter());
     if (!cpu_.step()) {
       return cpu_.halted();
@@ -135,5 +140,127 @@ std::uint64_t SoC::uart_config_writes() const {
 std::uint64_t SoC::uart_id_reads() const {
   return uart_->id_reads();
 }
+
+
+std::size_t SoC::uart_rx_fifo_size() const {
+  return uart_->rx_fifo_size();
+}
+
+std::uint64_t SoC::uart_rx_injected_count() const {
+  return uart_->rx_injected_count();
+}
+
+std::uint32_t SoC::uart_cr() const {
+  return uart_->cr();
+}
+
+std::uint32_t SoC::uart_imsc() const {
+  return uart_->imsc();
+}
+
+std::uint32_t SoC::uart_ris() const {
+  return uart_->ris();
+}
+
+
+std::uint64_t SoC::pstate_bits() const {
+  return cpu_.pstate_bits();
+}
+
+std::uint64_t SoC::icc_igrpen1_el1() const {
+  return cpu_.icc_igrpen1_el1();
+}
+
+std::uint32_t SoC::exception_depth() const {
+  return cpu_.exception_depth();
+}
+
+bool SoC::cpu_waiting_for_interrupt() const {
+  return cpu_.waiting_for_interrupt();
+}
+
+bool SoC::cpu_waiting_for_event() const {
+  return cpu_.waiting_for_event();
+}
+
+std::uint64_t SoC::vbar_el1() const {
+  return cpu_.vbar_el1();
+}
+
+bool SoC::irq_masked() const {
+  return cpu_.irq_masked();
+}
+
+bool SoC::gic_pending(std::uint32_t intid) const {
+  return gic_->pending(intid);
+}
+
+bool SoC::gic_enabled(std::uint32_t intid) const {
+  return gic_->enabled(intid);
+}
+
+std::uint32_t SoC::gicd_ctlr() const {
+  return gic_->gicd_ctlr();
+}
+
+bool SoC::save_snapshot(const std::string& path) const {
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  if (!out) {
+    return false;
+  }
+  static constexpr char kMagic[8] = {'A', 'A', 'R', 'C', 'H', 'S', 'N', 'P'};
+  static constexpr std::uint32_t kVersion = 1;
+  out.write(kMagic, sizeof(kMagic));
+  if (!out ||
+      !snapshot_io::write(out, kVersion) ||
+      !snapshot_io::write(out, kBootRamBase) ||
+      !snapshot_io::write(out, kBootRamSize) ||
+      !snapshot_io::write(out, kSdramBase) ||
+      !snapshot_io::write(out, kSdramSize) ||
+      !snapshot_io::write(out, timer_tick_scale_) ||
+      !boot_ram_->save_state(out) ||
+      !sdram_->save_state(out) ||
+      !uart_->save_state(out) ||
+      !gic_->save_state(out) ||
+      !timer_->save_state(out) ||
+      !cpu_.save_state(out)) {
+    return false;
+  }
+  return static_cast<bool>(out);
+}
+
+bool SoC::load_snapshot(const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    return false;
+  }
+  char magic[8] = {};
+  std::uint32_t version = 0;
+  std::uint64_t boot_ram_base = 0;
+  std::uint64_t boot_ram_size = 0;
+  std::uint64_t sdram_base = 0;
+  std::uint64_t sdram_size = 0;
+  if (!in.read(magic, sizeof(magic)) ||
+      !snapshot_io::read(in, version) ||
+      !snapshot_io::read(in, boot_ram_base) ||
+      !snapshot_io::read(in, boot_ram_size) ||
+      !snapshot_io::read(in, sdram_base) ||
+      !snapshot_io::read(in, sdram_size) ||
+      magic[0] != 'A' || magic[1] != 'A' || magic[2] != 'R' || magic[3] != 'C' ||
+      magic[4] != 'H' || magic[5] != 'S' || magic[6] != 'N' || magic[7] != 'P' ||
+      version != 1 || boot_ram_base != kBootRamBase || boot_ram_size != kBootRamSize ||
+      sdram_base != kSdramBase || sdram_size != kSdramSize ||
+      !snapshot_io::read(in, timer_tick_scale_) ||
+      !boot_ram_->load_state(in) ||
+      !sdram_->load_state(in) ||
+      !uart_->load_state(in) ||
+      !gic_->load_state(in) ||
+      !timer_->load_state(in) ||
+      !cpu_.load_state(in)) {
+    return false;
+  }
+  return static_cast<bool>(in);
+}
+
 
 } // namespace aarchvm

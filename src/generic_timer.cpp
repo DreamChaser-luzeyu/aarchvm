@@ -1,5 +1,7 @@
 #include "aarchvm/generic_timer.hpp"
 
+#include "aarchvm/snapshot_io.hpp"
+
 #include <cstdint>
 
 namespace aarchvm {
@@ -81,6 +83,30 @@ void GenericTimer::write_cntv_tval_el0(std::uint64_t value) {
   const std::int64_t sval = static_cast<std::int32_t>(value & 0xFFFFFFFFu);
   cntv_cval_el0_ = static_cast<std::uint64_t>(static_cast<std::int64_t>(counter_) + sval);
   cntv_fired_ = false;
+}
+
+bool GenericTimer::save_state(std::ostream& out) const {
+    return snapshot_io::write(out, counter_) &&
+         snapshot_io::write(out, compare_) &&
+         snapshot_io::write_bool(out, enabled_) &&
+         snapshot_io::write_bool(out, irq_pending_) &&
+         snapshot_io::write_bool(out, fired_) &&
+         snapshot_io::write(out, cntv_cval_el0_) &&
+         snapshot_io::write_bool(out, cntv_enable_) &&
+         snapshot_io::write_bool(out, cntv_imask_) &&
+         snapshot_io::write_bool(out, cntv_fired_);
+}
+
+bool GenericTimer::load_state(std::istream& in) {
+    return snapshot_io::read(in, counter_) &&
+         snapshot_io::read(in, compare_) &&
+         snapshot_io::read_bool(in, enabled_) &&
+         snapshot_io::read_bool(in, irq_pending_) &&
+         snapshot_io::read_bool(in, fired_) &&
+         snapshot_io::read(in, cntv_cval_el0_) &&
+         snapshot_io::read_bool(in, cntv_enable_) &&
+         snapshot_io::read_bool(in, cntv_imask_) &&
+         snapshot_io::read_bool(in, cntv_fired_);
 }
 
 } // namespace aarchvm

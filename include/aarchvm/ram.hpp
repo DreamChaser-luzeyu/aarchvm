@@ -3,6 +3,7 @@
 #include "aarchvm/device.hpp"
 
 #include <cstdint>
+#include <iosfwd>
 #include <vector>
 
 namespace aarchvm {
@@ -18,6 +19,8 @@ public:
 
   bool load(std::uint64_t offset, const std::vector<std::uint32_t>& words);
   bool load_bytes(std::uint64_t offset, const std::vector<std::uint8_t>& bytes);
+  [[nodiscard]] bool save_state(std::ostream& out) const;
+  [[nodiscard]] bool load_state(std::istream& in);
 
 private:
   std::vector<std::uint8_t> data_;

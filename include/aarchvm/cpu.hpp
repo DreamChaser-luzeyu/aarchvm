@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <iosfwd>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -22,7 +23,7 @@ public:
 
   void reset(std::uint64_t pc);
   void set_cntvct(std::uint64_t value);
-  void set_sp(std::uint64_t value) { regs_[31] = value; }
+  void set_sp(std::uint64_t value);
   void set_x(std::uint32_t idx, std::uint64_t value) {
     if (idx < 32) {
       regs_[idx] = value;
@@ -33,6 +34,15 @@ public:
   [[nodiscard]] std::uint64_t steps() const { return steps_; }
   [[nodiscard]] std::uint64_t x(std::uint32_t idx) const { return reg(idx); }
   [[nodiscard]] std::uint64_t sp() const { return regs_[31]; }
+  [[nodiscard]] std::uint64_t pstate_bits() const { return sysregs_.pstate_bits(); }
+  [[nodiscard]] std::uint64_t icc_igrpen1_el1() const { return icc_igrpen1_el1_; }
+  [[nodiscard]] std::uint32_t exception_depth() const { return exception_depth_; }
+  [[nodiscard]] bool waiting_for_interrupt() const { return waiting_for_interrupt_; }
+  [[nodiscard]] bool waiting_for_event() const { return waiting_for_event_; }
+  [[nodiscard]] std::uint64_t vbar_el1() const { return sysregs_.vbar_el1(); }
+  [[nodiscard]] bool irq_masked() const { return sysregs_.irq_masked(); }
+  [[nodiscard]] bool save_state(std::ostream& out) const;
+  [[nodiscard]] bool load_state(std::istream& in);
 
 private:
   enum class AccessType {
@@ -137,6 +147,8 @@ private:
   void tlb_flush_all();
   void tlb_flush_va(std::uint64_t va);
   void parse_pc_watch_list();
+  void save_current_sp_to_bank();
+  void load_current_sp_from_bank();
 
   [[nodiscard]] std::uint64_t reg(std::uint32_t idx) const;
   [[nodiscard]] std::uint32_t reg32(std::uint32_t idx) const;
@@ -144,6 +156,8 @@ private:
   void set_reg32(std::uint32_t idx, std::uint32_t value);
   [[nodiscard]] std::uint64_t sp_or_reg(std::uint32_t idx) const;
   void set_sp_or_reg(std::uint32_t idx, std::uint64_t value, bool is_32bit);
+  [[nodiscard]] std::uint64_t q_reg_lane(std::uint32_t idx, std::size_t lane) const;
+  void set_q_reg_lane(std::uint32_t idx, std::size_t lane, std::uint64_t value);
 
   bool exec_branch(std::uint32_t insn);
   bool exec_system(std::uint32_t insn);
@@ -160,20 +174,34 @@ private:
   GicV3& gic_;
   GenericTimer& timer_;
   std::array<std::uint64_t, 32> regs_{};
+  std::array<std::array<std::uint64_t, 2>, 32> qregs_{};
   SystemRegisters sysregs_{};
-  bool in_exception_ = false;
-  bool active_exception_is_irq_ = false;
+  std::uint32_t exception_depth_ = 0;
+  std::array<bool, 8> exception_is_irq_stack_{};
+  std::array<std::uint32_t, 8> exception_intid_stack_{};
   bool sync_reported_ = false;
   bool trace_exceptions_ = false;
+  bool trace_all_exceptions_ = false;
   bool trace_brk_ = false;
+  std::optional<std::uint64_t> trace_va_;
+  bool trace_va_hit_ = false;
+  std::uint64_t trace_svc_limit_ = 0;
+  std::uint64_t trace_svc_count_ = 0;
+  std::uint64_t trace_eret_lower_limit_ = 0;
+  std::uint64_t trace_eret_lower_count_ = 0;
+  std::uint64_t trace_lower_sync_limit_ = 0;
+  std::uint64_t trace_lower_sync_count_ = 0;
   std::unordered_map<std::uint64_t, bool> pc_watch_hits_;
-  std::uint32_t active_intid_ = 0;
   bool waiting_for_interrupt_ = false;
   bool waiting_for_event_ = false;
   bool event_register_ = false;
   std::uint64_t icc_pmr_el1_ = 0xFF;
   std::uint64_t icc_ctlr_el1_ = 0;
   std::uint64_t icc_sre_el1_ = 0;
+  std::uint64_t icc_bpr1_el1_ = 0;
+  std::uint64_t icc_igrpen1_el1_ = 0;
+  std::array<std::uint64_t, 4> icc_ap0r_el1_{};
+  std::array<std::uint64_t, 4> icc_ap1r_el1_{};
   bool exclusive_valid_ = false;
   std::uint64_t exclusive_addr_ = 0;
   std::uint8_t exclusive_size_ = 0;

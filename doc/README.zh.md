@@ -1,7 +1,7 @@
 # aarchvm
 
 `aarchvm` 是一个使用 C++ 和 CMake 开发的 AArch64 全系统解释执行模拟器原型。
-当前仓库已经具备从 U-Boot 进入 Linux 内核、并通过 PL011 串口输出 Linux 启动日志的能力。
+当前仓库已经具备从 U-Boot 进入 Linux 内核、启动 BusyBox `initramfs`，并通过 PL011 串口进入可交互 shell 的能力。
 
 ## 当前验证状态
 
@@ -14,16 +14,19 @@
 - U-Boot 在模拟器中启动并输出串口日志。
 - U-Boot 通过 `booti` 启动 Linux `Image`。
 - Linux `earlycon=pl011,...` 和正式 `ttyAMA0` 串口路径均可输出日志。
+- BusyBox `ash` 用户态 shell 已验证可交互输入。
+- 整机 snapshot 保存 / 恢复，可从 Linux shell 附近快速复现问题。
 
-当前已经在串口上看到的 Linux 日志包括：
+当前已经在串口上看到并验证的 Linux / BusyBox 输出包括：
 - `Booting Linux on physical CPU ...`
 - `Linux version 6.12.76 ...`
 - `earlycon: pl11 at MMIO 0x0000000009000000`
-- `printk: legacy bootconsole [pl11] enabled`
 - `Serial: AMBA PL011 UART driver`
-- 以及后续大量内核初始化日志
+- `Run /init as init process`
+- `BusyBox v1.37.0 ... built-in shell (ash)`
+- `#` shell 提示符，以及 `echo X` 这类交互命令的回显与执行结果
 
-这说明当前仓库已经稳定跨过了“无输出、无法确认是否进入内核”的阶段，正式进入 Linux 启动推进阶段。
+这说明当前仓库已经稳定跨过了“无输出、无法确认是否进入内核”的阶段，进入了“Linux 用户态 shell 可交互”的状态。
 
 ## 目录与构件
 
@@ -246,6 +249,8 @@ CONFIG_TMPFS_POSIX_ACL=y
 - `-dtb <file>`：装载 DTB
 - `-dtb-addr <addr>`：指定 DTB 载入地址，并通过 `x0` 传入 guest
 - `-segment <file@addr>`：把额外二进制段载入到指定地址
+- `-snapshot-save <file>`：在本次运行结束时保存整机快照
+- `-snapshot-load <file>`：直接从整机快照恢复运行，不再重新冷启动
 
 ### 3. 运行 U-Boot
 
@@ -260,12 +265,12 @@ CONFIG_TMPFS_POSIX_ACL=y
   -steps 50000000
 ```
 
-### 4. 通过 U-Boot 启动 Linux
+### 4. 通过 U-Boot 启动 Linux / BusyBox
 
-当前仓库中实际使用并验证过的命令如下：
+如果只是验证从 U-Boot 进入 Linux，可以使用一次性管道把 `booti` 命令喂给 U-Boot：
 
 ```bash
-printf ' \nsetenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel\nbooti 0x40400000 - 0x47f00000\n' | \
+printf 'setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel rdinit=/init\nbooti 0x40400000 0x46000000:0x8abf4 0x47f00000\n' | \
 AARCHVM_TIMER_SCALE=100000 \
 ./build/aarchvm \
   -bin u-boot-2026.01/build-qemu_arm64/u-boot.bin \
@@ -275,17 +280,72 @@ AARCHVM_TIMER_SCALE=100000 \
   -dtb dts/aarchvm-current.dtb \
   -dtb-addr 0x40000000 \
   -segment linux-6.12.76/build-aarchvm/arch/arm64/boot/Image@0x40400000 \
+  -segment out/initramfs-full.cpio.gz@0x46000000 \
   -segment dts/aarchvm-linux-min.dtb@0x47f00000 \
-  -steps 100000000
+  -steps 1200000000
 ```
 
-该命令的含义是：
+如果需要真正进入 BusyBox 交互式 shell，不要把 stdin 用在 `printf | ...` 管道上，而是先启动模拟器，再在 U-Boot 提示符中手工输入：
+
+```bash
+AARCHVM_TIMER_SCALE=100000 \
+./build/aarchvm \
+  -bin u-boot-2026.01/build-qemu_arm64/u-boot.bin \
+  -load 0x0 \
+  -entry 0x0 \
+  -sp 0x47fff000 \
+  -dtb dts/aarchvm-current.dtb \
+  -dtb-addr 0x40000000 \
+  -segment linux-6.12.76/build-aarchvm/arch/arm64/boot/Image@0x40400000 \
+  -segment out/initramfs-full.cpio.gz@0x46000000 \
+  -segment dts/aarchvm-linux-min.dtb@0x47f00000 \
+  -steps 5000000000
+```
+
+U-Boot 中输入：
+
+```bash
+setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel rdinit=/init
+booti 0x40400000 0x46000000:0x8abf4 0x47f00000
+```
+
+该启动链中使用的关键工件与地址：
 - 主 DTB：`dts/aarchvm-current.dtb`，用于让 U-Boot 识别当前模拟器平台。
 - Linux DTB：`dts/aarchvm-linux-min.dtb`，作为 `booti` 的第三个参数传给 Linux。
 - Kernel `Image`：加载到 `0x40400000`。
+- BusyBox `initramfs`：加载到 `0x46000000`，当前大小 `0x8abf4`。
 - Linux DTB：加载到 `0x47f00000`。
 - U-Boot 初始 `sp`：`0x47fff000`。
 - `AARCHVM_TIMER_SCALE=100000`：用于加快当前解释执行模式下的 Linux 启动推进速度。
+
+### 5. 使用 snapshot 加速 Linux 复测
+
+当前模拟器已经支持整机 snapshot。一次典型用法是先跑到 BusyBox shell，再保存快照：
+
+```bash
+printf 'setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel rdinit=/init\nbooti 0x40400000 0x46000000:0x8abf4 0x47f00000\n' | \
+AARCHVM_TIMER_SCALE=100000 \
+./build/aarchvm \
+  -bin u-boot-2026.01/build-qemu_arm64/u-boot.bin \
+  -load 0x0 \
+  -entry 0x0 \
+  -sp 0x47fff000 \
+  -dtb dts/aarchvm-current.dtb \
+  -dtb-addr 0x40000000 \
+  -segment linux-6.12.76/build-aarchvm/arch/arm64/boot/Image@0x40400000 \
+  -segment out/initramfs-full.cpio.gz@0x46000000 \
+  -segment dts/aarchvm-linux-min.dtb@0x47f00000 \
+  -steps 1200000000 \
+  -snapshot-save out/linux-shell-v2.snap
+```
+
+之后可直接从 shell 附近恢复：
+
+```bash
+./build/aarchvm -snapshot-load out/linux-shell-v2.snap -steps 500000000
+```
+
+这对于排查串口、GIC、timer、系统调用、用户态 shell 输入等问题非常有用。
 
 ## 当前 DT 约定
 
@@ -315,8 +375,14 @@ AARCHVM_TIMER_SCALE=100000 \
 - `ESR_EL1/FAR_EL1/ELR_EL1/SPSR_EL1` 同步异常路径
 - 最小 GICv3 sysreg CPU 接口
 - 最小 Generic Timer sysreg 路径
-- PL011 `earlycon` 与正式控制台输出路径
+- PL011 `earlycon`、正式控制台、以及 BusyBox shell 输入路径
+- `WFI` 唤醒语义与 EL1 异常上下文中的嵌套 IRQ 接收
 - Linux 启动中实际使用到的一批原子、system register、cache maintenance 和 load/store 指令
+- 整机 snapshot 保存 / 恢复
+
+BusyBox shell 输入问题最终依赖两个 CPU 语义修正：
+- `WFI/WFE` 在“中断已 pending 但暂时还不能立即投递”时也会先退出等待态，避免 Linux idle 卡死。
+- 允许 Linux 在已经处于 EL1 异常上下文时继续接收 IRQ，这对内核 idle/console 路径是必要条件。
 
 ## 测试
 
@@ -337,14 +403,16 @@ tests/arm64/run_all.sh
 - MMU/TLB/缓存维护测试
 - 同步异常寄存器测试
 - GICv3 + timer sysreg 中断测试
+- `irq_nested_el1_wfi`：验证 `WFI` 唤醒与 EL1 异常上下文中的嵌套 IRQ
+- `snapshot_resume`：验证整机 snapshot 保存与恢复
 - 原子/排他访存测试
 - 多组 Linux bring-up 过程中补入的指令样例
 
 ## 当前局限与下一步
 
-虽然当前仓库已经能够稳定输出 Linux 启动日志，但仍有若干平台级工作会继续影响“完整 Linux 到 rootfs”的推进，包括：
+虽然当前仓库已经能够稳定进入 BusyBox shell 并完成基本交互，但仍有若干平台级工作会继续影响“更完整 Linux 系统”的推进，包括：
 - 更完整的 GICv3 distributor / redistributor MMIO 模型
-- 更完整的 architected timer 中断接入
+- 更完整的 architected timer / power-management 行为
 - 块设备 / rootfs 所需设备模型
 - 更完整的 PSCI / SMCCC / 电源管理路径
 - 进一步扩展 Linux 深层初始化阶段用到的指令与 sysreg

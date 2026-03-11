@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <iosfwd>
 
 namespace aarchvm {
 
@@ -16,6 +17,8 @@ public:
     bool a = false;
     bool i = false;
     bool f = false;
+    bool pan = false;
+    std::uint8_t mode = 0x5; // PSR_MODE_EL1h
   };
 
   void reset();
@@ -41,7 +44,12 @@ public:
   void set_nzcv(std::uint64_t value);
   [[nodiscard]] std::uint64_t daif() const;
   void set_daif(std::uint64_t value);
+  [[nodiscard]] std::uint64_t pstate_bits() const;
+  void set_pstate_bits(std::uint64_t value);
+  [[nodiscard]] bool pan() const { return pstate_.pan; }
+  void set_pan(bool value) { pstate_.pan = value; }
   [[nodiscard]] bool mmu_enabled() const { return (sctlr_el1_ & 1u) != 0; }
+  [[nodiscard]] std::uint64_t sctlr_el1() const { return sctlr_el1_; }
   [[nodiscard]] std::uint64_t ttbr0_el1() const { return ttbr0_el1_; }
   [[nodiscard]] std::uint64_t ttbr1_el1() const { return ttbr1_el1_; }
   [[nodiscard]] std::uint64_t tcr_el1() const { return tcr_el1_; }
@@ -55,6 +63,7 @@ public:
   [[nodiscard]] std::uint64_t far_el1() const { return far_el1_; }
   [[nodiscard]] std::uint64_t mdscr_el1() const { return mdscr_el1_; }
   [[nodiscard]] std::uint64_t tpidr_el0() const { return tpidr_el0_; }
+  [[nodiscard]] std::uint64_t tpidr2_el0() const { return tpidr2_el0_; }
   [[nodiscard]] std::uint64_t tpidrro_el0() const { return tpidrro_el0_; }
   [[nodiscard]] std::uint64_t tpidr_el1() const { return tpidr_el1_; }
   [[nodiscard]] std::uint64_t tpidr_el2() const { return tpidr_el2_; }
@@ -62,14 +71,24 @@ public:
   void set_cntvct(std::uint64_t value) { cntvct_el0_ = value; }
   [[nodiscard]] std::uint64_t vbar_el1() const { return vbar_el1_; }
   [[nodiscard]] bool irq_masked() const { return pstate_.i; }
-  [[nodiscard]] bool use_sp_elx() const { return spsel_ != 0; }
-  void set_spsel(std::uint64_t value) { spsel_ = value & 1u; }
+  [[nodiscard]] std::uint8_t current_el() const { return static_cast<std::uint8_t>((pstate_.mode >> 2) & 0x3u); }
+  [[nodiscard]] bool in_el0() const { return current_el() == 0u; }
+  [[nodiscard]] bool current_uses_sp_el0() const { return pstate_.mode == 0x0u || pstate_.mode == 0x4u; }
+  [[nodiscard]] bool use_sp_elx() const { return !current_uses_sp_el0(); }
+  [[nodiscard]] std::uint64_t sp_el0() const { return sp_el0_; }
+  void set_sp_el0(std::uint64_t value) { sp_el0_ = value; }
+  [[nodiscard]] std::uint64_t sp_el1() const { return sp_el1_; }
+  void set_sp_el1(std::uint64_t value) { sp_el1_ = value; }
+  void set_spsel(std::uint64_t value);
 
   void exception_enter_irq(std::uint64_t return_pc);
   void exception_enter_sync(std::uint64_t return_pc, std::uint32_t ec, std::uint32_t iss, bool far_valid, std::uint64_t far);
   [[nodiscard]] std::uint64_t exception_return();
   void daif_set(std::uint8_t imm4);
   void daif_clr(std::uint8_t imm4);
+
+  [[nodiscard]] bool save_state(std::ostream& out) const;
+  [[nodiscard]] bool load_state(std::istream& in);
 
 private:
   static std::uint32_t make_key(std::uint32_t op0,
@@ -90,7 +109,7 @@ private:
   std::uint64_t id_aa64pfr1_el1_ = 0;
   std::uint64_t id_aa64dfr0_el1_ = 0;
   std::uint64_t id_aa64dfr1_el1_ = 0;
-  std::uint64_t id_aa64isar0_el1_ = 0;
+  std::uint64_t id_aa64isar0_el1_ = 0x0000000000200000ull;
   std::uint64_t id_aa64isar1_el1_ = 0;
   std::uint64_t id_aa64isar2_el1_ = 0;
   std::uint64_t id_aa64isar3_el1_ = 0;
@@ -125,11 +144,15 @@ private:
   std::uint64_t pmuserenr_el0_ = 0;
   std::uint64_t amuserenr_el0_ = 0;
   std::uint64_t tpidr_el0_ = 0;
+  std::uint64_t tpidr2_el0_ = 0;
   std::uint64_t tpidrro_el0_ = 0;
   std::uint64_t tpidr_el1_ = 0;
   std::uint64_t tpidr_el2_ = 0;
   std::uint64_t cntfrq_el0_ = 100000000;
   std::uint64_t cntvct_el0_ = 0;
+  std::uint64_t cntkctl_el1_ = 0;
+  std::uint64_t fpcr_ = 0;
+  std::uint64_t fpsr_ = 0;
   PState pstate_{};
 };
 

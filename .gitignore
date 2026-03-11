@@ -8,3 +8,6 @@ tests/arm64/out/
 **/*.pdf
 **/compile_commands.json
 compile_commands.json
+busybox-1.37.0/
+**/*.log
+out/

@@ -1,5 +1,7 @@
 #include "aarchvm/cpu.hpp"
 
+#include "aarchvm/snapshot_io.hpp"
+
 #include <cstdlib>
 #include <iostream>
 #include <sstream>
@@ -135,9 +137,92 @@ bool decode_bit_masks(std::uint32_t n,
   return true;
 }
 
+std::uint64_t vector_get_bits(const std::array<std::uint64_t, 2>& qreg, std::uint32_t lsb, std::uint32_t width) {
+  if (width == 0u || width > 64u || lsb >= 128u) {
+    return 0;
+  }
+  if (lsb >= 64u) {
+    return (qreg[1] >> (lsb - 64u)) & ones(width);
+  }
+  if (lsb + width <= 64u) {
+    return (qreg[0] >> lsb) & ones(width);
+  }
+  const std::uint32_t low_bits = 64u - lsb;
+  const std::uint64_t low = (qreg[0] >> lsb) & ones(low_bits);
+  const std::uint64_t high = qreg[1] & ones(width - low_bits);
+  return low | (high << low_bits);
+}
+
+void vector_set_bits(std::array<std::uint64_t, 2>& qreg, std::uint32_t lsb, std::uint32_t width, std::uint64_t value) {
+  if (width == 0u || width > 64u || lsb >= 128u) {
+    return;
+  }
+  value &= ones(width);
+  if (lsb >= 64u) {
+    const std::uint32_t off = lsb - 64u;
+    const std::uint64_t mask = (width == 64u) ? ~0ull : (ones(width) << off);
+    qreg[1] = (qreg[1] & ~mask) | ((value << off) & mask);
+    return;
+  }
+  if (lsb + width <= 64u) {
+    const std::uint64_t mask = (width == 64u) ? ~0ull : (ones(width) << lsb);
+    qreg[0] = (qreg[0] & ~mask) | ((value << lsb) & mask);
+    return;
+  }
+  const std::uint32_t low_bits = 64u - lsb;
+  const std::uint32_t high_bits = width - low_bits;
+  const std::uint64_t low_mask = ones(low_bits) << lsb;
+  const std::uint64_t high_mask = ones(high_bits);
+  qreg[0] = (qreg[0] & ~low_mask) | ((value & ones(low_bits)) << lsb);
+  qreg[1] = (qreg[1] & ~high_mask) | ((value >> low_bits) & high_mask);
+}
+
+std::uint64_t vector_get_elem(const std::array<std::uint64_t, 2>& qreg, std::uint32_t esize_bits, std::uint32_t index) {
+  return vector_get_bits(qreg, esize_bits * index, esize_bits);
+}
+
+void vector_set_elem(std::array<std::uint64_t, 2>& qreg,
+                     std::uint32_t esize_bits,
+                     std::uint32_t index,
+                     std::uint64_t value) {
+  vector_set_bits(qreg, esize_bits * index, esize_bits, value);
+}
+
+std::uint32_t highest_set_bit(std::uint32_t value) {
+  for (std::uint32_t bit = 31; bit != static_cast<std::uint32_t>(-1); --bit) {
+    if (((value >> bit) & 1u) != 0u) {
+      return bit;
+    }
+  }
+  return 0u;
+}
+
+
+
 } // namespace
 
 Cpu::Cpu(Bus& bus, GicV3& gic, GenericTimer& timer) : bus_(bus), gic_(gic), timer_(timer) {}
+
+void Cpu::set_sp(std::uint64_t value) {
+  regs_[31] = value;
+  if (sysregs_.current_uses_sp_el0()) {
+    sysregs_.set_sp_el0(value);
+  } else {
+    sysregs_.set_sp_el1(value);
+  }
+}
+
+void Cpu::save_current_sp_to_bank() {
+  if (sysregs_.current_uses_sp_el0()) {
+    sysregs_.set_sp_el0(regs_[31]);
+  } else {
+    sysregs_.set_sp_el1(regs_[31]);
+  }
+}
+
+void Cpu::load_current_sp_from_bank() {
+  regs_[31] = sysregs_.current_uses_sp_el0() ? sysregs_.sp_el0() : sysregs_.sp_el1();
+}
 
 void Cpu::parse_pc_watch_list() {
   pc_watch_hits_.clear();
@@ -159,24 +244,65 @@ void Cpu::parse_pc_watch_list() {
   }
 }
 
+static std::optional<std::uint64_t> parse_trace_va_env() {
+  const char* env = std::getenv("AARCHVM_TRACE_VA");
+  if (env == nullptr || *env == '\0') {
+    return std::nullopt;
+  }
+  try {
+    return static_cast<std::uint64_t>(std::stoull(env, nullptr, 0));
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+static std::uint64_t parse_trace_limit_env(const char* name) {
+  const char* env = std::getenv(name);
+  if (env == nullptr || *env == '\0') {
+    return 0;
+  }
+  try {
+    return static_cast<std::uint64_t>(std::stoull(env, nullptr, 0));
+  } catch (...) {
+    return 0;
+  }
+}
+
 void Cpu::reset(std::uint64_t pc) {
   const std::uint64_t sp_saved = regs_[31];
   regs_.fill(0);
+  for (auto& qreg : qregs_) {
+    qreg = {0, 0};
+  }
   regs_[31] = sp_saved;
   sysregs_.reset();
-  in_exception_ = false;
-  active_exception_is_irq_ = false;
+  sysregs_.set_sp_el1(sp_saved);
+  exception_depth_ = 0;
+  exception_is_irq_stack_.fill(false);
+  exception_intid_stack_.fill(0);
   sync_reported_ = false;
   trace_exceptions_ = (std::getenv("AARCHVM_TRACE_EXC") != nullptr);
+  trace_all_exceptions_ = (std::getenv("AARCHVM_TRACE_ALL_EXC") != nullptr);
   trace_brk_ = (std::getenv("AARCHVM_TRACE_BRK") != nullptr);
   parse_pc_watch_list();
-  active_intid_ = 0;
+  trace_va_ = parse_trace_va_env();
+  trace_va_hit_ = false;
+  trace_svc_limit_ = parse_trace_limit_env("AARCHVM_TRACE_SVC_LIMIT");
+  trace_svc_count_ = 0;
+  trace_eret_lower_limit_ = parse_trace_limit_env("AARCHVM_TRACE_ERET_LOWER_LIMIT");
+  trace_eret_lower_count_ = 0;
+  trace_lower_sync_limit_ = parse_trace_limit_env("AARCHVM_TRACE_LOWER_SYNC_LIMIT");
+  trace_lower_sync_count_ = 0;
   waiting_for_interrupt_ = false;
   waiting_for_event_ = false;
   event_register_ = false;
   icc_pmr_el1_ = 0xFF;
   icc_ctlr_el1_ = 0;
   icc_sre_el1_ = 0;
+  icc_bpr1_el1_ = 0;
+  icc_igrpen1_el1_ = 0;
+  icc_ap0r_el1_.fill(0);
+  icc_ap1r_el1_.fill(0);
   exclusive_valid_ = false;
   exclusive_addr_ = 0;
   exclusive_size_ = 0;
@@ -197,8 +323,12 @@ bool Cpu::step() {
   }
 
   if (waiting_for_interrupt_) {
-    if (try_take_irq()) {
+    if (gic_.has_pending()) {
       waiting_for_interrupt_ = false;
+      if (try_take_irq()) {
+        ++steps_;
+        return true;
+      }
     }
     ++steps_;
     return true;
@@ -208,8 +338,12 @@ bool Cpu::step() {
     if (event_register_) {
       event_register_ = false;
       waiting_for_event_ = false;
-    } else if (try_take_irq()) {
+    } else if (gic_.has_pending()) {
       waiting_for_event_ = false;
+      if (try_take_irq()) {
+        ++steps_;
+        return true;
+      }
     }
     ++steps_;
     return true;
@@ -222,20 +356,32 @@ bool Cpu::step() {
 
   auto pc_watch = pc_watch_hits_.find(pc_);
   if (pc_watch != pc_watch_hits_.end() && !pc_watch->second) {
-    std::cerr << "PC-HIT pc=0x" << std::hex << pc_ << std::dec << " steps=" << steps_ << "\n";
+    std::cerr << "PC-HIT pc=0x" << std::hex << pc_
+              << " steps=" << std::dec << steps_
+              << " x0=0x" << std::hex << reg(0)
+              << " x1=0x" << reg(1)
+              << " x2=0x" << reg(2)
+              << " x3=0x" << reg(3)
+              << " x29=0x" << reg(29)
+              << " x30=0x" << reg(30)
+              << " sp=0x" << regs_[31]
+              << " pstate=0x" << sysregs_.pstate_bits()
+              << " esr=0x" << sysregs_.esr_el1()
+              << " far=0x" << sysregs_.far_el1()
+              << std::dec << "\n";
     pc_watch->second = true;
   }
 
   const auto fetch_result = translate_address(pc_, AccessType::Fetch, true);
   if (!fetch_result.has_value()) {
     const std::uint32_t iss = last_translation_fault_.has_value() ? fault_status_code(*last_translation_fault_) : 0u;
-    enter_sync_exception(pc_, 0x21u, iss, true, pc_);
+    enter_sync_exception(pc_, sysregs_.in_el0() ? 0x20u : 0x21u, iss, true, pc_);
     return true;
   }
 
   const auto fetch = bus_.read(fetch_result->pa, 4);
   if (!fetch.has_value()) {
-    enter_sync_exception(pc_, 0x21u, 0u, true, pc_);
+    enter_sync_exception(pc_, sysregs_.in_el0() ? 0x20u : 0x21u, 0u, true, pc_);
     return true;
   }
 
@@ -261,13 +407,24 @@ bool Cpu::step() {
     return true;
   }
   if (insn == 0xD69F03E0u) { // ERET
+    save_current_sp_to_bank();
     pc_ = sysregs_.exception_return();
-    if (in_exception_) {
-      if (active_exception_is_irq_) {
-        gic_.eoi(active_intid_);
+    load_current_sp_from_bank();
+    if (trace_eret_lower_count_ < trace_eret_lower_limit_ && sysregs_.in_el0()) {
+      ++trace_eret_lower_count_;
+      std::cerr << "ERET-EL0: pc=0x" << std::hex << pc_
+                << " x0=0x" << reg(0)
+                << " x1=0x" << reg(1)
+                << " x8=0x" << reg(8)
+                << " sp=0x" << regs_[31]
+                << " steps=" << std::dec << steps_ << '\n';
+    }
+    if (exception_depth_ != 0) {
+      const std::uint32_t idx = exception_depth_ - 1;
+      if (exception_is_irq_stack_[idx]) {
+        gic_.eoi(exception_intid_stack_[idx]);
       }
-      in_exception_ = false;
-      active_exception_is_irq_ = false;
+      --exception_depth_;
     }
     return true;
   }
@@ -291,6 +448,10 @@ bool Cpu::step() {
     halted_ = true; // BRK
     return false;
   }
+  if ((insn & 0xFFE0001Fu) == 0xD4000001u) { // SVC #imm16
+    enter_sync_exception(this_pc, 0x15u, (insn >> 5) & 0xFFFFu, false, 0);
+    return true;
+  }
 
   if (exec_branch(insn)) {
     return true;
@@ -305,14 +466,18 @@ bool Cpu::step() {
     return true;
   }
 
+  if (trace_exceptions_) {
+    std::cerr << "UNIMPL: pc=0x" << std::hex << this_pc
+              << " insn=0x" << insn
+              << " pstate=0x" << sysregs_.pstate_bits()
+              << " sp=0x" << regs_[31]
+              << std::dec << '\n';
+  }
   enter_sync_exception(this_pc, 0x00u, 0u, false, 0);
   return true;
 }
 
 bool Cpu::try_take_irq() {
-  if (in_exception_) {
-    return false;
-  }
   if (sysregs_.irq_masked()) {
     return false;
   }
@@ -321,11 +486,19 @@ bool Cpu::try_take_irq() {
     return false;
   }
 
-  active_intid_ = *intid;
-  in_exception_ = true;
-  active_exception_is_irq_ = true;
+  const bool from_lower_el = sysregs_.in_el0();
+  const bool from_spx = sysregs_.use_sp_elx();
+  if (exception_depth_ >= exception_is_irq_stack_.size()) {
+    halted_ = true;
+    return false;
+  }
+  save_current_sp_to_bank();
+  exception_is_irq_stack_[exception_depth_] = true;
+  exception_intid_stack_[exception_depth_] = *intid;
+  ++exception_depth_;
   sysregs_.exception_enter_irq(pc_);
-  pc_ = sysregs_.vbar_el1() + (sysregs_.use_sp_elx() ? 0x280 : 0x80);
+  load_current_sp_from_bank();
+  pc_ = sysregs_.vbar_el1() + (from_lower_el ? 0x480u : (from_spx ? 0x280u : 0x80u));
   return true;
 }
 
@@ -334,9 +507,14 @@ void Cpu::enter_sync_exception(std::uint64_t fault_pc,
                                std::uint32_t iss,
                                bool far_valid,
                                std::uint64_t far) {
-  if (in_exception_) {
+  std::uint64_t return_pc = fault_pc;
+  if (ec == 0x15u) {
+    // Exception-generating instructions like SVC return to the next instruction.
+    return_pc = fault_pc + 4u;
+  }
+  if (exception_depth_ >= exception_is_irq_stack_.size()) {
     if (trace_exceptions_) {
-      std::cerr << "FATAL: nested sync exception at PC=0x" << std::hex << pc_
+      std::cerr << "FATAL: exception nesting overflow at PC=0x" << std::hex << pc_
                 << " fault_pc=0x" << fault_pc
                 << " ec=0x" << ec
                 << " iss=0x" << iss
@@ -345,18 +523,55 @@ void Cpu::enter_sync_exception(std::uint64_t fault_pc,
     halted_ = true;
     return;
   }
-  in_exception_ = true;
-  active_exception_is_irq_ = false;
-  if (!sync_reported_ && trace_exceptions_) {
+  const bool nested = exception_depth_ != 0;
+  const bool from_lower_el = sysregs_.in_el0();
+  const bool from_spx = sysregs_.use_sp_elx();
+  save_current_sp_to_bank();
+  exception_is_irq_stack_[exception_depth_] = false;
+  exception_intid_stack_[exception_depth_] = 0;
+  ++exception_depth_;
+  if (trace_exceptions_ && nested) {
+    std::cerr << "NESTED-SYNC: pc=0x" << std::hex << fault_pc
+              << " ec=0x" << ec
+              << " iss=0x" << iss
+              << " far=0x" << far
+              << " depth=" << std::dec << exception_depth_ << '\n';
+  }
+  if (from_lower_el && trace_lower_sync_count_ < trace_lower_sync_limit_) {
+    ++trace_lower_sync_count_;
+    std::cerr << "SYNC-EL0: pc=0x" << std::hex << fault_pc
+              << " ec=0x" << ec
+              << " iss=0x" << iss
+              << " far_valid=" << (far_valid ? 1 : 0)
+              << " far=0x" << far
+              << " steps=" << std::dec << steps_ << '\n';
+  }
+  const bool log_sync = trace_exceptions_ && (trace_all_exceptions_ || !sync_reported_ || ec == 0u || from_lower_el);
+  if (log_sync) {
     std::cerr << "SYNC: pc=0x" << std::hex << fault_pc
               << " ec=0x" << ec
               << " iss=0x" << iss
               << " far_valid=" << (far_valid ? 1 : 0)
-              << " far=0x" << far << std::dec << '\n';
+              << " far=0x" << far
+              << " from_lower=" << (from_lower_el ? 1 : 0)
+              << " pstate=0x" << sysregs_.pstate_bits()
+              << " ttbr0=0x" << sysregs_.ttbr0_el1()
+              << " ttbr1=0x" << sysregs_.ttbr1_el1()
+              << " tcr=0x" << sysregs_.tcr_el1()
+              << " sctlr=0x" << sysregs_.sctlr_el1();
+    const auto trace_fetch = translate_address(fault_pc, AccessType::Fetch, false, false);
+    if (trace_fetch.has_value()) {
+      const auto trace_insn = bus_.read(trace_fetch->pa, 4);
+      if (trace_insn.has_value()) {
+        std::cerr << " insn=0x" << (*trace_insn & 0xFFFFFFFFu);
+      }
+    }
+    std::cerr << std::dec << '\n';
     sync_reported_ = true;
   }
-  sysregs_.exception_enter_sync(fault_pc, ec, iss, far_valid, far);
-  pc_ = sysregs_.vbar_el1() + (sysregs_.use_sp_elx() ? 0x200 : 0x0);
+  sysregs_.exception_enter_sync(return_pc, ec, iss, far_valid, far);
+  load_current_sp_from_bank();
+  pc_ = sysregs_.vbar_el1() + (from_lower_el ? 0x400u : (from_spx ? 0x200u : 0x0u));
 }
 
 std::optional<Cpu::TranslationResult> Cpu::translate_address(std::uint64_t va,
@@ -436,6 +651,12 @@ std::optional<Cpu::TranslationResult> Cpu::translate_address(std::uint64_t va,
 std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
                                                             AccessType access,
                                                             TranslationFault* fault) {
+  const bool trace_va = trace_va_.has_value() && *trace_va_ == va && !trace_va_hit_;
+  const auto trace_va_log = [&](const std::string& msg) {
+    if (trace_va && trace_exceptions_) {
+      std::cerr << msg << std::dec << '\n';
+    }
+  };
   const std::uint64_t tcr = sysregs_.tcr_el1();
   const bool va_upper = (va >> 63) != 0;
   const WalkAttributes walk_attrs = decode_walk_attributes(va_upper);
@@ -505,6 +726,20 @@ std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
 
   const std::uint32_t levels = (va_bits <= 12u) ? 1u : ((va_bits - 12u + 8u) / 9u);
   const std::uint32_t start_level = 4u - levels;
+  if (trace_va) {
+    trace_va_hit_ = true;
+    std::ostringstream oss;
+    oss << "TRACE-VA: va=0x" << std::hex << va
+        << " access=" << static_cast<unsigned>(access)
+        << " txsz=0x" << txsz
+        << " va_bits=0x" << va_bits
+        << " tg=0x" << tg
+        << " epd=" << (epd ? 1 : 0)
+        << " ttbr_base=0x" << table_base
+        << " levels=" << std::dec << levels
+        << " start_level=" << start_level;
+    trace_va_log(oss.str());
+  }
   if (start_level > 3u) {
     if (fault != nullptr) {
       *fault = TranslationFault{.kind = TranslationFault::Kind::Translation, .level = 0, .write = access == AccessType::Write};
@@ -523,6 +758,19 @@ std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
   for (std::uint32_t level = start_level; level < 4u; ++level) {
     const std::uint64_t desc_addr = table_base + idx[level] * 8u;
     const auto desc_opt = bus_.read(desc_addr, 8);
+    if (trace_va) {
+      std::ostringstream oss;
+      oss << "TRACE-VA-L" << level
+          << ": idx=0x" << std::hex << idx[level]
+          << " table_base=0x" << table_base
+          << " desc_addr=0x" << desc_addr;
+      if (desc_opt.has_value()) {
+        oss << " desc=0x" << *desc_opt;
+      } else {
+        oss << " desc=<bus-fail>";
+      }
+      trace_va_log(oss.str());
+    }
     if (!desc_opt.has_value()) {
       if (fault != nullptr) {
         *fault = TranslationFault{.kind = TranslationFault::Kind::Translation,
@@ -556,6 +804,7 @@ std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
 
       const bool af = ((desc >> 10) & 0x1u) != 0;
       const bool leaf_ro = ((desc >> 7) & 0x1u) != 0;
+      const bool dbm = ((desc >> 51) & 0x1u) != 0;
       const bool pxn = ((desc >> 53) & 0x1u) != 0;
       const bool uxn = ((desc >> 54) & 0x1u) != 0;
       const std::uint8_t attr_index = static_cast<std::uint8_t>((desc >> 2) & 0x7u);
@@ -575,7 +824,7 @@ std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
       result.level = static_cast<std::uint8_t>(level);
       result.attr_index = attr_index;
       result.mair_attr = mair_attr;
-      result.writable = !(leaf_ro || inherited.write_protect);
+      result.writable = !(inherited.write_protect || (leaf_ro && !dbm));
       result.pxn = pxn || inherited.pxn;
       result.uxn = uxn || inherited.uxn;
       result.executable = !result.pxn;
@@ -623,6 +872,7 @@ std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
 
     const bool af = ((desc >> 10) & 0x1u) != 0;
     const bool leaf_ro = ((desc >> 7) & 0x1u) != 0;
+    const bool dbm = ((desc >> 51) & 0x1u) != 0;
     const bool pxn = ((desc >> 53) & 0x1u) != 0;
     const bool uxn = ((desc >> 54) & 0x1u) != 0;
     const std::uint8_t attr_index = static_cast<std::uint8_t>((desc >> 2) & 0x7u);
@@ -645,7 +895,7 @@ std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
     result.level = static_cast<std::uint8_t>(level);
     result.attr_index = attr_index;
     result.mair_attr = mair_attr;
-    result.writable = !(leaf_ro || inherited.write_protect);
+    result.writable = !(inherited.write_protect || (leaf_ro && !dbm));
     result.pxn = pxn || inherited.pxn;
     result.uxn = uxn || inherited.uxn;
     result.executable = !result.pxn;
@@ -661,11 +911,20 @@ std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
       return std::nullopt;
     }
     if (!access_permitted(result, access, static_cast<std::uint8_t>(level), fault)) {
+      if (trace_va) {
+        trace_va_hit_ = true;
+      }
       return std::nullopt;
+    }
+    if (trace_va) {
+      trace_va_hit_ = true;
     }
     return result;
   }
 
+  if (trace_va) {
+    trace_va_hit_ = true;
+  }
   return std::nullopt;
 }
 
@@ -679,11 +938,14 @@ bool Cpu::access_permitted(const TranslationResult& result,
     }
     return false;
   }
-  if (access == AccessType::Fetch && !result.executable) {
-    if (fault != nullptr) {
-      *fault = TranslationFault{.kind = TranslationFault::Kind::Permission, .level = level, .write = false};
+  if (access == AccessType::Fetch) {
+    const bool execute_blocked = sysregs_.in_el0() ? result.uxn : result.pxn;
+    if (execute_blocked) {
+      if (fault != nullptr) {
+        *fault = TranslationFault{.kind = TranslationFault::Kind::Permission, .level = level, .write = false};
+      }
+      return false;
     }
-    return false;
   }
   return true;
 }
@@ -808,6 +1070,20 @@ void Cpu::set_sp_or_reg(std::uint32_t idx, std::uint64_t value, bool is_32bit) {
   } else {
     set_reg(idx, value);
   }
+}
+
+std::uint64_t Cpu::q_reg_lane(std::uint32_t idx, std::size_t lane) const {
+  if (idx >= qregs_.size() || lane >= 2u) {
+    return 0;
+  }
+  return qregs_[idx][lane];
+}
+
+void Cpu::set_q_reg_lane(std::uint32_t idx, std::size_t lane, std::uint64_t value) {
+  if (idx >= qregs_.size() || lane >= 2u) {
+    return;
+  }
+  qregs_[idx][lane] = value;
 }
 
 bool Cpu::exec_branch(std::uint32_t insn) {
@@ -985,7 +1261,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
       const auto result = translate_address(va, AccessType::Write, true);
       if (!result.has_value() || !bus_.write(result->pa, 0, 8)) {
         const std::uint32_t iss = last_translation_fault_.has_value() ? fault_status_code(*last_translation_fault_) : 0u;
-        enter_sync_exception(pc_ - 4, 0x25u, iss, true, va);
+        enter_sync_exception(pc_ - 4, sysregs_.in_el0() ? 0x24u : 0x25u, iss, true, va);
         return true;
       }
     }
@@ -1055,6 +1331,12 @@ bool Cpu::exec_system(std::uint32_t insn) {
     return true;
   }
 
+  // MSR PAN, #imm
+  if ((insn & 0xFFFFF0FFu) == 0xD500409Fu) {
+    sysregs_.set_pan(((insn >> 8) & 0x1u) != 0);
+    return true;
+  }
+
   // MRS Xt, sysreg
   if ((insn & 0xFFE00000u) == 0xD5200000u) {
     const std::uint32_t rt = insn & 0x1Fu;
@@ -1066,7 +1348,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
     const std::uint32_t key = (op0 << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2;
 
     if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (12u << 3) | 0u)) { // ICC_IAR1_EL1
-      set_reg(rt, (in_exception_ && active_exception_is_irq_) ? active_intid_ : 1023u);
+      set_reg(rt, (exception_depth_ != 0 && exception_is_irq_stack_[exception_depth_ - 1]) ? exception_intid_stack_[exception_depth_ - 1] : 1023u);
       return true;
     }
     if (key == ((3u << 14) | (0u << 11) | (4u << 7) | (6u << 3) | 0u)) { // ICC_PMR_EL1
@@ -1081,6 +1363,26 @@ bool Cpu::exec_system(std::uint32_t insn) {
       set_reg(rt, icc_sre_el1_);
       return true;
     }
+    if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (12u << 3) | 3u)) { // ICC_BPR1_EL1
+      set_reg(rt, icc_bpr1_el1_);
+      return true;
+    }
+    if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (9u << 3) | 0u)) { // ICC_AP1R0_EL1
+      set_reg(rt, icc_ap1r_el1_[0]);
+      return true;
+    }
+    if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (9u << 3) | 1u)) { // ICC_AP1R1_EL1
+      set_reg(rt, icc_ap1r_el1_[1]);
+      return true;
+    }
+    if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (9u << 3) | 2u)) { // ICC_AP1R2_EL1
+      set_reg(rt, icc_ap1r_el1_[2]);
+      return true;
+    }
+    if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (9u << 3) | 3u)) { // ICC_AP1R3_EL1
+      set_reg(rt, icc_ap1r_el1_[3]);
+      return true;
+    }
     if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (3u << 3) | 1u)) { // CNTV_CTL_EL0
       set_reg(rt, timer_.read_cntv_ctl_el0());
       return true;
@@ -1091,6 +1393,18 @@ bool Cpu::exec_system(std::uint32_t insn) {
     }
     if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (3u << 3) | 0u)) { // CNTV_TVAL_EL0
       set_reg(rt, timer_.read_cntv_tval_el0());
+      return true;
+    }
+    if (key == ((3u << 14) | (3u << 11) | (2u << 7) | (5u << 3) | 1u)) { // GCSPR_EL0
+      set_reg(rt, 0);
+      return true;
+    }
+    if (key == ((3u << 14) | (0u << 11) | (4u << 7) | (1u << 3) | 0u)) { // SP_EL0
+      set_reg(rt, sysregs_.current_uses_sp_el0() ? regs_[31] : sysregs_.sp_el0());
+      return true;
+    }
+    if (key == ((3u << 14) | (4u << 11) | (4u << 7) | (1u << 3) | 0u)) { // SP_EL1
+      set_reg(rt, (!sysregs_.current_uses_sp_el0()) ? regs_[31] : sysregs_.sp_el1());
       return true;
     }
 
@@ -1128,6 +1442,49 @@ bool Cpu::exec_system(std::uint32_t insn) {
       icc_sre_el1_ = reg(rt);
       return true;
     }
+    if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (12u << 3) | 3u)) { // ICC_BPR1_EL1
+      icc_bpr1_el1_ = reg(rt);
+      return true;
+    }
+    if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (8u << 3) | 4u)) { // ICC_AP0R0_EL1
+      icc_ap0r_el1_[0] = reg(rt);
+      return true;
+    }
+    if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (8u << 3) | 5u)) { // ICC_AP0R1_EL1
+      icc_ap0r_el1_[1] = reg(rt);
+      return true;
+    }
+    if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (8u << 3) | 6u)) { // ICC_AP0R2_EL1
+      icc_ap0r_el1_[2] = reg(rt);
+      return true;
+    }
+    if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (8u << 3) | 7u)) { // ICC_AP0R3_EL1
+      icc_ap0r_el1_[3] = reg(rt);
+      return true;
+    }
+    if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (9u << 3) | 0u)) { // ICC_AP1R0_EL1
+      icc_ap1r_el1_[0] = reg(rt);
+      return true;
+    }
+    if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (9u << 3) | 1u)) { // ICC_AP1R1_EL1
+      icc_ap1r_el1_[1] = reg(rt);
+      return true;
+    }
+    if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (9u << 3) | 2u)) { // ICC_AP1R2_EL1
+      icc_ap1r_el1_[2] = reg(rt);
+      return true;
+    }
+    if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (9u << 3) | 3u)) { // ICC_AP1R3_EL1
+      icc_ap1r_el1_[3] = reg(rt);
+      return true;
+    }
+    if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (12u << 3) | 7u)) { // ICC_IGRPEN1_EL1
+      icc_igrpen1_el1_ = reg(rt) & 1u;
+      return true;
+    }
+    if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (11u << 3) | 1u)) { // ICC_DIR_EL1
+      return true;
+    }
     if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (3u << 3) | 1u)) { // CNTV_CTL_EL0
       timer_.write_cntv_ctl_el0(reg(rt));
       return true;
@@ -1138,6 +1495,20 @@ bool Cpu::exec_system(std::uint32_t insn) {
     }
     if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (3u << 3) | 0u)) { // CNTV_TVAL_EL0
       timer_.write_cntv_tval_el0(reg(rt));
+      return true;
+    }
+    if (key == ((3u << 14) | (0u << 11) | (4u << 7) | (1u << 3) | 0u)) { // SP_EL0
+      sysregs_.set_sp_el0(reg(rt));
+      if (sysregs_.current_uses_sp_el0()) {
+        regs_[31] = reg(rt);
+      }
+      return true;
+    }
+    if (key == ((3u << 14) | (4u << 11) | (4u << 7) | (1u << 3) | 0u)) { // SP_EL1
+      sysregs_.set_sp_el1(reg(rt));
+      if (!sysregs_.current_uses_sp_el0()) {
+        regs_[31] = reg(rt);
+      }
       return true;
     }
 
@@ -1162,6 +1533,385 @@ bool Cpu::exec_system(std::uint32_t insn) {
 bool Cpu::exec_data_processing(std::uint32_t insn) {
   const std::uint32_t rd = insn & 0x1Fu;
   const std::uint32_t rn = (insn >> 5) & 0x1Fu;
+
+  // Minimal AdvSIMD/FP support for libc/busybox string routines.
+  if ((insn & 0xBF20FC00u) == 0x0E003C00u) { // UMOV/MOV (lane to general)
+    const std::uint32_t imm5 = (insn >> 16) & 0x1Fu;
+    if (imm5 == 0u) {
+      return false;
+    }
+    const std::uint32_t size_shift = static_cast<std::uint32_t>(__builtin_ctz(imm5));
+    const std::uint32_t esize_bits = 8u << size_shift;
+    const std::uint32_t lane = imm5 >> (size_shift + 1u);
+    const std::uint64_t elem = vector_get_elem(qregs_[rn], esize_bits, lane);
+    if (esize_bits < 64u) {
+      set_reg32(rd, static_cast<std::uint32_t>(elem));
+    } else {
+      set_reg(rd, elem);
+    }
+    return true;
+  }
+
+  if ((insn & 0xBF20FC00u) == 0x0E000C00u) { // DUP (general)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t imm5 = (insn >> 16) & 0x1Fu;
+    if (imm5 == 0u || (imm5 & (imm5 - 1u)) != 0u) {
+      return false;
+    }
+    const std::uint32_t esize_bits = 8u << __builtin_ctz(imm5);
+    const std::uint32_t lanes = (q ? 128u : 64u) / esize_bits;
+    const std::uint32_t rm = (insn >> 5) & 0x1Fu;
+    const std::uint64_t elem = (esize_bits == 64u) ? reg(rm) : (static_cast<std::uint64_t>(reg32(rm)) & ones(esize_bits));
+    auto& dst = qregs_[rd];
+    dst = {0, 0};
+    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+      vector_set_elem(dst, esize_bits, lane, elem);
+    }
+    return true;
+  }
+
+  if ((insn & 0xBF80FC00u) == 0x0F00E400u) { // MOVI (byte immediate)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint64_t imm8 = (((insn >> 16) & 0x7u) << 5u) | ((insn >> 5) & 0x1Fu);
+    auto& dst = qregs_[rd];
+    dst[0] = replicate(imm8, 8u, 64u);
+    dst[1] = q ? replicate(imm8, 8u, 64u) : 0u;
+    return true;
+  }
+
+  if ((insn & 0xBF80FC00u) == 0x2F000400u) { // MVNI (2S/4S immediate)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint64_t imm8 = (((insn >> 16) & 0x7u) << 5u) | ((insn >> 5) & 0x1Fu);
+    auto& dst = qregs_[rd];
+    dst = {0, 0};
+    const std::uint32_t lanes = q ? 4u : 2u;
+    const std::uint64_t elem = (~imm8) & 0xFFFFFFFFu;
+    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+      vector_set_elem(dst, 32u, lane, elem);
+    }
+    return true;
+  }
+
+  if ((insn & 0xBF80FC00u) == 0x2F008400u) { // MVNI (4H/8H immediate)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint64_t imm8 = (((insn >> 16) & 0x7u) << 5u) | ((insn >> 5) & 0x1Fu);
+    auto& dst = qregs_[rd];
+    dst = {0, 0};
+    const std::uint32_t lanes = q ? 8u : 4u;
+    const std::uint64_t elem = (~imm8) & 0xFFFFu;
+    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+      vector_set_elem(dst, 16u, lane, elem);
+    }
+    return true;
+  }
+
+  if ((insn & 0xBF80FC00u) == 0x0F000400u) { // MOVI (2S/4S immediate)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint64_t imm8 = (((insn >> 16) & 0x7u) << 5u) | ((insn >> 5) & 0x1Fu);
+    auto& dst = qregs_[rd];
+    dst = {0, 0};
+    const std::uint32_t lanes = q ? 4u : 2u;
+    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+      vector_set_elem(dst, 32u, lane, imm8);
+    }
+    return true;
+  }
+
+  if ((insn & 0x9F20FC00u) == 0x0E209800u) { // CMEQ (zero)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    const std::uint32_t esize_bits = 8u << size;
+    if (esize_bits == 0u || (!q && esize_bits == 64u)) {
+      return false;
+    }
+    const std::uint32_t lanes = (q ? 128u : 64u) / esize_bits;
+    const auto src = qregs_[rn];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+      const std::uint64_t elem = vector_get_elem(src, esize_bits, lane);
+      vector_set_elem(dst, esize_bits, lane, elem == 0u ? ones(esize_bits) : 0u);
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0x9F20FC00u) == 0x0E208C00u) { // CMEQ (register)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    const std::uint32_t esize_bits = 8u << size;
+    if (esize_bits == 0u || (!q && esize_bits == 64u)) {
+      return false;
+    }
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t lanes = (q ? 128u : 64u) / esize_bits;
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+      const bool equal = vector_get_elem(lhs, esize_bits, lane) == vector_get_elem(rhs, esize_bits, lane);
+      vector_set_elem(dst, esize_bits, lane, equal ? ones(esize_bits) : 0u);
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xBF208400u) == 0x2E000000u) { // EXT (vector extract)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    if (!q) {
+      return false;
+    }
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t imm4 = (insn >> 11) & 0xFu;
+    std::array<std::uint8_t, 32> bytes{};
+    for (std::uint32_t i = 0; i < 16u; ++i) {
+      bytes[i] = static_cast<std::uint8_t>(vector_get_elem(qregs_[rn], 8u, i));
+      bytes[16u + i] = static_cast<std::uint8_t>(vector_get_elem(qregs_[rm], 8u, i));
+    }
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t i = 0; i < 16u; ++i) {
+      vector_set_elem(dst, 8u, i, bytes[imm4 + i]);
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xBF20FC00u) == 0x0E201C00u) { // AND (vector)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    qregs_[rd][0] = lhs[0] & rhs[0];
+    qregs_[rd][1] = q ? (lhs[1] & rhs[1]) : 0u;
+    return true;
+  }
+
+  if ((insn & 0xBF20FC00u) == 0x2E201C00u) { // BIT (vector)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const auto dst_old = qregs_[rd];
+    const auto src = qregs_[rn];
+    const auto mask = qregs_[rm];
+    qregs_[rd][0] = (dst_old[0] & ~mask[0]) | (src[0] & mask[0]);
+    qregs_[rd][1] = q ? ((dst_old[1] & ~mask[1]) | (src[1] & mask[1])) : 0u;
+    return true;
+  }
+
+  if ((insn & 0x9F20FC00u) == 0x0E203C00u) { // CMHS (register)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    const std::uint32_t esize_bits = 8u << size;
+    if (esize_bits == 0u || (!q && esize_bits == 64u)) {
+      return false;
+    }
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t lanes = (q ? 128u : 64u) / esize_bits;
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+      const bool ge = vector_get_elem(lhs, esize_bits, lane) >= vector_get_elem(rhs, esize_bits, lane);
+      vector_set_elem(dst, esize_bits, lane, ge ? ones(esize_bits) : 0u);
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xBF20FC00u) == 0x2E20AC00u) { // UMINP (vector, byte elements)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    if (size != 0u) {
+      return false;
+    }
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t lanes = q ? 16u : 8u;
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t lane = 0; lane < lanes / 2u; ++lane) {
+      const std::uint64_t a = vector_get_elem(lhs, 8u, lane * 2u);
+      const std::uint64_t b = vector_get_elem(lhs, 8u, lane * 2u + 1u);
+      vector_set_elem(dst, 8u, lane, a < b ? a : b);
+    }
+    for (std::uint32_t lane = 0; lane < lanes / 2u; ++lane) {
+      const std::uint64_t a = vector_get_elem(rhs, 8u, lane * 2u);
+      const std::uint64_t b = vector_get_elem(rhs, 8u, lane * 2u + 1u);
+      vector_set_elem(dst, 8u, lane + (lanes / 2u), a < b ? a : b);
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xBF20FC00u) == 0x2E20A400u) { // UMAXP (vector, byte elements)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    if (size != 0u) {
+      return false;
+    }
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t lanes = q ? 16u : 8u;
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t lane = 0; lane < lanes / 2u; ++lane) {
+      const std::uint64_t a = vector_get_elem(lhs, 8u, lane * 2u);
+      const std::uint64_t b = vector_get_elem(lhs, 8u, lane * 2u + 1u);
+      vector_set_elem(dst, 8u, lane, a > b ? a : b);
+    }
+    for (std::uint32_t lane = 0; lane < lanes / 2u; ++lane) {
+      const std::uint64_t a = vector_get_elem(rhs, 8u, lane * 2u);
+      const std::uint64_t b = vector_get_elem(rhs, 8u, lane * 2u + 1u);
+      vector_set_elem(dst, 8u, lane + (lanes / 2u), a > b ? a : b);
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xBF20FC00u) == 0x0E20BC00u) { // ADDP (vector, byte elements)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    if (size != 0u) {
+      return false;
+    }
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t lanes = q ? 16u : 8u;
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t lane = 0; lane < lanes / 2u; ++lane) {
+      const std::uint64_t sum = (vector_get_elem(lhs, 8u, lane * 2u) + vector_get_elem(lhs, 8u, lane * 2u + 1u)) & 0xFFu;
+      vector_set_elem(dst, 8u, lane, sum);
+    }
+    for (std::uint32_t lane = 0; lane < lanes / 2u; ++lane) {
+      const std::uint64_t sum = (vector_get_elem(rhs, 8u, lane * 2u) + vector_get_elem(rhs, 8u, lane * 2u + 1u)) & 0xFFu;
+      vector_set_elem(dst, 8u, lane + (lanes / 2u), sum);
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xBF80FC00u) == 0x0F008400u) { // SHRN
+    const std::uint32_t immh = (insn >> 19) & 0xFu;
+    const std::uint32_t immb = (insn >> 16) & 0x7u;
+    if (immh == 0u) {
+      return false;
+    }
+    const std::uint32_t src_esize_bits = 16u << highest_set_bit(immh);
+    if (src_esize_bits < 16u || src_esize_bits > 64u) {
+      return false;
+    }
+    const std::uint32_t immhb = (immh << 3u) | immb;
+    const std::uint32_t shift = src_esize_bits - immhb;
+    if (shift == 0u || shift > src_esize_bits / 2u) {
+      return false;
+    }
+    const std::uint32_t dst_esize_bits = src_esize_bits / 2u;
+    const std::uint32_t lanes = 64u / dst_esize_bits;
+    const auto src = qregs_[rn];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+      const std::uint64_t narrowed = (vector_get_elem(src, src_esize_bits, lane) >> shift) & ones(dst_esize_bits);
+      vector_set_elem(dst, dst_esize_bits, lane, narrowed);
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xFFFFFC00u) == 0x9E660000u) { // FMOV Xt, Dn
+    const std::uint32_t rn_fp = (insn >> 5) & 0x1Fu;
+    set_reg(rd, qregs_[rn_fp][0]);
+    return true;
+  }
+
+  if ((insn & 0xFFFFFC00u) == 0x9E670000u) { // FMOV Dd, Xn
+    const std::uint32_t rn_gp = (insn >> 5) & 0x1Fu;
+    qregs_[rd][0] = reg(rn_gp);
+    qregs_[rd][1] = 0u;
+    return true;
+  }
+
+  if ((insn & 0xFFFFFC00u) == 0x1E260000u) { // FMOV Wt, Sn
+    const std::uint32_t rn_fp = (insn >> 5) & 0x1Fu;
+    set_reg32(rd, static_cast<std::uint32_t>(qregs_[rn_fp][0] & 0xFFFFFFFFu));
+    return true;
+  }
+
+  if ((insn & 0xFFFFFC00u) == 0x1E270000u) { // FMOV Sd, Wn
+    const std::uint32_t rn_gp = (insn >> 5) & 0x1Fu;
+    qregs_[rd][0] = reg32(rn_gp);
+    qregs_[rd][1] = 0u;
+    return true;
+  }
+
+  // ADC/ADCS/SBC/SBCS (32/64-bit). NGC/NGCS fall out as aliases with Rn==ZR.
+  {
+    const std::uint32_t tag = insn & 0x7FE0FC00u;
+    if (tag == 0x1A000000u || tag == 0x3A000000u || tag == 0x5A000000u || tag == 0x7A000000u) {
+      const bool sf = (insn >> 31) != 0u;
+      const bool is_sub = ((insn >> 30) & 1u) != 0u;
+      const bool set_flags = ((insn >> 29) & 1u) != 0u;
+      const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+      const std::uint64_t carry_in = sysregs_.pstate().c ? 1u : 0u;
+      std::uint64_t result = 0;
+      bool c = false;
+      bool v = false;
+      bool n = false;
+      bool z = false;
+      if (sf) {
+        const std::uint64_t lhs = reg(rn);
+        const std::uint64_t rhs = reg(rm);
+        if (!is_sub) {
+          const std::uint64_t sum = lhs + rhs;
+          const bool carry1 = sum < lhs;
+          const std::uint64_t res = sum + carry_in;
+          const bool carry2 = res < sum;
+          result = res;
+          c = carry1 || carry2;
+          v = ((~(lhs ^ rhs) & (lhs ^ res) & (1ull << 63)) != 0u);
+        } else {
+          const std::uint64_t borrow = carry_in != 0u ? 0u : 1u;
+          const std::uint64_t res = lhs - rhs - borrow;
+          const bool borrow_out = lhs < rhs || (borrow != 0u && lhs == rhs);
+          result = res;
+          c = !borrow_out;
+          v = (((lhs ^ rhs) & (lhs ^ res) & (1ull << 63)) != 0u);
+        }
+        n = ((result >> 63) & 1u) != 0u;
+        z = result == 0u;
+        set_reg(rd, result);
+      } else {
+        const std::uint32_t lhs = reg32(rn);
+        const std::uint32_t rhs = reg32(rm);
+        std::uint32_t res = 0;
+        if (!is_sub) {
+          const std::uint32_t sum = lhs + rhs;
+          const bool carry1 = sum < lhs;
+          res = static_cast<std::uint32_t>(sum + carry_in);
+          const bool carry2 = res < sum;
+          c = carry1 || carry2;
+          v = ((~(lhs ^ rhs) & (lhs ^ res) & (1u << 31)) != 0u);
+        } else {
+          const std::uint32_t borrow = carry_in != 0u ? 0u : 1u;
+          res = static_cast<std::uint32_t>(lhs - rhs - borrow);
+          const bool borrow_out = lhs < rhs || (borrow != 0u && lhs == rhs);
+          c = !borrow_out;
+          v = (((lhs ^ rhs) & (lhs ^ res) & (1u << 31)) != 0u);
+        }
+        result = res;
+        n = ((res >> 31) & 1u) != 0u;
+        z = res == 0u;
+        set_reg32(rd, res);
+      }
+      if (set_flags) {
+        auto ps = sysregs_.pstate();
+        ps.n = n;
+        ps.z = z;
+        ps.c = c;
+        ps.v = v;
+        sysregs_.set_pstate(ps);
+      }
+      return true;
+    }
+  }
 
   // ADR
   if ((insn & 0x9F000000u) == 0x10000000u) {
@@ -1963,7 +2713,7 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
   const std::uint32_t rn = (insn >> 5) & 0x1Fu;
   const auto data_abort = [this](std::uint64_t va) {
     const std::uint32_t iss = last_translation_fault_.has_value() ? fault_status_code(*last_translation_fault_) : 0u;
-    enter_sync_exception(pc_ - 4, 0x25u, iss, true, va);
+    enter_sync_exception(pc_ - 4, sysregs_.in_el0() ? 0x24u : 0x25u, iss, true, va);
   };
   const auto mmu_read = [this](std::uint64_t va, std::size_t size) -> std::optional<std::uint64_t> {
     const auto result = translate_address(va, AccessType::Read, true);
@@ -1985,6 +2735,258 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     }
     return ok;
   };
+  const auto load_vec = [&](std::uint64_t addr, std::uint32_t vt, std::size_t size) -> bool {
+    if (size == 16u) {
+      const auto lo = mmu_read(addr, 8u);
+      const auto hi = mmu_read(addr + 8u, 8u);
+      if (!lo.has_value() || !hi.has_value()) {
+        return false;
+      }
+      qregs_[vt][0] = *lo;
+      qregs_[vt][1] = *hi;
+      return true;
+    }
+    if (size == 8u) {
+      const auto value = mmu_read(addr, 8u);
+      if (!value.has_value()) {
+        return false;
+      }
+      qregs_[vt][0] = *value;
+      qregs_[vt][1] = 0u;
+      return true;
+    }
+    if (size == 4u) {
+      const auto value = mmu_read(addr, 4u);
+      if (!value.has_value()) {
+        return false;
+      }
+      qregs_[vt][0] = *value & 0xFFFFFFFFu;
+      qregs_[vt][1] = 0u;
+      return true;
+    }
+    if (size == 2u) {
+      const auto value = mmu_read(addr, 2u);
+      if (!value.has_value()) {
+        return false;
+      }
+      qregs_[vt][0] = *value & 0xFFFFu;
+      qregs_[vt][1] = 0u;
+      return true;
+    }
+    if (size == 1u) {
+      const auto value = mmu_read(addr, 1u);
+      if (!value.has_value()) {
+        return false;
+      }
+      qregs_[vt][0] = *value & 0xFFu;
+      qregs_[vt][1] = 0u;
+      return true;
+    }
+    return false;
+  };
+  const auto store_vec = [&](std::uint64_t addr, std::uint32_t vt, std::size_t size) -> bool {
+    if (size == 16u) {
+      return mmu_write(addr, qregs_[vt][0], 8u) && mmu_write(addr + 8u, qregs_[vt][1], 8u);
+    }
+    if (size == 8u) {
+      return mmu_write(addr, qregs_[vt][0], 8u);
+    }
+    if (size == 4u) {
+      return mmu_write(addr, qregs_[vt][0] & 0xFFFFFFFFu, 4u);
+    }
+    if (size == 2u) {
+      return mmu_write(addr, qregs_[vt][0] & 0xFFFFu, 2u);
+    }
+    if (size == 1u) {
+      return mmu_write(addr, qregs_[vt][0] & 0xFFu, 1u);
+    }
+    return false;
+  };
+
+  // Minimal SIMD&FP memory subset used by the current libc/busybox path.
+  if ((insn & 0xFFC00000u) == 0x3D800000u || (insn & 0xFFC00000u) == 0x3DC00000u ||
+      (insn & 0xFFC00000u) == 0x3D000000u || (insn & 0xFFC00000u) == 0x3D400000u ||
+      (insn & 0xFFC00000u) == 0x7D000000u || (insn & 0xFFC00000u) == 0x7D400000u ||
+      (insn & 0xFFC00000u) == 0xBD000000u || (insn & 0xFFC00000u) == 0xBD400000u ||
+      (insn & 0xFFC00000u) == 0xFD000000u || (insn & 0xFFC00000u) == 0xFD400000u) {
+    const bool is_load = (insn & 0x00400000u) != 0u;
+    std::size_t size = 16u;
+    if ((insn & 0xFFC00000u) == 0x3D000000u || (insn & 0xFFC00000u) == 0x3D400000u) {
+      size = 1u;
+    } else if ((insn & 0xFFC00000u) == 0x7D000000u || (insn & 0xFFC00000u) == 0x7D400000u) {
+      size = 2u;
+    } else if ((insn & 0xFFC00000u) == 0xBD000000u || (insn & 0xFFC00000u) == 0xBD400000u) {
+      size = 4u;
+    } else if ((insn & 0xFFC00000u) == 0xFD000000u || (insn & 0xFFC00000u) == 0xFD400000u) {
+      size = 8u;
+    }
+    const std::uint64_t addr = sp_or_reg(rn) + (((insn >> 10) & 0xFFFu) * size);
+    const bool ok = is_load ? load_vec(addr, rt, size) : store_vec(addr, rt, size);
+    if (!ok) {
+      data_abort(addr);
+    }
+    return true;
+  }
+
+  if ((insn & 0xFFC00C00u) == 0x3C800C00u || (insn & 0xFFC00C00u) == 0x3CC00C00u ||
+      (insn & 0xFFC00C00u) == 0x3C800400u || (insn & 0xFFC00C00u) == 0x3CC00400u) {
+    const bool is_load = (insn & 0x00400000u) != 0u;
+    const std::size_t size = 16u;
+    const std::int64_t simm9 = sign_extend((insn >> 12) & 0x1FFu, 9);
+    const bool pre_index = ((insn & 0xFFC00C00u) == 0x3C800C00u) || ((insn & 0xFFC00C00u) == 0x3CC00C00u);
+    const std::uint64_t base = sp_or_reg(rn);
+    const std::uint64_t addr = pre_index ? static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + simm9) : base;
+    const bool ok = is_load ? load_vec(addr, rt, size) : store_vec(addr, rt, size);
+    if (!ok) {
+      data_abort(addr);
+      return true;
+    }
+    set_sp_or_reg(rn, pre_index ? addr : static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + simm9), false);
+    return true;
+  }
+
+  if ((insn & 0xFFE00C00u) == 0x3CA00800u || (insn & 0xFFE00C00u) == 0x3CE00800u ||
+      (insn & 0xFFE00C00u) == 0xBC200800u || (insn & 0xFFE00C00u) == 0xBC600800u) {
+    const bool is_load = (insn & 0x00400000u) != 0u;
+    const std::size_t size = (insn & 0x80000000u) != 0u ? 4u : 16u;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t option = (insn >> 13) & 0x7u;
+    const bool s = ((insn >> 12) & 1u) != 0u;
+    std::uint64_t off = 0;
+    if (option == 0x2u) {
+      off = reg32(rm);
+    } else if (option == 0x3u) {
+      off = reg(rm);
+    } else if (option == 0x6u) {
+      off = static_cast<std::uint64_t>(sign_extend(reg32(rm), 32));
+    } else if (option == 0x7u) {
+      off = reg(rm);
+    } else {
+      return false;
+    }
+    off <<= (s ? (size == 16u ? 4u : 2u) : 0u);
+    const std::uint64_t addr = sp_or_reg(rn) + off;
+    const bool ok = is_load ? load_vec(addr, rt, size) : store_vec(addr, rt, size);
+    if (!ok) {
+      data_abort(addr);
+    }
+    return true;
+  }
+
+  if ((insn & 0xFFC00C00u) == 0x3C800000u || (insn & 0xFFC00C00u) == 0x3CC00000u ||
+      (insn & 0xFFC00C00u) == 0xBC000000u || (insn & 0xFFC00C00u) == 0xBC400000u) {
+    const bool is_load = (insn & 0x00400000u) != 0u;
+    const std::size_t size = (insn & 0x80000000u) != 0u ? 4u : 16u;
+    const std::int64_t simm9 = sign_extend((insn >> 12) & 0x1FFu, 9);
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + simm9);
+    const bool ok = is_load ? load_vec(addr, rt, size) : store_vec(addr, rt, size);
+    if (!ok) {
+      data_abort(addr);
+    }
+    return true;
+  }
+
+  if ((insn & 0xBFFFFC00u) == 0x0C407000u) { // LD1 {Vt.8B/16B}, [Xn]
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::size_t size = q ? 16u : 8u;
+    const std::uint64_t addr = reg(rn);
+    if (!load_vec(addr, rt, size)) {
+      data_abort(addr);
+    }
+    return true;
+  }
+
+  if ((insn & 0xBFFFFC00u) == 0x0CDF7000u) { // LD1 {Vt.8B/16B}, [Xn], #imm
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::size_t size = q ? 16u : 8u;
+    const std::uint64_t addr = reg(rn);
+    if (!load_vec(addr, rt, size)) {
+      data_abort(addr);
+      return true;
+    }
+    set_reg(rn, addr + size);
+    return true;
+  }
+
+  if ((insn & 0xBFFFFC00u) == 0x0C40A000u) { // LD1 {Vt.8B,Vt2.8B}/{Vt.16B,Vt2.16B}, [Xn]
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::size_t size = q ? 16u : 8u;
+    const std::uint32_t rt2 = (rt + 1u) & 0x1Fu;
+    const std::uint64_t addr = reg(rn);
+    if (!load_vec(addr, rt, size) || !load_vec(addr + size, rt2, size)) {
+      data_abort(addr);
+    }
+    return true;
+  }
+
+  // LDTR/STTR family (unprivileged immediate). Model access the same as normal
+  // EL1 data accesses for the current single-core Linux bring-up path.
+  {
+    enum class LoadExtend { Zero, Sign32, Sign64 };
+    const std::uint32_t tag = insn & 0xFFE00C00u;
+    std::size_t size = 0u;
+    bool is_load = false;
+    LoadExtend extend = LoadExtend::Zero;
+    switch (tag) {
+    case 0x38400800u: size = 1u; is_load = true; break;   // LDTRB Wt
+    case 0x38C00800u: size = 1u; is_load = true; extend = LoadExtend::Sign32; break; // LDTRSB Wt
+    case 0x38800800u: size = 1u; is_load = true; extend = LoadExtend::Sign64; break; // LDTRSB Xt
+    case 0x78400800u: size = 2u; is_load = true; break;   // LDTRH Wt
+    case 0x78C00800u: size = 2u; is_load = true; extend = LoadExtend::Sign32; break; // LDTRSH Wt
+    case 0x78800800u: size = 2u; is_load = true; extend = LoadExtend::Sign64; break; // LDTRSH Xt
+    case 0xB8400800u: size = 4u; is_load = true; break;   // LDTR Wt
+    case 0xB8800800u: size = 4u; is_load = true; extend = LoadExtend::Sign64; break; // LDTRSW Xt
+    case 0xF8400800u: size = 8u; is_load = true; break;   // LDTR Xt
+    case 0x38000800u: size = 1u; break;                   // STTRB Wt
+    case 0x78000800u: size = 2u; break;                   // STTRH Wt
+    case 0xB8000800u: size = 4u; break;                   // STTR Wt
+    case 0xF8000800u: size = 8u; break;                   // STTR Xt
+    default: break;
+    }
+    if (size != 0u) {
+      const std::int64_t simm9 = sign_extend((insn >> 12) & 0x1FFu, 9);
+      const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + simm9);
+      if (is_load) {
+        const auto value = mmu_read(addr, size);
+        if (!value.has_value()) {
+          data_abort(addr);
+          return true;
+        }
+        switch (extend) {
+        case LoadExtend::Zero:
+          if (size == 8u) {
+            set_reg(rt, *value);
+          } else {
+            set_reg32(rt, static_cast<std::uint32_t>(*value));
+          }
+          break;
+        case LoadExtend::Sign32:
+          if (size == 1u) {
+            set_reg32(rt, static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int8_t>(*value & 0xFFu))));
+          } else {
+            set_reg32(rt, static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int16_t>(*value & 0xFFFFu))));
+          }
+          break;
+        case LoadExtend::Sign64:
+          if (size == 1u) {
+            set_reg(rt, static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int8_t>(*value & 0xFFu))));
+          } else if (size == 2u) {
+            set_reg(rt, static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int16_t>(*value & 0xFFFFu))));
+          } else {
+            set_reg(rt, static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(*value & 0xFFFFFFFFu))));
+          }
+          break;
+        }
+      } else {
+        const std::uint64_t value = (size == 8u) ? reg(rt) : (size == 4u) ? reg32(rt) : (size == 2u) ? (reg32(rt) & 0xFFFFu) : (reg32(rt) & 0xFFu);
+        if (!mmu_write(addr, value, size)) {
+          data_abort(addr);
+          return true;
+        }
+      }
+      return true;
+    }
+  }
 
   // PRFM (literal / unsigned immediate / register offset).
   // Model as a no-op hint for the current single-core Linux bring-up path.
@@ -2057,6 +3059,116 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       }
       set_reg32(rs, 0u);
       return true;
+    }
+  }
+
+  // LSE CASP/CASPA/CASPL/CASPAL. Ordering variants are modelled with
+  // identical single-core semantics for now.
+  if ((insn & 0x3FA07C00u) == 0x08207C00u) {
+    const std::size_t elem_size = (((insn >> 30) & 0x1u) != 0u) ? 8u : 4u;
+    const std::uint32_t rs = (insn >> 16) & 0x1Fu;
+    const std::uint32_t rt_pair = rt;
+    const std::uint64_t mask = (elem_size == 8u) ? ~0ull : 0xFFFFFFFFull;
+    const std::uint64_t addr = sp_or_reg(rn);
+    const auto old_lo = mmu_read(addr, elem_size);
+    const auto old_hi = mmu_read(addr + elem_size, elem_size);
+    if (!old_lo.has_value() || !old_hi.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    const std::uint64_t old_lo_value = *old_lo & mask;
+    const std::uint64_t old_hi_value = *old_hi & mask;
+    const std::uint64_t compare_lo = ((elem_size == 8u) ? reg(rs) : static_cast<std::uint64_t>(reg32(rs))) & mask;
+    const std::uint64_t compare_hi = ((elem_size == 8u) ? reg(rs + 1u) : static_cast<std::uint64_t>(reg32(rs + 1u))) & mask;
+    const std::uint64_t desired_lo = ((elem_size == 8u) ? reg(rt_pair) : static_cast<std::uint64_t>(reg32(rt_pair))) & mask;
+    const std::uint64_t desired_hi = ((elem_size == 8u) ? reg(rt_pair + 1u) : static_cast<std::uint64_t>(reg32(rt_pair + 1u))) & mask;
+    if (old_lo_value == compare_lo && old_hi_value == compare_hi) {
+      if (!mmu_write(addr, desired_lo, elem_size) || !mmu_write(addr + elem_size, desired_hi, elem_size)) {
+        data_abort(addr);
+        return true;
+      }
+    }
+    if (elem_size == 8u) {
+      set_reg(rs, old_lo_value);
+      set_reg(rs + 1u, old_hi_value);
+    } else {
+      set_reg32(rs, static_cast<std::uint32_t>(old_lo_value));
+      set_reg32(rs + 1u, static_cast<std::uint32_t>(old_hi_value));
+    }
+    return true;
+  }
+
+  // LSE atomic CAS/CASA/CASL/CASAL. Ordering variants are modelled with
+  // identical single-core semantics for now.
+  if ((insn & 0x3FA07C00u) == 0x08A07C00u) {
+    const std::uint32_t size_code = (insn >> 30) & 0x3u;
+    const std::size_t size = (size_code == 0u) ? 1u : (size_code == 1u) ? 2u : (size_code == 2u) ? 4u : 8u;
+    if (size != 0u) {
+      const std::uint32_t rs = (insn >> 16) & 0x1Fu;
+      const std::uint64_t mask = (size == 8u) ? ~0ull : 0xFFFFFFFFull;
+      const std::uint64_t addr = sp_or_reg(rn);
+      const auto old = mmu_read(addr, size);
+      if (!old.has_value()) {
+        data_abort(addr);
+        return true;
+      }
+      const std::uint64_t old_value = *old & mask;
+      const std::uint64_t compare_value = ((size == 8u) ? reg(rs) : static_cast<std::uint64_t>(reg32(rs))) & mask;
+      const std::uint64_t desired_value = ((size == 8u) ? reg(rt) : static_cast<std::uint64_t>(reg32(rt))) & mask;
+      if (old_value == compare_value) {
+        if (!mmu_write(addr, desired_value, size)) {
+          data_abort(addr);
+          return true;
+        }
+      }
+      if (size == 8u) {
+        set_reg(rs, old_value);
+      } else {
+        set_reg32(rs, static_cast<std::uint32_t>(old_value));
+      }
+      return true;
+    }
+  }
+
+  // LSE SWP/LDADD/LDCLR/LDEOR/LDSET. Ordering variants are treated as
+  // no-ops beyond the read-modify-write result on the current single core.
+  {
+    const std::uint32_t tag = insn & 0x3F20FC00u;
+    if (tag == 0x38208000u || tag == 0x38200000u || tag == 0x38201000u ||
+        tag == 0x38202000u || tag == 0x38203000u) {
+      const std::uint32_t size_code = (insn >> 30) & 0x3u;
+      const std::size_t size = (size_code == 0u) ? 1u : (size_code == 1u) ? 2u : (size_code == 2u) ? 4u : 8u;
+      if (size != 0u) {
+        const std::uint32_t rs = (insn >> 16) & 0x1Fu;
+        const std::uint64_t mask = (size == 8u) ? ~0ull : 0xFFFFFFFFull;
+        const std::uint64_t addr = sp_or_reg(rn);
+        const auto old = mmu_read(addr, size);
+        if (!old.has_value()) {
+          data_abort(addr);
+          return true;
+        }
+        const std::uint64_t old_value = *old & mask;
+        const std::uint64_t src_value = ((size == 8u) ? reg(rs) : static_cast<std::uint64_t>(reg32(rs))) & mask;
+        std::uint64_t new_value = old_value;
+        switch (tag) {
+        case 0x38208000u: new_value = src_value; break;
+        case 0x38200000u: new_value = (old_value + src_value) & mask; break;
+        case 0x38201000u: new_value = old_value & (~src_value & mask); break;
+        case 0x38202000u: new_value = (old_value ^ src_value) & mask; break;
+        case 0x38203000u: new_value = (old_value | src_value) & mask; break;
+        default: break;
+        }
+        if (!mmu_write(addr, new_value, size)) {
+          data_abort(addr);
+          return true;
+        }
+        if (size == 8u) {
+          set_reg(rt, old_value);
+        } else {
+          set_reg32(rt, static_cast<std::uint32_t>(old_value));
+        }
+        return true;
+      }
     }
   }
 
@@ -2347,6 +3459,52 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
   if ((insn & 0xFFC00C00u) == 0xF8400C00u) return post_pre(8, true, true);
   if ((insn & 0xFFC00C00u) == 0xF8000C00u) return post_pre(8, false, true);
 
+  auto post_pre_signed = [&](std::size_t size, bool dest64, bool is_pre) -> bool {
+    const std::int64_t simm9 = sign_extend((insn >> 12) & 0x1FFu, 9);
+    const std::uint64_t base = sp_or_reg(rn);
+    const std::uint64_t addr = is_pre
+        ? static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + simm9)
+        : base;
+    const auto value = mmu_read(addr, size);
+    if (!value.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    if (size == 1u) {
+      const auto sv = static_cast<std::int64_t>(static_cast<std::int8_t>(*value & 0xFFu));
+      if (dest64) {
+        set_reg(rt, static_cast<std::uint64_t>(sv));
+      } else {
+        set_reg32(rt, static_cast<std::uint32_t>(static_cast<std::int32_t>(sv)));
+      }
+    } else if (size == 2u) {
+      const auto sv = static_cast<std::int64_t>(static_cast<std::int16_t>(*value & 0xFFFFu));
+      if (dest64) {
+        set_reg(rt, static_cast<std::uint64_t>(sv));
+      } else {
+        set_reg32(rt, static_cast<std::uint32_t>(static_cast<std::int32_t>(sv)));
+      }
+    } else {
+      return false;
+    }
+    if (is_pre) {
+      set_sp_or_reg(rn, addr, false);
+    } else {
+      set_sp_or_reg(rn, static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + simm9), false);
+    }
+    return true;
+  };
+
+  // LDRSB/LDRSH post/pre-index
+  if ((insn & 0xFFE00C00u) == 0x38C00400u) return post_pre_signed(1, false, false);
+  if ((insn & 0xFFE00C00u) == 0x38800400u) return post_pre_signed(1, true, false);
+  if ((insn & 0xFFE00C00u) == 0x38C00C00u) return post_pre_signed(1, false, true);
+  if ((insn & 0xFFE00C00u) == 0x38800C00u) return post_pre_signed(1, true, true);
+  if ((insn & 0xFFE00C00u) == 0x78C00400u) return post_pre_signed(2, false, false);
+  if ((insn & 0xFFE00C00u) == 0x78800400u) return post_pre_signed(2, true, false);
+  if ((insn & 0xFFE00C00u) == 0x78C00C00u) return post_pre_signed(2, false, true);
+  if ((insn & 0xFFE00C00u) == 0x78800C00u) return post_pre_signed(2, true, true);
+
   // LDUR Xt, [Xn|SP, #simm9]
   if ((insn & 0xFFC00C00u) == 0xF8400000u) {
     const std::int64_t simm9 = sign_extend((insn >> 12) & 0x1FFu, 9);
@@ -2492,6 +3650,214 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       data_abort(addr);
       return true;
     }
+    return true;
+  }
+
+  if ((insn & 0xFFC00C00u) == 0x7C800C00u || (insn & 0xFFC00C00u) == 0x7CC00C00u ||
+      (insn & 0xFFC00C00u) == 0x7C800400u || (insn & 0xFFC00C00u) == 0x7CC00400u) {
+    const bool is_load = (insn & 0x00400000u) != 0u;
+    const std::size_t size = 8u;
+    const std::int64_t simm9 = sign_extend((insn >> 12) & 0x1FFu, 9);
+    const bool pre_index = ((insn & 0xFFC00C00u) == 0x7C800C00u) || ((insn & 0xFFC00C00u) == 0x7CC00C00u);
+    const std::uint64_t base = sp_or_reg(rn);
+    const std::uint64_t addr = pre_index ? static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + simm9) : base;
+    const bool ok = is_load ? load_vec(addr, rt, size) : store_vec(addr, rt, size);
+    if (!ok) {
+      data_abort(addr);
+      return true;
+    }
+    set_sp_or_reg(rn, pre_index ? addr : static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + simm9), false);
+    return true;
+  }
+
+  // STP/LDP Dt1, Dt2 pair transfers.
+  if ((insn & 0xFFC00000u) == 0x6D800000u) {
+    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
+    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 3u;
+    const std::uint64_t base = sp_or_reg(rn);
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + imm7);
+    if (!mmu_write(addr, q_reg_lane(rt, 0), 8) || !mmu_write(addr + 8, q_reg_lane(rt2, 0), 8)) {
+      data_abort(addr);
+      return true;
+    }
+    set_sp_or_reg(rn, addr, false);
+    return true;
+  }
+
+  if ((insn & 0xFFC00000u) == 0x6C800000u) {
+    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
+    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 3u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    if (!mmu_write(addr, q_reg_lane(rt, 0), 8) || !mmu_write(addr + 8, q_reg_lane(rt2, 0), 8)) {
+      data_abort(addr);
+      return true;
+    }
+    set_sp_or_reg(rn, static_cast<std::uint64_t>(static_cast<std::int64_t>(addr) + imm7), false);
+    return true;
+  }
+
+  if ((insn & 0xFFC00000u) == 0x6D000000u || (insn & 0xFFC00000u) == 0x6C000000u) {
+    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
+    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 3u;
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + imm7);
+    if (!mmu_write(addr, q_reg_lane(rt, 0), 8) || !mmu_write(addr + 8, q_reg_lane(rt2, 0), 8)) {
+      data_abort(addr);
+      return true;
+    }
+    return true;
+  }
+
+  if ((insn & 0xFFC00000u) == 0x6DC00000u) {
+    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
+    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 3u;
+    const std::uint64_t base = sp_or_reg(rn);
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + imm7);
+    const auto v0 = mmu_read(addr, 8);
+    const auto v1 = mmu_read(addr + 8, 8);
+    if (!v0.has_value() || !v1.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_q_reg_lane(rt, 0, *v0);
+    set_q_reg_lane(rt, 1, 0u);
+    set_q_reg_lane(rt2, 0, *v1);
+    set_q_reg_lane(rt2, 1, 0u);
+    set_sp_or_reg(rn, addr, false);
+    return true;
+  }
+
+  if ((insn & 0xFFC00000u) == 0x6CC00000u) {
+    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
+    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 3u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    const auto v0 = mmu_read(addr, 8);
+    const auto v1 = mmu_read(addr + 8, 8);
+    if (!v0.has_value() || !v1.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_q_reg_lane(rt, 0, *v0);
+    set_q_reg_lane(rt, 1, 0u);
+    set_q_reg_lane(rt2, 0, *v1);
+    set_q_reg_lane(rt2, 1, 0u);
+    set_sp_or_reg(rn, static_cast<std::uint64_t>(static_cast<std::int64_t>(addr) + imm7), false);
+    return true;
+  }
+
+  if ((insn & 0xFFC00000u) == 0x6D400000u || (insn & 0xFFC00000u) == 0x6C400000u) {
+    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
+    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 3u;
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + imm7);
+    const auto v0 = mmu_read(addr, 8);
+    const auto v1 = mmu_read(addr + 8, 8);
+    if (!v0.has_value() || !v1.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_q_reg_lane(rt, 0, *v0);
+    set_q_reg_lane(rt, 1, 0u);
+    set_q_reg_lane(rt2, 0, *v1);
+    set_q_reg_lane(rt2, 1, 0u);
+    return true;
+  }
+
+  // STP/LDP Qt1, Qt2 pair transfers.
+  if ((insn & 0xFFC00000u) == 0xAD800000u) {
+    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
+    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 4u;
+    const std::uint64_t base = sp_or_reg(rn);
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + imm7);
+    if (!mmu_write(addr, q_reg_lane(rt, 0), 8) || !mmu_write(addr + 8, q_reg_lane(rt, 1), 8) ||
+        !mmu_write(addr + 16, q_reg_lane(rt2, 0), 8) || !mmu_write(addr + 24, q_reg_lane(rt2, 1), 8)) {
+      data_abort(addr);
+      return true;
+    }
+    set_sp_or_reg(rn, addr, false);
+    return true;
+  }
+
+  if ((insn & 0xFFC00000u) == 0xAC800000u) {
+    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
+    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 4u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    if (!mmu_write(addr, q_reg_lane(rt, 0), 8) || !mmu_write(addr + 8, q_reg_lane(rt, 1), 8) ||
+        !mmu_write(addr + 16, q_reg_lane(rt2, 0), 8) || !mmu_write(addr + 24, q_reg_lane(rt2, 1), 8)) {
+      data_abort(addr);
+      return true;
+    }
+    set_sp_or_reg(rn, static_cast<std::uint64_t>(static_cast<std::int64_t>(addr) + imm7), false);
+    return true;
+  }
+
+  if ((insn & 0xFFC00000u) == 0xAD000000u || (insn & 0xFFC00000u) == 0xAC000000u) {
+    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
+    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 4u;
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + imm7);
+    if (!mmu_write(addr, q_reg_lane(rt, 0), 8) || !mmu_write(addr + 8, q_reg_lane(rt, 1), 8) ||
+        !mmu_write(addr + 16, q_reg_lane(rt2, 0), 8) || !mmu_write(addr + 24, q_reg_lane(rt2, 1), 8)) {
+      data_abort(addr);
+      return true;
+    }
+    return true;
+  }
+
+  if ((insn & 0xFFC00000u) == 0xADC00000u) {
+    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
+    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 4u;
+    const std::uint64_t base = sp_or_reg(rn);
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + imm7);
+    const auto v00 = mmu_read(addr, 8);
+    const auto v01 = mmu_read(addr + 8, 8);
+    const auto v10 = mmu_read(addr + 16, 8);
+    const auto v11 = mmu_read(addr + 24, 8);
+    if (!v00.has_value() || !v01.has_value() || !v10.has_value() || !v11.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_q_reg_lane(rt, 0, *v00);
+    set_q_reg_lane(rt, 1, *v01);
+    set_q_reg_lane(rt2, 0, *v10);
+    set_q_reg_lane(rt2, 1, *v11);
+    set_sp_or_reg(rn, addr, false);
+    return true;
+  }
+
+  if ((insn & 0xFFC00000u) == 0xACC00000u) {
+    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
+    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 4u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    const auto v00 = mmu_read(addr, 8);
+    const auto v01 = mmu_read(addr + 8, 8);
+    const auto v10 = mmu_read(addr + 16, 8);
+    const auto v11 = mmu_read(addr + 24, 8);
+    if (!v00.has_value() || !v01.has_value() || !v10.has_value() || !v11.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_q_reg_lane(rt, 0, *v00);
+    set_q_reg_lane(rt, 1, *v01);
+    set_q_reg_lane(rt2, 0, *v10);
+    set_q_reg_lane(rt2, 1, *v11);
+    set_sp_or_reg(rn, static_cast<std::uint64_t>(static_cast<std::int64_t>(addr) + imm7), false);
+    return true;
+  }
+
+  if ((insn & 0xFFC00000u) == 0xAD400000u || (insn & 0xFFC00000u) == 0xAC400000u) {
+    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
+    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 4u;
+    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + imm7);
+    const auto v00 = mmu_read(addr, 8);
+    const auto v01 = mmu_read(addr + 8, 8);
+    const auto v10 = mmu_read(addr + 16, 8);
+    const auto v11 = mmu_read(addr + 24, 8);
+    if (!v00.has_value() || !v01.has_value() || !v10.has_value() || !v11.has_value()) {
+      data_abort(addr);
+      return true;
+    }
+    set_q_reg_lane(rt, 0, *v00);
+    set_q_reg_lane(rt, 1, *v01);
+    set_q_reg_lane(rt2, 0, *v10);
+    set_q_reg_lane(rt2, 1, *v11);
     return true;
   }
 
@@ -3003,5 +4369,175 @@ std::int64_t Cpu::sign_extend(std::uint64_t value, std::uint32_t bits) {
   value &= mask;
   return static_cast<std::int64_t>((value ^ sign) - sign);
 }
+
+
+bool Cpu::save_state(std::ostream& out) const {
+  const auto write_translation_fault = [&](const TranslationFault& fault) {
+    const std::uint8_t kind = static_cast<std::uint8_t>(fault.kind);
+    return snapshot_io::write(out, kind) && snapshot_io::write(out, fault.level) && snapshot_io::write_bool(out, fault.write);
+  };
+  const auto write_tlb_entry = [&](const TlbEntry& entry) {
+    return snapshot_io::write(out, entry.pa_page) &&
+           snapshot_io::write(out, entry.level) &&
+           snapshot_io::write(out, entry.attr_index) &&
+           snapshot_io::write(out, entry.mair_attr) &&
+           snapshot_io::write_bool(out, entry.writable) &&
+           snapshot_io::write_bool(out, entry.executable) &&
+           snapshot_io::write_bool(out, entry.pxn) &&
+           snapshot_io::write_bool(out, entry.uxn) &&
+           snapshot_io::write(out, static_cast<std::uint8_t>(entry.memory_type)) &&
+           snapshot_io::write(out, static_cast<std::uint8_t>(entry.leaf_shareability)) &&
+           snapshot_io::write(out, static_cast<std::uint8_t>(entry.walk_attrs.inner)) &&
+           snapshot_io::write(out, static_cast<std::uint8_t>(entry.walk_attrs.outer)) &&
+           snapshot_io::write(out, static_cast<std::uint8_t>(entry.walk_attrs.shareability)) &&
+           snapshot_io::write(out, entry.walk_attrs.ips_bits);
+  };
+
+  if (!snapshot_io::write_array(out, regs_)) {
+    return false;
+  }
+  for (const auto& qreg : qregs_) {
+    if (!snapshot_io::write_array(out, qreg)) {
+      return false;
+    }
+  }
+  if (!sysregs_.save_state(out) ||
+      !snapshot_io::write(out, exception_depth_) ||
+      !snapshot_io::write_array(out, exception_is_irq_stack_) ||
+      !snapshot_io::write_array(out, exception_intid_stack_) ||
+      !snapshot_io::write_bool(out, sync_reported_) ||
+      !snapshot_io::write_bool(out, waiting_for_interrupt_) ||
+      !snapshot_io::write_bool(out, waiting_for_event_) ||
+      !snapshot_io::write_bool(out, event_register_) ||
+      !snapshot_io::write(out, icc_pmr_el1_) ||
+      !snapshot_io::write(out, icc_ctlr_el1_) ||
+      !snapshot_io::write(out, icc_sre_el1_) ||
+      !snapshot_io::write(out, icc_bpr1_el1_) ||
+      !snapshot_io::write(out, icc_igrpen1_el1_) ||
+      !snapshot_io::write_array(out, icc_ap0r_el1_) ||
+      !snapshot_io::write_array(out, icc_ap1r_el1_) ||
+      !snapshot_io::write_bool(out, exclusive_valid_) ||
+      !snapshot_io::write(out, exclusive_addr_) ||
+      !snapshot_io::write(out, exclusive_size_)) {
+    return false;
+  }
+  const std::uint64_t tlb_size = static_cast<std::uint64_t>(tlb_page_map_.size());
+  if (!snapshot_io::write(out, tlb_size)) {
+    return false;
+  }
+  for (const auto& [va_page, entry] : tlb_page_map_) {
+    if (!snapshot_io::write(out, va_page) || !write_tlb_entry(entry)) {
+      return false;
+    }
+  }
+  const bool has_last_fault = last_translation_fault_.has_value();
+  if (!snapshot_io::write_bool(out, has_last_fault)) {
+    return false;
+  }
+  if (has_last_fault && !write_translation_fault(*last_translation_fault_)) {
+    return false;
+  }
+  return snapshot_io::write(out, pc_) && snapshot_io::write(out, steps_) && snapshot_io::write_bool(out, halted_);
+}
+
+bool Cpu::load_state(std::istream& in) {
+  const auto read_translation_fault = [&](TranslationFault& fault) {
+    std::uint8_t kind = 0;
+    if (!snapshot_io::read(in, kind) || kind > static_cast<std::uint8_t>(TranslationFault::Kind::Permission) ||
+        !snapshot_io::read(in, fault.level) || !snapshot_io::read_bool(in, fault.write)) {
+      return false;
+    }
+    fault.kind = static_cast<TranslationFault::Kind>(kind);
+    return true;
+  };
+  const auto read_tlb_entry = [&](TlbEntry& entry) {
+    std::uint8_t memory_type = 0;
+    std::uint8_t leaf_shareability = 0;
+    std::uint8_t walk_inner = 0;
+    std::uint8_t walk_outer = 0;
+    std::uint8_t walk_shareability = 0;
+    if (!snapshot_io::read(in, entry.pa_page) || !snapshot_io::read(in, entry.level) || !snapshot_io::read(in, entry.attr_index) || !snapshot_io::read(in, entry.mair_attr) ||
+        !snapshot_io::read_bool(in, entry.writable) || !snapshot_io::read_bool(in, entry.executable) || !snapshot_io::read_bool(in, entry.pxn) ||
+        !snapshot_io::read_bool(in, entry.uxn) || !snapshot_io::read(in, memory_type) || !snapshot_io::read(in, leaf_shareability) ||
+        !snapshot_io::read(in, walk_inner) || !snapshot_io::read(in, walk_outer) || !snapshot_io::read(in, walk_shareability) ||
+        !snapshot_io::read(in, entry.walk_attrs.ips_bits)) {
+      return false;
+    }
+    entry.memory_type = static_cast<MemoryType>(memory_type);
+    entry.leaf_shareability = static_cast<Shareability>(leaf_shareability);
+    entry.walk_attrs.inner = static_cast<Cacheability>(walk_inner);
+    entry.walk_attrs.outer = static_cast<Cacheability>(walk_outer);
+    entry.walk_attrs.shareability = static_cast<Shareability>(walk_shareability);
+    return true;
+  };
+
+  if (!snapshot_io::read_array(in, regs_)) {
+    return false;
+  }
+  for (auto& qreg : qregs_) {
+    if (!snapshot_io::read_array(in, qreg)) {
+      return false;
+    }
+  }
+  if (!sysregs_.load_state(in) ||
+      !snapshot_io::read(in, exception_depth_) ||
+      exception_depth_ > exception_is_irq_stack_.size() ||
+      !snapshot_io::read_array(in, exception_is_irq_stack_) ||
+      !snapshot_io::read_array(in, exception_intid_stack_) ||
+      !snapshot_io::read_bool(in, sync_reported_) ||
+      !snapshot_io::read_bool(in, waiting_for_interrupt_) ||
+      !snapshot_io::read_bool(in, waiting_for_event_) ||
+      !snapshot_io::read_bool(in, event_register_) ||
+      !snapshot_io::read(in, icc_pmr_el1_) ||
+      !snapshot_io::read(in, icc_ctlr_el1_) ||
+      !snapshot_io::read(in, icc_sre_el1_) ||
+      !snapshot_io::read(in, icc_bpr1_el1_) ||
+      !snapshot_io::read(in, icc_igrpen1_el1_) ||
+      !snapshot_io::read_array(in, icc_ap0r_el1_) ||
+      !snapshot_io::read_array(in, icc_ap1r_el1_) ||
+      !snapshot_io::read_bool(in, exclusive_valid_) ||
+      !snapshot_io::read(in, exclusive_addr_) ||
+      !snapshot_io::read(in, exclusive_size_)) {
+    return false;
+  }
+  std::uint64_t tlb_size = 0;
+  if (!snapshot_io::read(in, tlb_size) || tlb_size > (1ull << 20)) {
+    return false;
+  }
+  tlb_page_map_.clear();
+  for (std::uint64_t i = 0; i < tlb_size; ++i) {
+    std::uint64_t va_page = 0;
+    TlbEntry entry{};
+    if (!snapshot_io::read(in, va_page) || !read_tlb_entry(entry)) {
+      return false;
+    }
+    tlb_page_map_.emplace(va_page, entry);
+  }
+  bool has_last_fault = false;
+  if (!snapshot_io::read_bool(in, has_last_fault)) {
+    return false;
+  }
+  if (has_last_fault) {
+    TranslationFault fault{};
+    if (!read_translation_fault(fault)) {
+      return false;
+    }
+    last_translation_fault_ = fault;
+  } else {
+    last_translation_fault_.reset();
+  }
+  if (!snapshot_io::read(in, pc_) || !snapshot_io::read(in, steps_) || !snapshot_io::read_bool(in, halted_)) {
+    return false;
+  }
+  trace_va_hit_ = false;
+  trace_svc_count_ = 0;
+  trace_eret_lower_count_ = 0;
+  trace_lower_sync_count_ = 0;
+  for (auto& [_, hit] : pc_watch_hits_) {
+    hit = false;
+  }
+  return true;
+}
+
 
 } // namespace aarchvm
