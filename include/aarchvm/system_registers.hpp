@@ -67,6 +67,11 @@ public:
   [[nodiscard]] std::uint64_t tpidrro_el0() const { return tpidrro_el0_; }
   [[nodiscard]] std::uint64_t tpidr_el1() const { return tpidr_el1_; }
   [[nodiscard]] std::uint64_t tpidr_el2() const { return tpidr_el2_; }
+  [[nodiscard]] std::uint64_t fpcr() const { return fpcr_; }
+  [[nodiscard]] std::uint64_t fpsr() const { return fpsr_; }
+  void set_fpcr(std::uint64_t value) { fpcr_ = value & 0xFFFFFFFFu; }
+  void set_fpsr(std::uint64_t value) { fpsr_ = value & 0xFFFFFFFFu; }
+  void fp_or_fpsr(std::uint64_t bits) { fpsr_ = (fpsr_ | bits) & 0xFFFFFFFFu; }
 
   void set_cntvct(std::uint64_t value) { cntvct_el0_ = value; }
   [[nodiscard]] std::uint64_t vbar_el1() const { return vbar_el1_; }

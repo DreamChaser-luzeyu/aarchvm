@@ -18,20 +18,40 @@ BusFastPath::BusFastPath(Ram& boot_ram, Ram& sdram)
 
 bool BusFastPath::read(std::uint64_t addr, std::size_t size, std::uint64_t& value) const {
   if (addr >= kBootRamBase && addr + size <= kBootRamBase + kBootRamSize) {
-    return boot_ram_->read_fast(addr - kBootRamBase, size, value);
+    if (boot_ram_->read_fast(addr - kBootRamBase, size, value)) {
+      ++perf_counters_.read_ops;
+      perf_counters_.read_bytes += size;
+      return true;
+    }
+    return false;
   }
   if (addr >= kSdramBase && addr + size <= kSdramBase + kSdramSize) {
-    return sdram_->read_fast(addr - kSdramBase, size, value);
+    if (sdram_->read_fast(addr - kSdramBase, size, value)) {
+      ++perf_counters_.read_ops;
+      perf_counters_.read_bytes += size;
+      return true;
+    }
+    return false;
   }
   return false;
 }
 
 bool BusFastPath::write(std::uint64_t addr, std::uint64_t value, std::size_t size) const {
   if (addr >= kBootRamBase && addr + size <= kBootRamBase + kBootRamSize) {
-    return boot_ram_->write_fast(addr - kBootRamBase, value, size);
+    if (boot_ram_->write_fast(addr - kBootRamBase, value, size)) {
+      ++perf_counters_.write_ops;
+      perf_counters_.write_bytes += size;
+      return true;
+    }
+    return false;
   }
   if (addr >= kSdramBase && addr + size <= kSdramBase + kSdramSize) {
-    return sdram_->write_fast(addr - kSdramBase, value, size);
+    if (sdram_->write_fast(addr - kSdramBase, value, size)) {
+      ++perf_counters_.write_ops;
+      perf_counters_.write_bytes += size;
+      return true;
+    }
+    return false;
   }
   return false;
 }

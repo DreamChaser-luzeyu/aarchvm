@@ -1,5 +1,8 @@
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <iostream>
+#include <utility>
 
 #include "aarchvm/snapshot_io.hpp"
 #include "aarchvm/soc.hpp"
@@ -33,18 +36,66 @@ std::optional<std::uint64_t> env_timer_scale() {
   return static_cast<std::uint64_t>(scale);
 }
 
+std::uint64_t host_monotonic_ns() {
+  const auto now = std::chrono::steady_clock::now().time_since_epoch();
+  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+}
+
+PerfCounters perf_delta(const PerfCounters& end, const PerfCounters& start) {
+  PerfCounters d{};
+  d.steps = end.steps - start.steps;
+  d.bus_reads = end.bus_reads - start.bus_reads;
+  d.bus_writes = end.bus_writes - start.bus_writes;
+  d.bus_read_bytes = end.bus_read_bytes - start.bus_read_bytes;
+  d.bus_write_bytes = end.bus_write_bytes - start.bus_write_bytes;
+  d.bus_find_calls = end.bus_find_calls - start.bus_find_calls;
+  d.bus_device_reads = end.bus_device_reads - start.bus_device_reads;
+  d.bus_device_writes = end.bus_device_writes - start.bus_device_writes;
+  d.ram_fast_reads = end.ram_fast_reads - start.ram_fast_reads;
+  d.ram_fast_writes = end.ram_fast_writes - start.ram_fast_writes;
+  d.ram_fast_read_bytes = end.ram_fast_read_bytes - start.ram_fast_read_bytes;
+  d.ram_fast_write_bytes = end.ram_fast_write_bytes - start.ram_fast_write_bytes;
+  d.translate_calls = end.translate_calls - start.translate_calls;
+  d.tlb_lookups = end.tlb_lookups - start.tlb_lookups;
+  d.tlb_hits = end.tlb_hits - start.tlb_hits;
+  d.tlb_misses = end.tlb_misses - start.tlb_misses;
+  d.tlb_inserts = end.tlb_inserts - start.tlb_inserts;
+  d.tlb_flush_all = end.tlb_flush_all - start.tlb_flush_all;
+  d.tlb_flush_va = end.tlb_flush_va - start.tlb_flush_va;
+  d.page_walks = end.page_walks - start.page_walks;
+  d.page_walk_desc_reads = end.page_walk_desc_reads - start.page_walk_desc_reads;
+  d.gic_has_pending = end.gic_has_pending - start.gic_has_pending;
+  d.gic_acknowledge = end.gic_acknowledge - start.gic_acknowledge;
+  d.gic_recompute = end.gic_recompute - start.gic_recompute;
+  d.gic_set_level = end.gic_set_level - start.gic_set_level;
+  d.soc_sync_devices = end.soc_sync_devices - start.soc_sync_devices;
+  d.soc_run_chunks = end.soc_run_chunks - start.soc_run_chunks;
+  return d;
+}
+
 } // namespace
 
 SoC::SoC()
     : boot_ram_(std::make_shared<Ram>(kBootRamSize)),
       sdram_(std::make_shared<Ram>(kSdramSize)),
       uart_(std::make_shared<UartPl011>()),
+      perf_mailbox_(std::make_shared<PerfMailbox>(PerfMailbox::Callbacks{
+          .begin = [this](std::uint64_t case_id, std::uint64_t arg0, std::uint64_t arg1) {
+            perf_begin(case_id, arg0, arg1);
+          },
+          .end = [this](std::uint64_t case_id, std::uint64_t arg0, std::uint64_t arg1) {
+            return perf_end(case_id, arg0, arg1);
+          },
+          .request_exit = [this]() { request_stop(); },
+          .flush_tlb = [this]() { perf_flush_tlb(); },
+      })),
       gic_(std::make_shared<GicV3>()),
       timer_(std::make_shared<GenericTimer>()),
       cpu_(bus_, *gic_, *timer_) {
   bus_.map(kBootRamBase, kBootRamSize, boot_ram_);
   bus_.map(kSdramBase, kSdramSize, sdram_);
   bus_.map(kUartBase, kUartSize, uart_);
+  bus_.map(kPerfBase, kPerfSize, perf_mailbox_);
   bus_.map(kGicBase, kGicSize, gic_);
   bus_.map(kTimerBase, kTimerSize, timer_);
 
@@ -57,9 +108,11 @@ SoC::SoC()
     timer_tick_scale_ = *scale;
   }
 
+  uart_->set_tx_observer([this](std::uint8_t byte) { on_uart_tx(byte); });
   timer_->set_cycles_per_step(timer_tick_scale_);
   cpu_.reset(kBootRamBase);
   timer_->rebase_to_steps(cpu_.steps());
+  reset_perf_measurement_state();
 }
 
 bool SoC::load_image(std::uint64_t addr, const std::vector<std::uint32_t>& words) {
@@ -88,6 +141,7 @@ void SoC::reset(std::uint64_t entry_pc) {
   cpu_.reset(entry_pc);
   timer_->set_cycles_per_step(timer_tick_scale_);
   timer_->rebase_to_steps(cpu_.steps());
+  reset_perf_measurement_state();
 }
 
 void SoC::set_sp(std::uint64_t sp) {
@@ -105,8 +159,141 @@ void SoC::inject_uart_rx(std::uint8_t byte) {
   }
 }
 
+void SoC::set_stop_on_uart_pattern(std::string pattern) {
+  stop_on_uart_pattern_ = std::move(pattern);
+  stop_on_uart_window_.clear();
+}
+
+void SoC::on_uart_tx(std::uint8_t byte) {
+  if (stop_on_uart_pattern_.empty()) {
+    return;
+  }
+  stop_on_uart_window_.push_back(static_cast<char>(byte));
+  if (stop_on_uart_window_.size() > stop_on_uart_pattern_.size()) {
+    stop_on_uart_window_.erase(0, stop_on_uart_window_.size() - stop_on_uart_pattern_.size());
+  }
+  if (stop_on_uart_window_ == stop_on_uart_pattern_) {
+    request_stop();
+  }
+}
+
+void SoC::request_stop() {
+  stop_requested_ = true;
+}
+
+void SoC::perf_begin(std::uint64_t case_id, std::uint64_t arg0, std::uint64_t arg1) {
+  perf_session_.active = true;
+  perf_session_.case_id = case_id;
+  perf_session_.arg0 = arg0;
+  perf_session_.arg1 = arg1;
+  perf_session_.start = collect_perf_counters();
+  perf_session_.start_host_ns = host_monotonic_ns();
+}
+
+PerfResult SoC::perf_end(std::uint64_t case_id, std::uint64_t arg0, std::uint64_t arg1) {
+  PerfResult result{};
+  result.case_id = case_id;
+  result.arg0 = arg0;
+  result.arg1 = arg1;
+  if (perf_session_.active) {
+    const PerfCounters end = collect_perf_counters();
+    result.host_ns = host_monotonic_ns() - perf_session_.start_host_ns;
+    result.delta = perf_delta(end, perf_session_.start);
+  }
+  std::cerr << "PERF-RESULT"
+            << " case_id=" << result.case_id
+            << " arg0=" << result.arg0
+            << " arg1=" << result.arg1
+            << " host_ns=" << result.host_ns
+            << " steps=" << result.delta.steps
+            << " translate=" << result.delta.translate_calls
+            << " tlb_lookup=" << result.delta.tlb_lookups
+            << " tlb_hit=" << result.delta.tlb_hits
+            << " tlb_miss=" << result.delta.tlb_misses
+            << " tlb_insert=" << result.delta.tlb_inserts
+            << " tlb_flush_all=" << result.delta.tlb_flush_all
+            << " page_walk=" << result.delta.page_walks
+            << " page_desc=" << result.delta.page_walk_desc_reads
+            << " bus_read=" << result.delta.bus_reads
+            << " bus_write=" << result.delta.bus_writes
+            << " bus_find=" << result.delta.bus_find_calls
+            << " dev_read=" << result.delta.bus_device_reads
+            << " dev_write=" << result.delta.bus_device_writes
+            << " ram_read=" << result.delta.ram_fast_reads
+            << " ram_write=" << result.delta.ram_fast_writes
+            << " gic_pending=" << result.delta.gic_has_pending
+            << " gic_ack=" << result.delta.gic_acknowledge
+            << " gic_recompute=" << result.delta.gic_recompute
+            << " gic_level=" << result.delta.gic_set_level
+            << " sync_devices=" << result.delta.soc_sync_devices
+            << " run_chunks=" << result.delta.soc_run_chunks
+            << '\n';
+  perf_session_.active = false;
+  return result;
+}
+
+void SoC::perf_flush_tlb() {
+  cpu_.perf_flush_tlb_all();
+}
+
+PerfCounters SoC::collect_perf_counters() const {
+  PerfCounters out{};
+  out.steps = cpu_.steps();
+
+  const auto& bus_perf = bus_.perf_counters();
+  out.bus_reads = bus_perf.read_ops;
+  out.bus_writes = bus_perf.write_ops;
+  out.bus_read_bytes = bus_perf.read_bytes;
+  out.bus_write_bytes = bus_perf.write_bytes;
+  out.bus_find_calls = bus_perf.find_calls;
+  out.bus_device_reads = bus_perf.device_reads;
+  out.bus_device_writes = bus_perf.device_writes;
+
+  if (fast_path_ != nullptr) {
+    const auto& fast_perf = fast_path_->perf_counters();
+    out.ram_fast_reads = fast_perf.read_ops;
+    out.ram_fast_writes = fast_perf.write_ops;
+    out.ram_fast_read_bytes = fast_perf.read_bytes;
+    out.ram_fast_write_bytes = fast_perf.write_bytes;
+  }
+
+  const auto& cpu_perf = cpu_.perf_counters();
+  out.translate_calls = cpu_perf.translate_calls;
+  out.tlb_lookups = cpu_perf.tlb_lookups;
+  out.tlb_hits = cpu_perf.tlb_hits;
+  out.tlb_misses = cpu_perf.tlb_misses;
+  out.tlb_inserts = cpu_perf.tlb_inserts;
+  out.tlb_flush_all = cpu_perf.tlb_flush_all;
+  out.tlb_flush_va = cpu_perf.tlb_flush_va;
+  out.page_walks = cpu_perf.page_walks;
+  out.page_walk_desc_reads = cpu_perf.page_walk_desc_reads;
+
+  const auto& gic_perf = gic_->perf_counters();
+  out.gic_has_pending = gic_perf.has_pending_calls;
+  out.gic_acknowledge = gic_perf.acknowledge_calls;
+  out.gic_recompute = gic_perf.recompute_calls;
+  out.gic_set_level = gic_perf.set_level_calls;
+
+  out.soc_sync_devices = local_perf_counters_.sync_devices;
+  out.soc_run_chunks = local_perf_counters_.run_chunks;
+  return out;
+}
+
+void SoC::reset_perf_measurement_state() {
+  stop_requested_ = false;
+  perf_session_ = {};
+  local_perf_counters_ = {};
+  bus_.reset_perf_counters();
+  if (fast_path_ != nullptr) {
+    fast_path_->reset_perf_counters();
+  }
+  cpu_.reset_perf_counters();
+  gic_->reset_perf_counters();
+}
+
 bool SoC::run(std::size_t max_steps) {
   auto sync_devices = [&]() {
+    ++local_perf_counters_.sync_devices;
     timer_->sync_to_steps(cpu_.steps());
     gic_->set_level(kTimerVirtIntId, timer_->irq_pending() || timer_->irq_pending_virtual());
     gic_->set_level(kTimerPhysIntId, timer_->irq_pending_physical());
@@ -115,7 +302,8 @@ bool SoC::run(std::size_t max_steps) {
 
   static constexpr std::size_t kMaxInternalChunk = 65536;
   std::size_t remaining = max_steps;
-  while (remaining > 0) {
+  while (remaining > 0 && !stop_requested_) {
+    ++local_perf_counters_.run_chunks;
     sync_devices();
 
     std::size_t chunk = std::min<std::size_t>(remaining, kMaxInternalChunk);
@@ -133,6 +321,9 @@ bool SoC::run(std::size_t max_steps) {
     for (std::size_t i = 0; i < chunk; ++i) {
       if (!cpu_.step()) {
         return cpu_.halted();
+      }
+      if (stop_requested_) {
+        return true;
       }
     }
     remaining -= chunk;
@@ -337,6 +528,7 @@ bool SoC::load_snapshot(const std::string& path) {
   }
   timer_->set_cycles_per_step(timer_tick_scale_);
   timer_->rebase_to_steps(cpu_.steps());
+  reset_perf_measurement_state();
   return true;
 }
 

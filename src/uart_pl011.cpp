@@ -124,6 +124,9 @@ void UartPl011::write(std::uint64_t offset, std::uint64_t value, std::size_t siz
     const char ch = static_cast<char>(value & 0xFFu);
     std::putchar(ch);
     std::fflush(stdout);
+    if (tx_observer_) {
+      tx_observer_(static_cast<std::uint8_t>(ch));
+    }
     return;
   }
   if (offset == 0x04) {

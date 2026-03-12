@@ -271,7 +271,55 @@ std::uint32_t highest_set_bit(std::uint32_t value) {
   return 0u;
 }
 
+constexpr std::uint64_t kFpsrIoc = 1ull << 0;
+constexpr std::uint64_t kFpsrIxc = 1ull << 4;
 
+template <typename UIntT>
+UIntT fp_to_unsigned_rtz(long double value, std::uint64_t& fpsr_bits) {
+  fpsr_bits = 0;
+  if (std::isnan(value)) {
+    fpsr_bits |= kFpsrIoc;
+    return 0;
+  }
+  constexpr int kBits = static_cast<int>(sizeof(UIntT) * 8u);
+  const long double upper_bound = std::ldexp(1.0L, kBits);
+  if (!std::isfinite(value) || value < 0.0L || value >= upper_bound) {
+    fpsr_bits |= kFpsrIoc;
+    if (value < 0.0L) {
+      return 0;
+    }
+    return std::numeric_limits<UIntT>::max();
+  }
+  const long double truncated = std::trunc(value);
+  if (truncated != value) {
+    fpsr_bits |= kFpsrIxc;
+  }
+  return static_cast<UIntT>(truncated);
+}
+
+template <typename IntT>
+IntT fp_to_signed_rtz(long double value, std::uint64_t& fpsr_bits) {
+  fpsr_bits = 0;
+  if (std::isnan(value)) {
+    fpsr_bits |= kFpsrIoc;
+    return 0;
+  }
+  constexpr int kBits = static_cast<int>(sizeof(IntT) * 8u);
+  const long double lower_bound = -std::ldexp(1.0L, kBits - 1);
+  const long double upper_bound = std::ldexp(1.0L, kBits - 1);
+  if (!std::isfinite(value) || value < lower_bound || value >= upper_bound) {
+    fpsr_bits |= kFpsrIoc;
+    if (value < 0.0L) {
+      return std::numeric_limits<IntT>::min();
+    }
+    return std::numeric_limits<IntT>::max();
+  }
+  const long double truncated = std::trunc(value);
+  if (truncated != value) {
+    fpsr_bits |= kFpsrIxc;
+  }
+  return static_cast<IntT>(truncated);
+}
 
 } // namespace
 
@@ -394,6 +442,10 @@ void Cpu::reset(std::uint64_t pc) {
 
 void Cpu::set_cntvct(std::uint64_t value) {
   sysregs_.set_cntvct(value);
+}
+
+void Cpu::perf_flush_tlb_all() {
+  tlb_flush_all();
 }
 
 bool Cpu::step() {
@@ -710,6 +762,7 @@ std::optional<Cpu::TranslationResult> Cpu::translate_address(std::uint64_t va,
                                                              AccessType access,
                                                              bool allow_tlb_fill,
                                                              bool use_tlb) {
+  ++perf_counters_.translate_calls;
   last_translation_fault_.reset();
 
   if (!sysregs_.mmu_enabled()) {
@@ -732,7 +785,19 @@ std::optional<Cpu::TranslationResult> Cpu::translate_address(std::uint64_t va,
   const std::uint64_t off = va & 0xFFFull;
 
   if (use_tlb) {
-    if (const TlbEntry* hit = tlb_lookup(page); hit != nullptr) {
+    const TlbEntry* hit = nullptr;
+    TlbEntry* hot = (access == AccessType::Fetch) ? &tlb_last_fetch_ : &tlb_last_data_;
+    if (hot->valid && hot->va_page == page) {
+      hit = hot;
+    } else {
+      ++perf_counters_.tlb_lookups;
+      hit = tlb_lookup(page);
+      if (hit != nullptr) {
+        *hot = *hit;
+      }
+    }
+    if (hit != nullptr) {
+      ++perf_counters_.tlb_hits;
       TranslationResult result{};
       result.pa = (hit->pa_page << 12) | off;
       result.level = hit->level;
@@ -752,6 +817,7 @@ std::optional<Cpu::TranslationResult> Cpu::translate_address(std::uint64_t va,
       }
       return result;
     }
+    ++perf_counters_.tlb_misses;
   }
 
   TranslationFault fault{};
@@ -770,6 +836,7 @@ std::optional<Cpu::TranslationResult> Cpu::translate_address(std::uint64_t va,
 std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
                                                             AccessType access,
                                                             TranslationFault* fault) {
+  ++perf_counters_.page_walks;
   const bool trace_va = trace_va_.has_value() && *trace_va_ == va && !trace_va_hit_;
   const auto trace_va_log = [&](const std::string& msg) {
     if (trace_va && trace_exceptions_) {
@@ -876,6 +943,7 @@ std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
   TableAttrs inherited{};
   for (std::uint32_t level = start_level; level < 4u; ++level) {
     const std::uint64_t desc_addr = table_base + idx[level] * 8u;
+    ++perf_counters_.page_walk_desc_reads;
     const auto desc_opt = bus_.read(desc_addr, 8);
     if (trace_va) {
       std::ostringstream oss;
@@ -1140,6 +1208,9 @@ bool Cpu::pa_within_ips(std::uint64_t pa, std::uint8_t ips_bits) const {
 }
 
 void Cpu::tlb_flush_all() {
+  ++perf_counters_.tlb_flush_all;
+  tlb_last_fetch_.valid = false;
+  tlb_last_data_.valid = false;
   for (auto& set : tlb_entries_) {
     for (auto& entry : set) {
       entry.valid = false;
@@ -1159,6 +1230,7 @@ const Cpu::TlbEntry* Cpu::tlb_lookup(std::uint64_t va_page) const {
 }
 
 void Cpu::tlb_insert(std::uint64_t va_page, const TranslationResult& result) {
+  ++perf_counters_.tlb_inserts;
   TlbEntry entry{};
   entry.valid = true;
   entry.va_page = va_page;
@@ -1177,6 +1249,10 @@ void Cpu::tlb_insert(std::uint64_t va_page, const TranslationResult& result) {
 }
 
 void Cpu::tlb_insert_entry(std::uint64_t va_page, const TlbEntry& entry) {
+  if (entry.valid) {
+    tlb_last_data_ = entry;
+    tlb_last_fetch_.valid = false;
+  }
   auto& set = tlb_entries_[tlb_set_index(va_page)];
   for (TlbEntry& slot : set) {
     if (slot.valid && slot.va_page == va_page) {
@@ -1205,6 +1281,12 @@ void Cpu::tlb_insert_entry(std::uint64_t va_page, const TlbEntry& entry) {
 }
 
 void Cpu::tlb_invalidate_page(std::uint64_t va_page) {
+  if (tlb_last_fetch_.valid && tlb_last_fetch_.va_page == va_page) {
+    tlb_last_fetch_.valid = false;
+  }
+  if (tlb_last_data_.valid && tlb_last_data_.va_page == va_page) {
+    tlb_last_data_.valid = false;
+  }
   auto& set = tlb_entries_[tlb_set_index(va_page)];
   for (TlbEntry& entry : set) {
     if (entry.valid && entry.va_page == va_page) {
@@ -1214,6 +1296,7 @@ void Cpu::tlb_invalidate_page(std::uint64_t va_page) {
   }
 }
 void Cpu::tlb_flush_va(std::uint64_t va) {
+  ++perf_counters_.tlb_flush_va;
   // Linux feeds TLBI-by-VA operands in architected VA>>12 form, while some
   // local tests historically passed raw VAs. Accept both encodings here.
   tlb_invalidate_page((va >> 12) & tlb_page_mask());
@@ -1886,7 +1969,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
-  if ((insn & 0xBF20FC00u) == 0x0F20A400u || (insn & 0xBF20FC00u) == 0x2F20A400u) { // SSHLL/USHLL lower half, including SXTL/UXTL aliases
+  if ((insn & 0xBF80FC00u) == 0x0F00A400u || (insn & 0xBF80FC00u) == 0x2F00A400u) { // SSHLL/USHLL lower half, including SXTL/UXTL aliases
     const bool is_unsigned = ((insn >> 29) & 1u) != 0u;
     const std::uint32_t immh = (insn >> 19) & 0xFu;
     const std::uint32_t immb = (insn >> 16) & 0x7u;
@@ -1918,6 +2001,35 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     }
     qregs_[rd] = dst;
     return true;
+  }
+
+  if ((insn & 0xBF808400u) == 0x2F000400u || (insn & 0xBF808400u) == 0x0F000400u) { // USHR/SSHR
+    const std::uint32_t immh = (insn >> 19) & 0xFu;
+    if (immh != 0u) {
+      const bool is_unsigned = ((insn >> 29) & 1u) != 0u;
+      const bool q = ((insn >> 30) & 1u) != 0u;
+      const std::uint32_t immb = (insn >> 16) & 0x7u;
+      const std::uint32_t esize_bits = 8u << highest_set_bit(immh);
+      const std::uint32_t total_bits = q ? 128u : 64u;
+      if (esize_bits > total_bits) {
+        return false;
+      }
+      const std::uint32_t immhb = (immh << 3u) | immb;
+      const std::uint32_t shift = esize_bits * 2u - immhb;
+      if (shift == 0u || shift > esize_bits) {
+        return false;
+      }
+      const std::uint32_t lanes = total_bits / esize_bits;
+      const auto src = qregs_[rn];
+      std::array<std::uint64_t, 2> dst = {0, 0};
+      for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+        const std::uint64_t value = vector_get_elem(src, esize_bits, lane);
+        const std::uint64_t shifted = is_unsigned ? (value >> shift) : static_cast<std::uint64_t>(sign_extend(value, esize_bits) >> shift);
+        vector_set_elem(dst, esize_bits, lane, shifted & ones(esize_bits));
+      }
+      qregs_[rd] = dst;
+      return true;
+    }
   }
 
   if ((insn & 0xBF80FC00u) == 0x0F00E400u) { // MOVI (byte immediate)
@@ -2068,6 +2180,16 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
+  if ((insn & 0xBFE0FC00u) == 0x0EA01C00u) { // ORR/MOV (vector)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    qregs_[rd][0] = lhs[0] | rhs[0];
+    qregs_[rd][1] = q ? (lhs[1] | rhs[1]) : 0u;
+    return true;
+  }
+
   if ((insn & 0xBFE0FC00u) == 0x2E201C00u) { // EOR (vector)
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
@@ -2126,6 +2248,142 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     for (std::uint32_t lane = 0; lane < lanes; ++lane) {
       const bool ge = vector_get_elem(lhs, esize_bits, lane) >= vector_get_elem(rhs, esize_bits, lane);
       vector_set_elem(dst, esize_bits, lane, ge ? ones(esize_bits) : 0u);
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+
+  if ((insn & 0xBF20FC00u) == 0x0E208400u) { // ADD (vector)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t esize_bits = 8u << size;
+    const std::uint32_t total_bits = q ? 128u : 64u;
+    if (esize_bits > total_bits) {
+      return false;
+    }
+    const std::uint32_t lanes = total_bits / esize_bits;
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+      const std::uint64_t sum = (vector_get_elem(lhs, esize_bits, lane) + vector_get_elem(rhs, esize_bits, lane)) & ones(esize_bits);
+      vector_set_elem(dst, esize_bits, lane, sum);
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xBF20FC00u) == 0x2E208400u) { // SUB (vector)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t esize_bits = 8u << size;
+    const std::uint32_t total_bits = q ? 128u : 64u;
+    if (esize_bits > total_bits) {
+      return false;
+    }
+    const std::uint32_t lanes = total_bits / esize_bits;
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+      const std::uint64_t diff = (vector_get_elem(lhs, esize_bits, lane) - vector_get_elem(rhs, esize_bits, lane)) & ones(esize_bits);
+      vector_set_elem(dst, esize_bits, lane, diff);
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xBF20FC00u) == 0x0E209C00u) { // MUL (vector)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    if (size == 3u) {
+      return false;
+    }
+    const std::uint32_t esize_bits = 8u << size;
+    const std::uint32_t total_bits = q ? 128u : 64u;
+    const std::uint32_t lanes = total_bits / esize_bits;
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+      const std::uint64_t prod = (vector_get_elem(lhs, esize_bits, lane) * vector_get_elem(rhs, esize_bits, lane)) & ones(esize_bits);
+      vector_set_elem(dst, esize_bits, lane, prod);
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xBF20FC00u) == 0x0E003800u) { // ZIP1 (vector)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t esize_bits = 8u << size;
+    const std::uint32_t total_bits = q ? 128u : 64u;
+    if (esize_bits > total_bits) {
+      return false;
+    }
+    const std::uint32_t lanes = total_bits / esize_bits;
+    if ((lanes & 1u) != 0u) {
+      return false;
+    }
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t i = 0; i < lanes / 2u; ++i) {
+      vector_set_elem(dst, esize_bits, i * 2u, vector_get_elem(lhs, esize_bits, i));
+      vector_set_elem(dst, esize_bits, i * 2u + 1u, vector_get_elem(rhs, esize_bits, i));
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xBF20FC00u) == 0x0E001800u) { // UZP1 (vector)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t esize_bits = 8u << size;
+    const std::uint32_t total_bits = q ? 128u : 64u;
+    if (esize_bits > total_bits) {
+      return false;
+    }
+    const std::uint32_t lanes = total_bits / esize_bits;
+    if ((lanes & 1u) != 0u) {
+      return false;
+    }
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t i = 0; i < lanes / 2u; ++i) {
+      vector_set_elem(dst, esize_bits, i, vector_get_elem(lhs, esize_bits, i * 2u));
+      vector_set_elem(dst, esize_bits, i + (lanes / 2u), vector_get_elem(rhs, esize_bits, i * 2u));
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xBF20FC00u) == 0x0E002800u) { // TRN1 (vector)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t esize_bits = 8u << size;
+    const std::uint32_t total_bits = q ? 128u : 64u;
+    if (esize_bits > total_bits) {
+      return false;
+    }
+    const std::uint32_t lanes = total_bits / esize_bits;
+    if ((lanes & 1u) != 0u) {
+      return false;
+    }
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t i = 0; i < lanes / 2u; ++i) {
+      vector_set_elem(dst, esize_bits, i * 2u, vector_get_elem(lhs, esize_bits, i * 2u));
+      vector_set_elem(dst, esize_bits, i * 2u + 1u, vector_get_elem(rhs, esize_bits, i * 2u));
     }
     qregs_[rd] = dst;
     return true;
@@ -2203,6 +2461,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     qregs_[rd] = dst;
     return true;
   }
+
 
   if ((insn & 0xBF80FC00u) == 0x0F008400u) { // SHRN
     const std::uint32_t immh = (insn >> 19) & 0xFu;
@@ -2340,40 +2599,17 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
 
   if ((insn & 0xFF3FFC00u) == 0x5E21B800u) { // FCVTZS Sd|Dd, Sn|Dn
     const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    std::uint64_t fpsr_bits = 0;
     if (ftype == 2u) {
-      const float value = read_fp32(rn);
-      std::int32_t out = 0;
-      if (std::isnan(value)) {
-        out = 0;
-      } else {
-        const long double truncated = std::trunc(static_cast<long double>(value));
-        if (truncated <= static_cast<long double>(std::numeric_limits<std::int32_t>::min())) {
-          out = std::numeric_limits<std::int32_t>::min();
-        } else if (truncated >= static_cast<long double>(std::numeric_limits<std::int32_t>::max())) {
-          out = std::numeric_limits<std::int32_t>::max();
-        } else {
-          out = static_cast<std::int32_t>(truncated);
-        }
-      }
+      const std::int32_t out = fp_to_signed_rtz<std::int32_t>(static_cast<long double>(read_fp32(rn)), fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
       qregs_[rd][0] = static_cast<std::uint32_t>(out);
       qregs_[rd][1] = 0u;
       return true;
     }
     if (ftype == 3u) {
-      const double value = read_fp64(rn);
-      std::int64_t out = 0;
-      if (std::isnan(value)) {
-        out = 0;
-      } else {
-        const long double truncated = std::trunc(static_cast<long double>(value));
-        if (truncated <= static_cast<long double>(std::numeric_limits<std::int64_t>::min())) {
-          out = std::numeric_limits<std::int64_t>::min();
-        } else if (truncated >= static_cast<long double>(std::numeric_limits<std::int64_t>::max())) {
-          out = std::numeric_limits<std::int64_t>::max();
-        } else {
-          out = static_cast<std::int64_t>(truncated);
-        }
-      }
+      const std::int64_t out = fp_to_signed_rtz<std::int64_t>(static_cast<long double>(read_fp64(rn)), fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
       qregs_[rd][0] = static_cast<std::uint64_t>(out);
       qregs_[rd][1] = 0u;
       return true;
@@ -2500,31 +2736,39 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     } else {
       return false;
     }
-    if (std::isnan(value)) {
-      if (to_x) {
-        set_reg(rd, 0u);
-      } else {
-        set_reg32(rd, 0u);
-      }
-      return true;
-    }
-    const long double trunc_value = std::trunc(value);
+    std::uint64_t fpsr_bits = 0;
     if (to_x) {
-      if (trunc_value > static_cast<long double>(std::numeric_limits<std::int64_t>::max())) {
-        set_reg(rd, static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()));
-      } else if (trunc_value < static_cast<long double>(std::numeric_limits<std::int64_t>::min())) {
-        set_reg(rd, static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::min()));
-      } else {
-        set_reg(rd, static_cast<std::uint64_t>(static_cast<std::int64_t>(trunc_value)));
-      }
+      const std::int64_t out = fp_to_signed_rtz<std::int64_t>(value, fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      set_reg(rd, static_cast<std::uint64_t>(out));
     } else {
-      if (trunc_value > static_cast<long double>(std::numeric_limits<std::int32_t>::max())) {
-        set_reg32(rd, static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()));
-      } else if (trunc_value < static_cast<long double>(std::numeric_limits<std::int32_t>::min())) {
-        set_reg32(rd, static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::min()));
-      } else {
-        set_reg32(rd, static_cast<std::uint32_t>(static_cast<std::int32_t>(trunc_value)));
-      }
+      const std::int32_t out = fp_to_signed_rtz<std::int32_t>(value, fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      set_reg32(rd, static_cast<std::uint32_t>(out));
+    }
+    return true;
+  }
+
+  if ((insn & 0xFF3FFC00u) == 0x1E390000u || (insn & 0xFF3FFC00u) == 0x9E390000u) { // FCVTZU
+    const bool to_x = (insn >> 31) != 0u;
+    const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    long double value = 0.0L;
+    if (ftype == 0u) {
+      value = static_cast<long double>(read_fp32(rn));
+    } else if (ftype == 1u) {
+      value = static_cast<long double>(read_fp64(rn));
+    } else {
+      return false;
+    }
+    std::uint64_t fpsr_bits = 0;
+    if (to_x) {
+      const std::uint64_t out = fp_to_unsigned_rtz<std::uint64_t>(value, fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      set_reg(rd, out);
+    } else {
+      const std::uint32_t out = fp_to_unsigned_rtz<std::uint32_t>(value, fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      set_reg32(rd, out);
     }
     return true;
   }
@@ -4200,6 +4444,34 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
   if ((insn & 0xFFC00C00u) == 0xF8000400u) return post_pre(8, false, false);
   if ((insn & 0xFFC00C00u) == 0xF8400C00u) return post_pre(8, true, true);
   if ((insn & 0xFFC00C00u) == 0xF8000C00u) return post_pre(8, false, true);
+
+  auto post_pre_fp = [&](std::size_t size, bool is_load, bool is_pre) -> bool {
+    const std::int64_t simm9 = sign_extend((insn >> 12) & 0x1FFu, 9);
+    const std::uint64_t base = sp_or_reg(rn);
+    const std::uint64_t addr = is_pre
+        ? static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + simm9)
+        : base;
+    const bool ok = is_load ? load_vec(addr, rt, size) : store_vec(addr, rt, size);
+    if (!ok) {
+      data_abort(addr);
+      return true;
+    }
+    if (is_pre) {
+      set_sp_or_reg(rn, addr, false);
+    } else {
+      set_sp_or_reg(rn, static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + simm9), false);
+    }
+    return true;
+  };
+
+  if ((insn & 0xFFC00C00u) == 0xBC400400u) return post_pre_fp(4, true, false);
+  if ((insn & 0xFFC00C00u) == 0xBC000400u) return post_pre_fp(4, false, false);
+  if ((insn & 0xFFC00C00u) == 0xBC400C00u) return post_pre_fp(4, true, true);
+  if ((insn & 0xFFC00C00u) == 0xBC000C00u) return post_pre_fp(4, false, true);
+  if ((insn & 0xFFC00C00u) == 0xFC400400u) return post_pre_fp(8, true, false);
+  if ((insn & 0xFFC00C00u) == 0xFC000400u) return post_pre_fp(8, false, false);
+  if ((insn & 0xFFC00C00u) == 0xFC400C00u) return post_pre_fp(8, true, true);
+  if ((insn & 0xFFC00C00u) == 0xFC000C00u) return post_pre_fp(8, false, true);
 
   auto post_pre_signed = [&](std::size_t size, bool dest64, bool is_pre) -> bool {
     const std::int64_t simm9 = sign_extend((insn >> 12) & 0x1FFu, 9);

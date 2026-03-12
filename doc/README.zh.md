@@ -445,6 +445,40 @@ tests/arm64/run_all.sh
 - `fpsimd_bic_imm`：验证 `BIC (vector, immediate)`
 - `fpsimd_dup_elem`：验证 `DUP (element)`
 - 扩展后的 `fpsimd_logic_more`：覆盖 `EOR/BIT/BIF/BSL` 区分
+- `fpsimd_arith_shift_perm`：验证 `ADD/SUB/MUL (vector)`、`USHR/SSHR`、`ZIP1/UZP1/TRN1` 以及 `MOV (vector)` 别名路径
+- `fp_scalar_ls`：覆盖标量 FP `S/D` 的基本 load/store 与 `post-index` / `pre-index` 形式
+
+Linux shell snapshot 构建与冷启动验证：
+
+```bash
+tests/linux/build_linux_shell_snapshot.sh
+```
+
+该脚本会：
+- 构建统一 `initramfs-usertests` rootfs
+- 通过 U-Boot 冷启动 Linux
+- 使用 `-stop-on-uart` 在 UART 输出命中指定序列时立即停止
+- 保存并验证统一 shell snapshot
+
+Linux 功能与指令完整性回归：
+
+```bash
+tests/linux/run_functional_suite.sh
+```
+
+Linux 算法性能测试：
+
+```bash
+tests/linux/run_algorithm_perf.sh
+```
+
+当前 Linux 用户态自检覆盖并验证的关键族包括：
+- 向量逻辑：`AND/EOR/BIT/BIF/BSL/ORR(MOV alias)`
+- 向量重排：`EXT/ZIP1/UZP1/TRN1`
+- 向量整数算术：`ADD/SUB/MUL`
+- 向量移位/扩展：`USHR/SSHR/SHRN/UXTL/SXTL`
+- 标量 FP：`FADD/FSUB/FMUL/FDIV/FABS/FNEG/SCVTF/UCVTF/FCVTZS/FCVTZU/FCSEL`
+- 标量 FP 访存：`STR/LDR S/D` 及 `post-index` / `pre-index` 子集
 
 ## 当前局限与下一步
 

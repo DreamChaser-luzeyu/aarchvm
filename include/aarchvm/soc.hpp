@@ -5,6 +5,8 @@
 #include "aarchvm/cpu.hpp"
 #include "aarchvm/generic_timer.hpp"
 #include "aarchvm/gicv3.hpp"
+#include "aarchvm/perf_mailbox.hpp"
+#include "aarchvm/perf_types.hpp"
 #include "aarchvm/ram.hpp"
 #include "aarchvm/uart_pl011.hpp"
 
@@ -27,7 +29,9 @@ public:
   void set_sp(std::uint64_t sp);
   void set_x(std::uint32_t idx, std::uint64_t value);
   void inject_uart_rx(std::uint8_t byte);
+  void set_stop_on_uart_pattern(std::string pattern);
   bool run(std::size_t max_steps);
+  [[nodiscard]] bool stop_requested() const { return stop_requested_; }
   [[nodiscard]] std::optional<std::uint8_t> read_u8(std::uint64_t addr) const;
   [[nodiscard]] std::uint64_t pc() const;
   [[nodiscard]] std::uint64_t steps() const;
@@ -70,6 +74,8 @@ private:
   static constexpr std::uint64_t kSdramSize = 128ull * 1024ull * 1024ull;
   static constexpr std::uint64_t kUartBase = 0x09000000;
   static constexpr std::uint64_t kUartSize = 0x1000;
+  static constexpr std::uint64_t kPerfBase = 0x09020000;
+  static constexpr std::uint64_t kPerfSize = 0x1000;
   static constexpr std::uint64_t kGicBase = 0x08000000;
   static constexpr std::uint64_t kGicSize = 0x100000;
   static constexpr std::uint64_t kTimerBase = 0x0A000000;
@@ -78,15 +84,43 @@ private:
   static constexpr std::uint32_t kTimerPhysIntId = 30; // PPI 14 => INTID 30
   static constexpr std::uint32_t kUartIntId = 33;
 
+  void request_stop();
+  void on_uart_tx(std::uint8_t byte);
+  void perf_begin(std::uint64_t case_id, std::uint64_t arg0, std::uint64_t arg1);
+  [[nodiscard]] PerfResult perf_end(std::uint64_t case_id, std::uint64_t arg0, std::uint64_t arg1);
+  void perf_flush_tlb();
+  [[nodiscard]] PerfCounters collect_perf_counters() const;
+  void reset_perf_measurement_state();
+
+  struct PerfSession {
+    bool active = false;
+    std::uint64_t case_id = 0;
+    std::uint64_t arg0 = 0;
+    std::uint64_t arg1 = 0;
+    PerfCounters start{};
+    std::uint64_t start_host_ns = 0;
+  };
+
+  struct LocalPerfCounters {
+    std::uint64_t sync_devices = 0;
+    std::uint64_t run_chunks = 0;
+  };
+
   Bus bus_;
   std::shared_ptr<Ram> boot_ram_;
   std::shared_ptr<Ram> sdram_;
   std::shared_ptr<UartPl011> uart_;
+  std::shared_ptr<PerfMailbox> perf_mailbox_;
   std::shared_ptr<GicV3> gic_;
   std::shared_ptr<GenericTimer> timer_;
   std::shared_ptr<BusFastPath> fast_path_;
   Cpu cpu_;
   std::uint64_t timer_tick_scale_ = 1;
+  bool stop_requested_ = false;
+  PerfSession perf_session_{};
+  mutable LocalPerfCounters local_perf_counters_{};
+  std::string stop_on_uart_pattern_;
+  std::string stop_on_uart_window_;
 };
 
 } // namespace aarchvm

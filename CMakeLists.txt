@@ -18,6 +18,7 @@ add_executable(aarchvm
   src/system_registers.cpp
   src/cpu.cpp
   src/soc.cpp
+  src/perf_mailbox.cpp
 )
 
 target_include_directories(aarchvm PRIVATE include)

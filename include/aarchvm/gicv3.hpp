@@ -11,6 +11,13 @@ namespace aarchvm {
 
 class GicV3 final : public Device {
 public:
+  struct PerfCounters {
+    std::uint64_t has_pending_calls = 0;
+    std::uint64_t acknowledge_calls = 0;
+    std::uint64_t recompute_calls = 0;
+    std::uint64_t set_level_calls = 0;
+  };
+
   GicV3();
   std::uint64_t read(std::uint64_t offset, std::size_t size) override;
   void write(std::uint64_t offset, std::uint64_t value, std::size_t size) override;
@@ -26,6 +33,9 @@ public:
   [[nodiscard]] bool enabled(std::uint32_t intid) const;
   [[nodiscard]] std::uint8_t priority(std::uint32_t intid) const;
   [[nodiscard]] std::uint32_t gicd_ctlr() const { return gicd_ctlr_; }
+
+  [[nodiscard]] const PerfCounters& perf_counters() const { return perf_counters_; }
+  void reset_perf_counters() const { perf_counters_ = {}; }
 
   [[nodiscard]] bool save_state(std::ostream& out) const;
   [[nodiscard]] bool load_state(std::istream& in, std::uint32_t version = 4);
@@ -79,6 +89,7 @@ private:
   std::uint32_t gicr_igroupr0_ = 0xFFFFFFFFu;
   std::uint32_t gicr_icfgr0_ = 0xAAAAAAAAu;
   std::uint32_t gicr_icfgr1_ = 0;
+  mutable PerfCounters perf_counters_{};
 };
 
 } // namespace aarchvm

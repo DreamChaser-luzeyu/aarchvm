@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <iosfwd>
 #include <deque>
+#include <functional>
+#include <utility>
 #include <unordered_set>
 
 namespace aarchvm {
@@ -25,6 +27,7 @@ public:
   [[nodiscard]] std::uint32_t cr() const { return cr_; }
   [[nodiscard]] std::uint32_t imsc() const { return imsc_; }
   [[nodiscard]] std::uint32_t ris() const { return ris_; }
+  void set_tx_observer(std::function<void(std::uint8_t)> observer) { tx_observer_ = std::move(observer); }
 
   [[nodiscard]] bool save_state(std::ostream& out) const;
   [[nodiscard]] bool load_state(std::istream& in);
@@ -49,6 +52,7 @@ private:
   std::uint64_t rx_injected_count_ = 0;
   std::unordered_set<std::uint64_t> traced_read_offsets_;
   std::unordered_set<std::uint64_t> traced_write_offsets_;
+  std::function<void(std::uint8_t)> tx_observer_;
 };
 
 } // namespace aarchvm

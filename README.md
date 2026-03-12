@@ -19,6 +19,9 @@ Now capable of booting Linux into an interactive BusyBox shell.
 - commit `61d52a05a3cc98f8c415a65f6b85d2abcad2cea3`
   - This commit combines simplicity with functional completeness. The codebase is small, making it relatively easy to read and learn from, while still being capable of booting Linux into a BusyBox shell.
 
+## Demo
+![alt text](doc/demo.gif)
+
 ## License
 
 This project is licensed under the MIT License.

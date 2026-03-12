@@ -3,6 +3,7 @@
 #include "aarchvm/bus.hpp"
 #include "aarchvm/generic_timer.hpp"
 #include "aarchvm/gicv3.hpp"
+#include "aarchvm/perf_types.hpp"
 #include "aarchvm/system_registers.hpp"
 
 #include <array>
@@ -43,6 +44,10 @@ public:
   [[nodiscard]] bool irq_masked() const { return sysregs_.irq_masked(); }
   [[nodiscard]] bool save_state(std::ostream& out) const;
   [[nodiscard]] bool load_state(std::istream& in, std::uint32_t version = 3);
+
+  void perf_flush_tlb_all();
+  [[nodiscard]] const PerfCounters& perf_counters() const { return perf_counters_; }
+  void reset_perf_counters() { perf_counters_ = {}; }
 
 private:
   enum class AccessType {
@@ -223,6 +228,9 @@ private:
   std::uint8_t exclusive_size_ = 0;
   std::array<std::array<TlbEntry, kTlbWays>, kTlbSets> tlb_entries_{};
   std::array<std::uint8_t, kTlbSets> tlb_next_replace_{};
+  TlbEntry tlb_last_fetch_{};
+  TlbEntry tlb_last_data_{};
+  PerfCounters perf_counters_{};
   std::optional<TranslationFault> last_translation_fault_;
   std::uint64_t pc_ = 0;
   std::uint64_t steps_ = 0;
