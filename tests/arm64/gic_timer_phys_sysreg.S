@@ -11,40 +11,32 @@ _start:
     movz x12, #0
     str  x12, [x11]
 
-    // Minimal GICv3 CPU interface sysreg round-trip.
     // Enable the relevant PPI in the redistributor.
     movz x15, #0x0000
     movk x15, #0x080b, lsl #16     // GICR_SGI base + ISENABLER0
     movz x16, #0
-    movk x16, #0x0800, lsl #16
+    movk x16, #0x4000, lsl #16
     str  w16, [x15, #0x100]
 
     movz x2, #0x80
     msr  icc_pmr_el1, x2
-    mrs  x3, icc_pmr_el1
-    subs xzr, x2, x3
-    b.ne fail
-
     movz x2, #1
     msr  icc_sre_el1, x2
     movz x2, #1
     msr  icc_igrpen1_el1, x2
-    mrs  x3, icc_sre_el1
-    subs xzr, x2, x3
-    b.ne fail
 
-    // Program virtual timer via sysregs: fire after ~40 ticks.
-    mrs  x4, cntvct_el0
+    // Program physical timer via sysregs: fire after ~40 ticks.
+    mrs  x4, cntpct_el0
     add  x4, x4, #40
-    msr  cntv_cval_el0, x4
+    msr  cntp_cval_el0, x4
     movz x5, #1
-    msr  cntv_ctl_el0, x5          // ENABLE=1, IMASK=0
+    msr  cntp_ctl_el0, x5          // ENABLE=1, IMASK=0
 
 wait_irq:
     ldr  x6, [x11]
     cbz  x6, wait_irq
 
-    movz x0, #'G'
+    movz x0, #'P'
     str  x0, [x1]
     movz x0, #'\n'
     str  x0, [x1]
@@ -62,18 +54,15 @@ irq_spx:
     b irq_handler
 
 irq_handler:
-    // Read active INTID via system register interface and verify virtual timer INTID 27 (PPI 11 + 16).
     mrs  x8, icc_iar1_el1
-    movz x9, #27
+    movz x9, #30
     subs xzr, x8, x9
     b.ne fail_from_handler
 
     msr  icc_eoir1_el1, x8
     msr  icc_dir_el1, x8
-
-    // Disable timer and mark completion.
     movz x5, #0
-    msr  cntv_ctl_el0, x5
+    msr  cntp_ctl_el0, x5
 
     adr  x11, irq_count
     movz x12, #1

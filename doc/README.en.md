@@ -15,6 +15,7 @@ The current repository has been validated for the following paths:
 - U-Boot `booti` hand-off to a Linux `Image`.
 - Linux serial output through both `earlycon=pl011,...` and the normal `ttyAMA0` path.
 - Interactive BusyBox `ash` shell input has been validated.
+- A richer static BusyBox userland has also been validated, including at least `ps`, `awk`, `find`, and `free`.
 - Full-machine snapshot save / restore is available for fast Linux repro loops.
 
 Linux / BusyBox output already observed and validated on the emulated serial port includes:
@@ -157,6 +158,33 @@ linux-6.12.76/build-aarchvm/scripts/dtc/dtc \
   dts/aarchvm-current.dts
 ```
 
+### 5. Build BusyBox and the initramfs
+
+The current tree uses a `defconfig`-derived static BusyBox build, with a few options disabled because they fail in the current host toolchain environment and are not needed by the current guest boot path.
+
+```bash
+make -C busybox-1.37.0 distclean
+make -C busybox-1.37.0 defconfig
+perl -0pi -e 's/^# CONFIG_STATIC is not set$/CONFIG_STATIC=y/m; s/^CONFIG_CROSS_COMPILER_PREFIX=.*$/CONFIG_CROSS_COMPILER_PREFIX="aarch64-linux-gnu-"/m; s/^CONFIG_TC=y$/# CONFIG_TC is not set/m; s/^CONFIG_FEATURE_TC_INGRESS=y$/# CONFIG_FEATURE_TC_INGRESS is not set/m; s/^CONFIG_SHA1_HWACCEL=y$/# CONFIG_SHA1_HWACCEL is not set/m; s/^CONFIG_SHA256_HWACCEL=y$/# CONFIG_SHA256_HWACCEL is not set/m' busybox-1.37.0/.config
+make -C busybox-1.37.0 oldconfig </dev/null
+make -C busybox-1.37.0 -j"$(nproc)"
+make -C busybox-1.37.0 install
+
+rm -rf out/initramfs-full-root
+mkdir -p out/initramfs-full-root
+cp -a busybox-1.37.0/_install/. out/initramfs-full-root/
+mkdir -p out/initramfs-full-root/{dev,proc,sys,tmp,run,root,mnt,etc}
+cp out/initramfs-root/init out/initramfs-full-root/init
+cp out/initramfs-root/bin/guest_diag out/initramfs-full-root/bin/guest_diag
+chmod 0755 out/initramfs-full-root/init out/initramfs-full-root/bin/guest_diag
+( cd out/initramfs-full-root && find . -print0 | cpio --null -o -H newc > ../initramfs-full.cpio )
+gzip -n -f -c out/initramfs-full.cpio > out/initramfs-full.cpio.gz
+```
+
+The regenerated `initramfs` sizes are currently:
+- `out/initramfs-full.cpio`: `0x2cd000`
+- `out/initramfs-full.cpio.gz`: `0x1662f8`
+
 ## Key Configuration Options in Use
 
 ### U-Boot Key Options
@@ -270,7 +298,7 @@ Common optional arguments:
 If you only want to validate the U-Boot -> Linux hand-off, you can feed the `booti` command through a one-shot pipe:
 
 ```bash
-printf 'setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel rdinit=/init\nbooti 0x40400000 0x46000000:0x8abf4 0x47f00000\n' | \
+printf 'setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel rdinit=/init\nbooti 0x40400000 0x46000000:0x1662f8 0x47f00000\n' | \
 AARCHVM_TIMER_SCALE=100000 \
 ./build/aarchvm \
   -bin u-boot-2026.01/build-qemu_arm64/u-boot.bin \
@@ -306,14 +334,14 @@ Type in U-Boot:
 
 ```bash
 setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel rdinit=/init
-booti 0x40400000 0x46000000:0x8abf4 0x47f00000
+booti 0x40400000 0x46000000:0x1662f8 0x47f00000
 ```
 
 Artifacts and addresses used by this boot chain:
 - Main DTB: `dts/aarchvm-current.dtb`, used so that U-Boot recognizes the current emulated board layout.
 - Linux DTB: `dts/aarchvm-linux-min.dtb`, passed as the third `booti` argument.
 - Kernel `Image`: loaded at `0x40400000`.
-- BusyBox `initramfs`: loaded at `0x46000000`, current size `0x8abf4`.
+- BusyBox `initramfs`: loaded at `0x46000000`, current size `0x1662f8`.
 - Linux DTB: loaded at `0x47f00000`.
 - Initial U-Boot `sp`: `0x47fff000`.
 - `AARCHVM_TIMER_SCALE=100000`: used to accelerate Linux progress under the interpreter model.
@@ -323,7 +351,7 @@ Artifacts and addresses used by this boot chain:
 The emulator now supports full-machine snapshots. A typical workflow is to run up to the BusyBox shell and save a snapshot there:
 
 ```bash
-printf 'setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel rdinit=/init\nbooti 0x40400000 0x46000000:0x8abf4 0x47f00000\n' | \
+printf 'setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel rdinit=/init\nbooti 0x40400000 0x46000000:0x1662f8 0x47f00000\n' | \
 AARCHVM_TIMER_SCALE=100000 \
 ./build/aarchvm \
   -bin u-boot-2026.01/build-qemu_arm64/u-boot.bin \
@@ -384,6 +412,13 @@ The shell-input fix depended on two concrete behavioral corrections in the CPU m
 - `WFI/WFE` now leave the wait state as soon as an interrupt becomes pending, even if `PSTATE.I` still delays immediate delivery.
 - IRQ entry is now permitted while Linux is already running inside EL1 exception context, which is required by the kernel idle/console path.
 
+The `busybox ps` illegal-instruction failure was traced to a small cluster of AdvSIMD semantic gaps:
+- `BIC (vector, immediate)` previously fell through a generic logic-immediate path; it now implements the correct `operand AND NOT(imm)` behavior.
+- `DUP (element)` was missing and is now implemented.
+- The vector-logic decoder was too broad, so `EOR` could be misrouted into the `BIT/BIF/BSL` path; that decode has been tightened.
+
+With these fixes in place, BusyBox `ps` now prints the process list correctly in the guest and returns `0`.
+
 ## Tests
 
 Build all test binaries:
@@ -407,6 +442,9 @@ The current regression suite covers:
 - `snapshot_resume` for full-machine snapshot save / restore
 - atomic / exclusive-access tests
 - additional instruction samples added during Linux bring-up
+- `fpsimd_bic_imm` for `BIC (vector, immediate)`
+- `fpsimd_dup_elem` for `DUP (element)`
+- expanded `fpsimd_logic_more` coverage for `EOR/BIT/BIF/BSL` separation
 
 ## Current Limitations and Next Steps
 

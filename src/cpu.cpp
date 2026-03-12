@@ -2,6 +2,9 @@
 
 #include "aarchvm/snapshot_io.hpp"
 
+#include <bit>
+#include <cmath>
+#include <limits>
 #include <cstdlib>
 #include <iostream>
 #include <sstream>
@@ -10,6 +13,14 @@
 namespace aarchvm {
 
 namespace {
+
+bool irq_take_trace_enabled() {
+  return std::getenv("AARCHVM_TRACE_IRQ_TAKE") != nullptr;
+}
+
+bool branch_zero_trace_enabled() {
+  return std::getenv("AARCHVM_TRACE_BRANCH_ZERO") != nullptr;
+}
 
 std::uint64_t ones(std::uint32_t bits) {
   if (bits == 0) {
@@ -82,6 +93,29 @@ std::uint64_t advsimd_expand_imm(bool op, std::uint32_t cmode, std::uint8_t imm8
       return out;
   }
   return 0;
+}
+
+std::uint64_t vfp_expand_imm(bool is_double, std::uint8_t imm8) {
+  const std::uint64_t sign = static_cast<std::uint64_t>((imm8 >> 7) & 1u);
+  const std::uint64_t b = static_cast<std::uint64_t>((imm8 >> 6) & 1u);
+  const std::uint64_t cd = static_cast<std::uint64_t>((imm8 >> 4) & 0x3u);
+  const std::uint64_t efgh = static_cast<std::uint64_t>(imm8 & 0xFu);
+  if (is_double) {
+    const std::uint64_t exponent = ((b ^ 1u) << 10u) | ((b ? 0xFFull : 0ull) << 2u) | cd;
+    const std::uint64_t fraction = efgh << 48u;
+    return (sign << 63u) | (exponent << 52u) | fraction;
+  }
+  const std::uint64_t exponent = ((b ^ 1u) << 7u) | ((b ? 0x1Full : 0ull) << 2u) | cd;
+  const std::uint64_t fraction = efgh << 19u;
+  return (sign << 31u) | (exponent << 23u) | fraction;
+}
+
+std::uint64_t scalar_byte_mask_imm(std::uint8_t imm8) {
+  std::uint64_t out = 0;
+  for (std::uint32_t bit = 0; bit < 8u; ++bit) {
+    out |= (((imm8 >> bit) & 1u) ? 0xFFull : 0ull) << (bit * 8u);
+  }
+  return out;
 }
 
 std::uint64_t bit_reverse(std::uint64_t value, std::uint32_t width) {
@@ -266,6 +300,7 @@ void Cpu::load_current_sp_from_bank() {
 
 void Cpu::parse_pc_watch_list() {
   pc_watch_hits_.clear();
+  pc_watch_enabled_ = false;
   const char* env = std::getenv("AARCHVM_TRACE_PC_LIST");
   if (env == nullptr || *env == '\0') {
     return;
@@ -279,6 +314,7 @@ void Cpu::parse_pc_watch_list() {
     try {
       const auto pc = static_cast<std::uint64_t>(std::stoull(item, nullptr, 0));
       pc_watch_hits_.emplace(pc, false);
+      pc_watch_enabled_ = true;
     } catch (...) {
     }
   }
@@ -320,6 +356,8 @@ void Cpu::reset(std::uint64_t pc) {
   exception_depth_ = 0;
   exception_is_irq_stack_.fill(false);
   exception_intid_stack_.fill(0);
+  exception_prev_prio_stack_.fill(0x100);
+  exception_prio_dropped_stack_.fill(false);
   sync_reported_ = false;
   trace_exceptions_ = (std::getenv("AARCHVM_TRACE_EXC") != nullptr);
   trace_all_exceptions_ = (std::getenv("AARCHVM_TRACE_ALL_EXC") != nullptr);
@@ -337,6 +375,7 @@ void Cpu::reset(std::uint64_t pc) {
   waiting_for_event_ = false;
   event_register_ = false;
   icc_pmr_el1_ = 0xFF;
+  running_priority_ = 0x100;
   icc_ctlr_el1_ = 0;
   icc_sre_el1_ = 0;
   icc_bpr1_el1_ = 0;
@@ -346,7 +385,7 @@ void Cpu::reset(std::uint64_t pc) {
   exclusive_valid_ = false;
   exclusive_addr_ = 0;
   exclusive_size_ = 0;
-  tlb_page_map_.clear();
+  tlb_flush_all();
   last_translation_fault_.reset();
   pc_ = pc;
   steps_ = 0;
@@ -363,7 +402,7 @@ bool Cpu::step() {
   }
 
   if (waiting_for_interrupt_) {
-    if (gic_.has_pending()) {
+    if (icc_igrpen1_el1_ != 0 && gic_.has_pending(static_cast<std::uint8_t>(icc_pmr_el1_ & 0xFFu))) {
       waiting_for_interrupt_ = false;
       if (try_take_irq()) {
         ++steps_;
@@ -378,7 +417,7 @@ bool Cpu::step() {
     if (event_register_) {
       event_register_ = false;
       waiting_for_event_ = false;
-    } else if (gic_.has_pending()) {
+    } else if (icc_igrpen1_el1_ != 0 && gic_.has_pending(static_cast<std::uint8_t>(icc_pmr_el1_ & 0xFFu))) {
       waiting_for_event_ = false;
       if (try_take_irq()) {
         ++steps_;
@@ -394,8 +433,9 @@ bool Cpu::step() {
     return true;
   }
 
-  auto pc_watch = pc_watch_hits_.find(pc_);
-  if (pc_watch != pc_watch_hits_.end() && !pc_watch->second) {
+  if (pc_watch_enabled_) {
+    auto pc_watch = pc_watch_hits_.find(pc_);
+    if (pc_watch != pc_watch_hits_.end() && !pc_watch->second) {
     std::cerr << "PC-HIT pc=0x" << std::hex << pc_
               << " steps=" << std::dec << steps_
               << " x0=0x" << std::hex << reg(0)
@@ -409,7 +449,8 @@ bool Cpu::step() {
               << " esr=0x" << sysregs_.esr_el1()
               << " far=0x" << sysregs_.far_el1()
               << std::dec << "\n";
-    pc_watch->second = true;
+      pc_watch->second = true;
+    }
   }
 
   const auto fetch_result = translate_address(pc_, AccessType::Fetch, true);
@@ -434,16 +475,49 @@ bool Cpu::step() {
     return true; // NOP
   }
   if ((insn & 0xFFFFFC1Fu) == 0xD65F0000u) {
-    pc_ = reg((insn >> 5) & 0x1Fu); // RET Xn
+    const std::uint32_t rn = (insn >> 5) & 0x1Fu;
+    const std::uint64_t target = reg(rn);
+    if (branch_zero_trace_enabled() && target == 0) {
+      std::cerr << std::dec << "BRANCH-ZERO kind=RET rn=" << rn
+                << " from=0x" << std::hex << this_pc
+                << " el=" << std::dec << static_cast<std::uint32_t>(sysregs_.current_el())
+                << " depth=" << exception_depth_
+                << " x30=0x" << std::hex << reg(30)
+                << " sp=0x" << regs_[31]
+                << " steps=" << std::dec << steps_ << '\n';
+    }
+    pc_ = target; // RET Xn
     return true;
   }
   if ((insn & 0xFFFFFC1Fu) == 0xD61F0000u) {
-    pc_ = reg((insn >> 5) & 0x1Fu); // BR Xn
+    const std::uint32_t rn = (insn >> 5) & 0x1Fu;
+    const std::uint64_t target = reg(rn);
+    if (branch_zero_trace_enabled() && target == 0) {
+      std::cerr << std::dec << "BRANCH-ZERO kind=BR rn=" << rn
+                << " from=0x" << std::hex << this_pc
+                << " el=" << std::dec << static_cast<std::uint32_t>(sysregs_.current_el())
+                << " depth=" << exception_depth_
+                << " x30=0x" << std::hex << reg(30)
+                << " sp=0x" << regs_[31]
+                << " steps=" << std::dec << steps_ << '\n';
+    }
+    pc_ = target; // BR Xn
     return true;
   }
   if ((insn & 0xFFFFFC1Fu) == 0xD63F0000u) {
+    const std::uint32_t rn = (insn >> 5) & 0x1Fu;
+    const std::uint64_t target = reg(rn);
     set_reg(30, pc_);               // BLR Xn
-    pc_ = reg((insn >> 5) & 0x1Fu);
+    if (branch_zero_trace_enabled() && target == 0) {
+      std::cerr << std::dec << "BRANCH-ZERO kind=BLR rn=" << rn
+                << " from=0x" << std::hex << this_pc
+                << " el=" << std::dec << static_cast<std::uint32_t>(sysregs_.current_el())
+                << " depth=" << exception_depth_
+                << " x30=0x" << std::hex << reg(30)
+                << " sp=0x" << regs_[31]
+                << " steps=" << std::dec << steps_ << '\n';
+    }
+    pc_ = target;
     return true;
   }
   if (insn == 0xD69F03E0u) { // ERET
@@ -461,8 +535,8 @@ bool Cpu::step() {
     }
     if (exception_depth_ != 0) {
       const std::uint32_t idx = exception_depth_ - 1;
-      if (exception_is_irq_stack_[idx]) {
-        gic_.eoi(exception_intid_stack_[idx]);
+      if (exception_is_irq_stack_[idx] && !exception_prio_dropped_stack_[idx]) {
+        running_priority_ = exception_prev_prio_stack_[idx];
       }
       --exception_depth_;
     }
@@ -518,10 +592,11 @@ bool Cpu::step() {
 }
 
 bool Cpu::try_take_irq() {
-  if (sysregs_.irq_masked()) {
+  if (sysregs_.irq_masked() || icc_igrpen1_el1_ == 0) {
     return false;
   }
-  const auto intid = gic_.acknowledge();
+  const std::uint16_t irq_threshold = std::min<std::uint16_t>(static_cast<std::uint16_t>(icc_pmr_el1_ & 0xFFu), running_priority_);
+  const auto intid = gic_.acknowledge(static_cast<std::uint8_t>(irq_threshold & 0xFFu));
   if (!intid.has_value()) {
     return false;
   }
@@ -535,6 +610,17 @@ bool Cpu::try_take_irq() {
   save_current_sp_to_bank();
   exception_is_irq_stack_[exception_depth_] = true;
   exception_intid_stack_[exception_depth_] = *intid;
+  exception_prev_prio_stack_[exception_depth_] = running_priority_;
+  exception_prio_dropped_stack_[exception_depth_] = false;
+  const std::uint8_t new_prio = gic_.priority(*intid);
+  running_priority_ = new_prio;
+  if (irq_take_trace_enabled()) {
+    std::cerr << std::dec << "IRQ-TAKE intid=" << *intid
+              << " prio=0x" << std::hex << static_cast<std::uint32_t>(new_prio)
+              << " pmr=0x" << static_cast<std::uint32_t>(icc_pmr_el1_ & 0xFFu)
+              << " depth=" << std::dec << (exception_depth_ + 1)
+              << " pc=0x" << std::hex << pc_ << '\n';
+  }
   ++exception_depth_;
   sysregs_.exception_enter_irq(pc_);
   load_current_sp_from_bank();
@@ -569,6 +655,8 @@ void Cpu::enter_sync_exception(std::uint64_t fault_pc,
   save_current_sp_to_bank();
   exception_is_irq_stack_[exception_depth_] = false;
   exception_intid_stack_[exception_depth_] = 0;
+  exception_prev_prio_stack_[exception_depth_] = running_priority_;
+  exception_prio_dropped_stack_[exception_depth_] = true;
   ++exception_depth_;
   if (trace_exceptions_ && nested) {
     std::cerr << "NESTED-SYNC: pc=0x" << std::hex << fault_pc
@@ -595,6 +683,10 @@ void Cpu::enter_sync_exception(std::uint64_t fault_pc,
               << " far=0x" << far
               << " from_lower=" << (from_lower_el ? 1 : 0)
               << " pstate=0x" << sysregs_.pstate_bits()
+              << " sp=0x" << regs_[31]
+              << " sp_el0=0x" << sysregs_.sp_el0()
+              << " sp_el1=0x" << sysregs_.sp_el1()
+              << " tpidr_el1=0x" << sysregs_.tpidr_el1()
               << " ttbr0=0x" << sysregs_.ttbr0_el1()
               << " ttbr1=0x" << sysregs_.ttbr1_el1()
               << " tcr=0x" << sysregs_.tcr_el1()
@@ -636,24 +728,23 @@ std::optional<Cpu::TranslationResult> Cpu::translate_address(std::uint64_t va,
     return result;
   }
 
-  const std::uint64_t page = (va >> 12) & ((1ull << 44u) - 1ull);
+  const std::uint64_t page = (va >> 12) & tlb_page_mask();
   const std::uint64_t off = va & 0xFFFull;
 
   if (use_tlb) {
-    const auto hit = tlb_page_map_.find(page);
-    if (hit != tlb_page_map_.end()) {
+    if (const TlbEntry* hit = tlb_lookup(page); hit != nullptr) {
       TranslationResult result{};
-      result.pa = (hit->second.pa_page << 12) | off;
-      result.level = hit->second.level;
-      result.attr_index = hit->second.attr_index;
-      result.mair_attr = hit->second.mair_attr;
-      result.writable = hit->second.writable;
-      result.executable = hit->second.executable;
-      result.pxn = hit->second.pxn;
-      result.uxn = hit->second.uxn;
-      result.memory_type = hit->second.memory_type;
-      result.leaf_shareability = hit->second.leaf_shareability;
-      result.walk_attrs = hit->second.walk_attrs;
+      result.pa = (hit->pa_page << 12) | off;
+      result.level = hit->level;
+      result.attr_index = hit->attr_index;
+      result.mair_attr = hit->mair_attr;
+      result.writable = hit->writable;
+      result.executable = hit->executable;
+      result.pxn = hit->pxn;
+      result.uxn = hit->uxn;
+      result.memory_type = hit->memory_type;
+      result.leaf_shareability = hit->leaf_shareability;
+      result.walk_attrs = hit->walk_attrs;
       TranslationFault fault{};
       if (!access_permitted(result, access, result.level, &fault)) {
         last_translation_fault_ = fault;
@@ -671,19 +762,7 @@ std::optional<Cpu::TranslationResult> Cpu::translate_address(std::uint64_t va,
   }
 
   if (allow_tlb_fill) {
-    tlb_page_map_[page] = TlbEntry{
-        .pa_page = result->pa >> 12,
-        .level = result->level,
-        .attr_index = result->attr_index,
-        .mair_attr = result->mair_attr,
-        .writable = result->writable,
-        .executable = result->executable,
-        .pxn = result->pxn,
-        .uxn = result->uxn,
-        .memory_type = result->memory_type,
-        .leaf_shareability = result->leaf_shareability,
-        .walk_attrs = result->walk_attrs,
-    };
+    tlb_insert(page, *result);
   }
   return result;
 }
@@ -1061,14 +1140,84 @@ bool Cpu::pa_within_ips(std::uint64_t pa, std::uint8_t ips_bits) const {
 }
 
 void Cpu::tlb_flush_all() {
-  tlb_page_map_.clear();
+  for (auto& set : tlb_entries_) {
+    for (auto& entry : set) {
+      entry.valid = false;
+    }
+  }
+  tlb_next_replace_.fill(0);
 }
 
+const Cpu::TlbEntry* Cpu::tlb_lookup(std::uint64_t va_page) const {
+  const auto& set = tlb_entries_[tlb_set_index(va_page)];
+  for (const TlbEntry& entry : set) {
+    if (entry.valid && entry.va_page == va_page) {
+      return &entry;
+    }
+  }
+  return nullptr;
+}
+
+void Cpu::tlb_insert(std::uint64_t va_page, const TranslationResult& result) {
+  TlbEntry entry{};
+  entry.valid = true;
+  entry.va_page = va_page;
+  entry.pa_page = result.pa >> 12;
+  entry.level = result.level;
+  entry.attr_index = result.attr_index;
+  entry.mair_attr = result.mair_attr;
+  entry.writable = result.writable;
+  entry.executable = result.executable;
+  entry.pxn = result.pxn;
+  entry.uxn = result.uxn;
+  entry.memory_type = result.memory_type;
+  entry.leaf_shareability = result.leaf_shareability;
+  entry.walk_attrs = result.walk_attrs;
+  tlb_insert_entry(va_page, entry);
+}
+
+void Cpu::tlb_insert_entry(std::uint64_t va_page, const TlbEntry& entry) {
+  auto& set = tlb_entries_[tlb_set_index(va_page)];
+  for (TlbEntry& slot : set) {
+    if (slot.valid && slot.va_page == va_page) {
+      TlbEntry updated = entry;
+      updated.valid = true;
+      updated.va_page = va_page;
+      slot = updated;
+      return;
+    }
+  }
+  for (TlbEntry& slot : set) {
+    if (!slot.valid) {
+      TlbEntry updated = entry;
+      updated.valid = true;
+      updated.va_page = va_page;
+      slot = updated;
+      return;
+    }
+  }
+  std::uint8_t& next = tlb_next_replace_[tlb_set_index(va_page)];
+  TlbEntry updated = entry;
+  updated.valid = true;
+  updated.va_page = va_page;
+  set[next % kTlbWays] = updated;
+  next = static_cast<std::uint8_t>((next + 1u) % kTlbWays);
+}
+
+void Cpu::tlb_invalidate_page(std::uint64_t va_page) {
+  auto& set = tlb_entries_[tlb_set_index(va_page)];
+  for (TlbEntry& entry : set) {
+    if (entry.valid && entry.va_page == va_page) {
+      entry.valid = false;
+      return;
+    }
+  }
+}
 void Cpu::tlb_flush_va(std::uint64_t va) {
   // Linux feeds TLBI-by-VA operands in architected VA>>12 form, while some
   // local tests historically passed raw VAs. Accept both encodings here.
-  tlb_page_map_.erase((va >> 12) & ((1ull << 44u) - 1ull));
-  tlb_page_map_.erase(va & ((1ull << 44u) - 1ull));
+  tlb_invalidate_page((va >> 12) & tlb_page_mask());
+  tlb_invalidate_page(va & tlb_page_mask());
 }
 
 std::uint64_t Cpu::reg(std::uint32_t idx) const {
@@ -1440,6 +1589,18 @@ bool Cpu::exec_system(std::uint32_t insn) {
       set_reg(rt, timer_.read_cntv_tval_el0(steps_));
       return true;
     }
+    if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (2u << 3) | 1u)) { // CNTP_CTL_EL0
+      set_reg(rt, timer_.read_cntp_ctl_el0(steps_));
+      return true;
+    }
+    if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (2u << 3) | 2u)) { // CNTP_CVAL_EL0
+      set_reg(rt, timer_.read_cntp_cval_el0());
+      return true;
+    }
+    if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (2u << 3) | 0u)) { // CNTP_TVAL_EL0
+      set_reg(rt, timer_.read_cntp_tval_el0(steps_));
+      return true;
+    }
     if (key == ((3u << 14) | (3u << 11) | (2u << 7) | (5u << 3) | 1u)) { // GCSPR_EL0
       set_reg(rt, 0);
       return true;
@@ -1472,7 +1633,17 @@ bool Cpu::exec_system(std::uint32_t insn) {
     const std::uint32_t key = (op0 << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2;
 
     if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (12u << 3) | 1u)) { // ICC_EOIR1_EL1
-      gic_.eoi(static_cast<std::uint32_t>(reg(rt)));
+      if (exception_depth_ != 0) {
+        const std::uint32_t idx = exception_depth_ - 1;
+        if (exception_is_irq_stack_[idx] && exception_intid_stack_[idx] == static_cast<std::uint32_t>(reg(rt))) {
+          running_priority_ = exception_prev_prio_stack_[idx];
+          exception_prio_dropped_stack_[idx] = true;
+          const bool eoi_drop_dir = ((icc_ctlr_el1_ >> 1) & 0x1u) != 0u;
+          if (!eoi_drop_dir) {
+            gic_.eoi(exception_intid_stack_[idx]);
+          }
+        }
+      }
       return true;
     }
     if (key == ((3u << 14) | (0u << 11) | (4u << 7) | (6u << 3) | 0u)) { // ICC_PMR_EL1
@@ -1528,6 +1699,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
       return true;
     }
     if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (11u << 3) | 1u)) { // ICC_DIR_EL1
+      gic_.eoi(static_cast<std::uint32_t>(reg(rt)));
       return true;
     }
     if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (3u << 3) | 1u)) { // CNTV_CTL_EL0
@@ -1540,6 +1712,18 @@ bool Cpu::exec_system(std::uint32_t insn) {
     }
     if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (3u << 3) | 0u)) { // CNTV_TVAL_EL0
       timer_.write_cntv_tval_el0(steps_, reg(rt));
+      return true;
+    }
+    if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (2u << 3) | 1u)) { // CNTP_CTL_EL0
+      timer_.write_cntp_ctl_el0(steps_, reg(rt));
+      return true;
+    }
+    if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (2u << 3) | 2u)) { // CNTP_CVAL_EL0
+      timer_.write_cntp_cval_el0(steps_, reg(rt));
+      return true;
+    }
+    if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (2u << 3) | 0u)) { // CNTP_TVAL_EL0
+      timer_.write_cntp_tval_el0(steps_, reg(rt));
       return true;
     }
     if (key == ((3u << 14) | (0u << 11) | (4u << 7) | (1u << 3) | 0u)) { // SP_EL0
@@ -1578,6 +1762,46 @@ bool Cpu::exec_system(std::uint32_t insn) {
 bool Cpu::exec_data_processing(std::uint32_t insn) {
   const std::uint32_t rd = insn & 0x1Fu;
   const std::uint32_t rn = (insn >> 5) & 0x1Fu;
+
+  const auto read_fp32 = [&](std::uint32_t idx) -> float {
+    return std::bit_cast<float>(static_cast<std::uint32_t>(qregs_[idx][0] & 0xFFFFFFFFu));
+  };
+  const auto read_fp64 = [&](std::uint32_t idx) -> double {
+    return std::bit_cast<double>(qregs_[idx][0]);
+  };
+  const auto write_fp32 = [&](std::uint32_t idx, float value) {
+    qregs_[idx][0] = static_cast<std::uint64_t>(std::bit_cast<std::uint32_t>(value));
+    qregs_[idx][1] = 0u;
+  };
+  const auto write_fp64 = [&](std::uint32_t idx, double value) {
+    qregs_[idx][0] = std::bit_cast<std::uint64_t>(value);
+    qregs_[idx][1] = 0u;
+  };
+  const auto set_fp_compare_flags = [&](bool unordered, bool less, bool equal) {
+    auto p = sysregs_.pstate();
+    if (unordered) {
+      p.n = false;
+      p.z = false;
+      p.c = true;
+      p.v = true;
+    } else if (less) {
+      p.n = true;
+      p.z = false;
+      p.c = false;
+      p.v = false;
+    } else if (equal) {
+      p.n = false;
+      p.z = true;
+      p.c = true;
+      p.v = false;
+    } else {
+      p.n = false;
+      p.z = false;
+      p.c = true;
+      p.v = false;
+    }
+    sysregs_.set_pstate(p);
+  };
 
   // Minimal AdvSIMD/FP support for libc/busybox string routines.
   if ((insn & 0xBF20FC00u) == 0x0E003C00u) { // UMOV/MOV (lane to general)
@@ -1638,6 +1862,61 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     for (std::uint32_t lane = 0; lane < lanes; ++lane) {
       vector_set_elem(dst, esize_bits, lane, elem);
     }
+    return true;
+  }
+
+  if ((insn & 0xBF80FC00u) == 0x2F00E400u) { // MOVI (scalar D immediate)
+    const std::uint8_t imm8 = static_cast<std::uint8_t>((((insn >> 16) & 0x7u) << 5u) | ((insn >> 5) & 0x1Fu));
+    qregs_[rd][0] = scalar_byte_mask_imm(imm8);
+    qregs_[rd][1] = 0u;
+    return true;
+  }
+
+  if ((insn & 0xFFE08400u) == 0x4E000400u) { // INS (general)
+    const std::uint32_t imm5 = (insn >> 16) & 0x1Fu;
+    const std::uint32_t imm4 = (insn >> 11) & 0xFu;
+    if (imm5 == 0u || imm4 != 0x3u) {
+      return false;
+    }
+    const std::uint32_t size_shift = static_cast<std::uint32_t>(__builtin_ctz(imm5));
+    const std::uint32_t esize_bits = 8u << size_shift;
+    const std::uint32_t lane = imm5 >> (size_shift + 1u);
+    const std::uint64_t elem = (esize_bits == 64u) ? reg(rn) : (static_cast<std::uint64_t>(reg32(rn)) & ones(esize_bits));
+    vector_set_elem(qregs_[rd], esize_bits, lane, elem);
+    return true;
+  }
+
+  if ((insn & 0xBF20FC00u) == 0x0F20A400u || (insn & 0xBF20FC00u) == 0x2F20A400u) { // SSHLL/USHLL lower half, including SXTL/UXTL aliases
+    const bool is_unsigned = ((insn >> 29) & 1u) != 0u;
+    const std::uint32_t immh = (insn >> 19) & 0xFu;
+    const std::uint32_t immb = (insn >> 16) & 0x7u;
+    if (immh == 0u) {
+      return false;
+    }
+    const std::uint32_t src_esize_bits = 8u << highest_set_bit(immh);
+    if (src_esize_bits < 8u || src_esize_bits > 32u) {
+      return false;
+    }
+    const std::uint32_t immhb = (immh << 3u) | immb;
+    if (immhb < src_esize_bits || immhb >= (src_esize_bits * 2u)) {
+      return false;
+    }
+    const std::uint32_t shift = immhb - src_esize_bits;
+    const std::uint32_t dst_esize_bits = src_esize_bits * 2u;
+    const std::uint32_t lanes = 64u / src_esize_bits;
+    const auto src = qregs_[rn];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+      std::uint64_t value = vector_get_elem(src, src_esize_bits, lane);
+      std::uint64_t widened = 0;
+      if (is_unsigned) {
+        widened = (value & ones(src_esize_bits)) << shift;
+      } else {
+        widened = static_cast<std::uint64_t>(sign_extend(value, src_esize_bits) << shift);
+      }
+      vector_set_elem(dst, dst_esize_bits, lane, widened);
+    }
+    qregs_[rd] = dst;
     return true;
   }
 
@@ -1952,6 +2231,304 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
+  if ((insn & 0xFF201FE0u) == 0x1E201000u) { // FMOV Sd/Dd, #imm
+    const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    const std::uint8_t imm8 = static_cast<std::uint8_t>((insn >> 13) & 0xFFu);
+    if (ftype == 0u) {
+      qregs_[rd][0] = vfp_expand_imm(false, imm8);
+      qregs_[rd][1] = 0u;
+      return true;
+    }
+    if (ftype == 1u) {
+      qregs_[rd][0] = vfp_expand_imm(true, imm8);
+      qregs_[rd][1] = 0u;
+      return true;
+    }
+    return false;
+  }
+
+  if ((insn & 0xFFFFFC00u) == 0x1E204000u) { // FMOV Sd, Sn
+    const std::uint32_t rn_fp = (insn >> 5) & 0x1Fu;
+    qregs_[rd][0] = qregs_[rn_fp][0] & 0xFFFFFFFFu;
+    qregs_[rd][1] = 0u;
+    return true;
+  }
+
+  if ((insn & 0xFFFFFC00u) == 0x1E604000u) { // FMOV Dd, Dn
+    const std::uint32_t rn_fp = (insn >> 5) & 0x1Fu;
+    qregs_[rd][0] = qregs_[rn_fp][0];
+    qregs_[rd][1] = 0u;
+    return true;
+  }
+
+  if ((insn & 0xFF20FC00u) == 0x1E200800u) { // FMUL (scalar)
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    if (ftype == 0u) {
+      write_fp32(rd, read_fp32(rn) * read_fp32(rm));
+      return true;
+    }
+    if (ftype == 1u) {
+      write_fp64(rd, read_fp64(rn) * read_fp64(rm));
+      return true;
+    }
+    return false;
+  }
+
+  if ((insn & 0xFF20FC00u) == 0x1E201800u) { // FDIV (scalar)
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    if (ftype == 0u) {
+      write_fp32(rd, read_fp32(rn) / read_fp32(rm));
+      return true;
+    }
+    if (ftype == 1u) {
+      write_fp64(rd, read_fp64(rn) / read_fp64(rm));
+      return true;
+    }
+    return false;
+  }
+
+  if ((insn & 0xFF20FC00u) == 0x1E202800u) { // FADD (scalar)
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    if (ftype == 0u) {
+      write_fp32(rd, read_fp32(rn) + read_fp32(rm));
+      return true;
+    }
+    if (ftype == 1u) {
+      write_fp64(rd, read_fp64(rn) + read_fp64(rm));
+      return true;
+    }
+    return false;
+  }
+
+  if ((insn & 0xFF20FC00u) == 0x1E203800u) { // FSUB (scalar)
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    if (ftype == 0u) {
+      write_fp32(rd, read_fp32(rn) - read_fp32(rm));
+      return true;
+    }
+    if (ftype == 1u) {
+      write_fp64(rd, read_fp64(rn) - read_fp64(rm));
+      return true;
+    }
+    return false;
+  }
+
+  if ((insn & 0xFFFFFC00u) == 0x1E20C000u) { // FABS Sd, Sn
+    write_fp32(rd, std::fabs(read_fp32(rn)));
+    return true;
+  }
+
+  if ((insn & 0xFFFFFC00u) == 0x1E60C000u) { // FABS Dd, Dn
+    write_fp64(rd, std::fabs(read_fp64(rn)));
+    return true;
+  }
+
+  if ((insn & 0xFFFFFC00u) == 0x1E214000u) { // FNEG Sd, Sn
+    write_fp32(rd, -read_fp32(rn));
+    return true;
+  }
+
+  if ((insn & 0xFFFFFC00u) == 0x1E614000u) { // FNEG Dd, Dn
+    write_fp64(rd, -read_fp64(rn));
+    return true;
+  }
+
+
+  if ((insn & 0xFF3FFC00u) == 0x5E21B800u) { // FCVTZS Sd|Dd, Sn|Dn
+    const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    if (ftype == 2u) {
+      const float value = read_fp32(rn);
+      std::int32_t out = 0;
+      if (std::isnan(value)) {
+        out = 0;
+      } else {
+        const long double truncated = std::trunc(static_cast<long double>(value));
+        if (truncated <= static_cast<long double>(std::numeric_limits<std::int32_t>::min())) {
+          out = std::numeric_limits<std::int32_t>::min();
+        } else if (truncated >= static_cast<long double>(std::numeric_limits<std::int32_t>::max())) {
+          out = std::numeric_limits<std::int32_t>::max();
+        } else {
+          out = static_cast<std::int32_t>(truncated);
+        }
+      }
+      qregs_[rd][0] = static_cast<std::uint32_t>(out);
+      qregs_[rd][1] = 0u;
+      return true;
+    }
+    if (ftype == 3u) {
+      const double value = read_fp64(rn);
+      std::int64_t out = 0;
+      if (std::isnan(value)) {
+        out = 0;
+      } else {
+        const long double truncated = std::trunc(static_cast<long double>(value));
+        if (truncated <= static_cast<long double>(std::numeric_limits<std::int64_t>::min())) {
+          out = std::numeric_limits<std::int64_t>::min();
+        } else if (truncated >= static_cast<long double>(std::numeric_limits<std::int64_t>::max())) {
+          out = std::numeric_limits<std::int64_t>::max();
+        } else {
+          out = static_cast<std::int64_t>(truncated);
+        }
+      }
+      qregs_[rd][0] = static_cast<std::uint64_t>(out);
+      qregs_[rd][1] = 0u;
+      return true;
+    }
+    return false;
+  }
+
+  if ((insn & 0xFF3FFC00u) == 0x5E21D800u) { // SCVTF Sd|Dd, Sn|Dn
+    const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    if (ftype == 0u) {
+      write_fp32(rd, static_cast<float>(static_cast<std::int32_t>(qregs_[rn][0] & 0xFFFFFFFFu)));
+      return true;
+    }
+    if (ftype == 1u) {
+      write_fp64(rd, static_cast<double>(static_cast<std::int64_t>(qregs_[rn][0])));
+      return true;
+    }
+    return false;
+  }
+
+  if ((insn & 0xFF3FFC00u) == 0x7E21D800u) { // UCVTF Sd|Dd, Sn|Dn
+    const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    if (ftype == 0u) {
+      write_fp32(rd, static_cast<float>(static_cast<std::uint32_t>(qregs_[rn][0] & 0xFFFFFFFFu)));
+      return true;
+    }
+    if (ftype == 1u) {
+      write_fp64(rd, static_cast<double>(qregs_[rn][0]));
+      return true;
+    }
+    return false;
+  }
+
+  if ((insn & 0xFF3FFC00u) == 0x1E220000u || (insn & 0xFF3FFC00u) == 0x9E220000u) { // SCVTF Sd|Dd, Wn|Xn
+    const bool from_x = (insn >> 31) != 0u;
+    const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    if (ftype == 0u) {
+      const std::int32_t value = static_cast<std::int32_t>(reg32(rn));
+      write_fp32(rd, static_cast<float>(value));
+      return true;
+    }
+    if (ftype == 1u) {
+      const std::int64_t value = from_x ? static_cast<std::int64_t>(reg(rn))
+                                        : static_cast<std::int64_t>(static_cast<std::int32_t>(reg32(rn)));
+      write_fp64(rd, static_cast<double>(value));
+      return true;
+    }
+    return false;
+  }
+
+  if ((insn & 0xFF3FFC00u) == 0x1E230000u || (insn & 0xFF3FFC00u) == 0x9E230000u) { // UCVTF Sd|Dd, Wn|Xn
+    const bool from_x = (insn >> 31) != 0u;
+    const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    if (ftype == 0u) {
+      write_fp32(rd, static_cast<float>(reg32(rn)));
+      return true;
+    }
+    if (ftype == 1u) {
+      const std::uint64_t value = from_x ? reg(rn) : static_cast<std::uint64_t>(reg32(rn));
+      write_fp64(rd, static_cast<double>(value));
+      return true;
+    }
+    return false;
+  }
+
+
+  if ((insn & 0xFF200C00u) == 0x1E200C00u) { // FCSEL Sd|Dd, Sn|Dn, Sm|Dm, cond
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t cond = (insn >> 12) & 0xFu;
+    const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    const bool take_rn = condition_holds(cond);
+    if (ftype == 0u) {
+      write_fp32(rd, take_rn ? read_fp32(rn) : read_fp32(rm));
+      return true;
+    }
+    if (ftype == 1u) {
+      write_fp64(rd, take_rn ? read_fp64(rn) : read_fp64(rm));
+      return true;
+    }
+    return false;
+  }
+
+  if (((insn & 0xFF20FC1Fu) == 0x1E202000u) || ((insn & 0xFF20FC1Fu) == 0x1E202010u)) { // FCMP/FCMPE Sn, Sm / Dn, Dm
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    if (ftype == 0u) {
+      const float lhs = read_fp32(rn);
+      const float rhs = read_fp32(rm);
+      set_fp_compare_flags(std::isnan(lhs) || std::isnan(rhs), lhs < rhs, lhs == rhs);
+      return true;
+    }
+    if (ftype == 1u) {
+      const double lhs = read_fp64(rn);
+      const double rhs = read_fp64(rm);
+      set_fp_compare_flags(std::isnan(lhs) || std::isnan(rhs), lhs < rhs, lhs == rhs);
+      return true;
+    }
+    return false;
+  }
+
+  if (((insn & 0xFF20FC1Fu) == 0x1E202008u) || ((insn & 0xFF20FC1Fu) == 0x1E202018u)) { // FCMP/FCMPE Sn|Dn, #0.0
+    const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    if (ftype == 0u) {
+      const float lhs = read_fp32(rn);
+      set_fp_compare_flags(std::isnan(lhs), lhs < 0.0f, lhs == 0.0f);
+      return true;
+    }
+    if (ftype == 1u) {
+      const double lhs = read_fp64(rn);
+      set_fp_compare_flags(std::isnan(lhs), lhs < 0.0, lhs == 0.0);
+      return true;
+    }
+    return false;
+  }
+
+  if ((insn & 0xFF3FFC00u) == 0x1E380000u || (insn & 0xFF3FFC00u) == 0x9E380000u) { // FCVTZS
+    const bool to_x = (insn >> 31) != 0u;
+    const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    long double value = 0.0L;
+    if (ftype == 0u) {
+      value = static_cast<long double>(read_fp32(rn));
+    } else if (ftype == 1u) {
+      value = static_cast<long double>(read_fp64(rn));
+    } else {
+      return false;
+    }
+    if (std::isnan(value)) {
+      if (to_x) {
+        set_reg(rd, 0u);
+      } else {
+        set_reg32(rd, 0u);
+      }
+      return true;
+    }
+    const long double trunc_value = std::trunc(value);
+    if (to_x) {
+      if (trunc_value > static_cast<long double>(std::numeric_limits<std::int64_t>::max())) {
+        set_reg(rd, static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()));
+      } else if (trunc_value < static_cast<long double>(std::numeric_limits<std::int64_t>::min())) {
+        set_reg(rd, static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::min()));
+      } else {
+        set_reg(rd, static_cast<std::uint64_t>(static_cast<std::int64_t>(trunc_value)));
+      }
+    } else {
+      if (trunc_value > static_cast<long double>(std::numeric_limits<std::int32_t>::max())) {
+        set_reg32(rd, static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()));
+      } else if (trunc_value < static_cast<long double>(std::numeric_limits<std::int32_t>::min())) {
+        set_reg32(rd, static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::min()));
+      } else {
+        set_reg32(rd, static_cast<std::uint32_t>(static_cast<std::int32_t>(trunc_value)));
+      }
+    }
+    return true;
+  }
+
   if ((insn & 0xFFFFFC00u) == 0x9E660000u) { // FMOV Xt, Dn
     const std::uint32_t rn_fp = (insn >> 5) & 0x1Fu;
     set_reg(rd, qregs_[rn_fp][0]);
@@ -2129,7 +2706,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     const std::uint64_t imm12 = (insn >> 10) & 0xFFFu;
     const std::uint32_t shift = (insn >> 22) & 0x1u;
     const std::uint64_t rhs = imm12 << (shift ? 12u : 0u);
-    const std::uint64_t lhs = set_flags ? (sf ? reg(rn) : reg32(rn)) : sp_or_reg(rn);
+    const std::uint64_t lhs = sp_or_reg(rn);
     const std::uint64_t value = sf ? (lhs + rhs) : (static_cast<std::uint32_t>(lhs) + static_cast<std::uint32_t>(rhs));
     if (set_flags) {
       if (sf) {
@@ -2157,7 +2734,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     const std::uint64_t imm12 = (insn >> 10) & 0xFFFu;
     const std::uint32_t shift = (insn >> 22) & 0x1u;
     const std::uint64_t rhs = imm12 << (shift ? 12u : 0u);
-    const std::uint64_t lhs = set_flags ? (sf ? reg(rn) : reg32(rn)) : sp_or_reg(rn);
+    const std::uint64_t lhs = sp_or_reg(rn);
     const std::uint64_t value = sf ? (lhs - rhs) : (static_cast<std::uint32_t>(lhs) - static_cast<std::uint32_t>(rhs));
     if (set_flags) {
       if (sf) {
@@ -2178,7 +2755,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
-  // ADD/ADDS (shifted register, 32/64-bit, LSL only)
+  // ADD/ADDS (shifted register, 32/64-bit)
   if ((insn & 0x7F200000u) == 0x0B000000u || (insn & 0x7F200000u) == 0x2B000000u) {
     const bool sf = (insn >> 31) != 0;
     const bool set_flags = (insn & 0x20000000u) != 0;
@@ -2312,7 +2889,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     }
     rhs <<= imm3;
 
-    const std::uint64_t lhs = set_flags ? (sf ? reg(rn) : reg32(rn)) : sp_or_reg(rn);
+    const std::uint64_t lhs = sp_or_reg(rn);
     const std::uint64_t value = is_sub
         ? (sf ? (lhs - rhs) : static_cast<std::uint32_t>(lhs - rhs))
         : (sf ? (lhs + rhs) : static_cast<std::uint32_t>(lhs + rhs));
@@ -2858,10 +3435,39 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     }
     return bus_.read(result->pa, size);
   };
-  const auto mmu_write = [this](std::uint64_t va, std::uint64_t value, std::size_t size) -> bool {
+  const auto mmu_write = [this, insn, &mmu_read](std::uint64_t va, std::uint64_t value, std::size_t size) -> bool {
+    static const std::optional<std::uint64_t> trace_write_va = []() -> std::optional<std::uint64_t> {
+      const char* env = std::getenv("AARCHVM_TRACE_WRITE_VA");
+      if (env == nullptr || *env == '\0') {
+        return std::nullopt;
+      }
+      try {
+        return static_cast<std::uint64_t>(std::stoull(env, nullptr, 0));
+      } catch (...) {
+        return std::nullopt;
+      }
+    }();
     const auto result = translate_address(va, AccessType::Write, true);
     if (!result.has_value()) {
       return false;
+    }
+    if (trace_write_va.has_value() && *trace_write_va >= va && *trace_write_va < (va + size)) {
+      const std::uint64_t current_task = sysregs_.sp_el0();
+      const auto task_stack = mmu_read(current_task + 32u, 8u);
+      std::cerr << std::dec << "WRITE-HIT va=0x" << std::hex << va
+                << " pa=0x" << result->pa
+                << " size=" << std::dec << size
+                << " value=0x" << std::hex << value
+                << " pc=0x" << (pc_ - 4)
+                << " insn=0x" << insn
+                << " sp=0x" << regs_[31]
+                << " x29=0x" << reg(29)
+                << " x30=0x" << reg(30)
+                << " sp_el0=0x" << current_task;
+      if (task_stack.has_value()) {
+        std::cerr << " task_stack=0x" << *task_stack;
+      }
+      std::cerr << '\n';
     }
     const bool ok = bus_.write(result->pa, value, size);
     if (ok) {
@@ -4541,11 +5147,14 @@ bool Cpu::save_state(std::ostream& out) const {
       !snapshot_io::write(out, exception_depth_) ||
       !snapshot_io::write_array(out, exception_is_irq_stack_) ||
       !snapshot_io::write_array(out, exception_intid_stack_) ||
+      !snapshot_io::write_array(out, exception_prev_prio_stack_) ||
+      !snapshot_io::write_array(out, exception_prio_dropped_stack_) ||
       !snapshot_io::write_bool(out, sync_reported_) ||
       !snapshot_io::write_bool(out, waiting_for_interrupt_) ||
       !snapshot_io::write_bool(out, waiting_for_event_) ||
       !snapshot_io::write_bool(out, event_register_) ||
       !snapshot_io::write(out, icc_pmr_el1_) ||
+      !snapshot_io::write(out, running_priority_) ||
       !snapshot_io::write(out, icc_ctlr_el1_) ||
       !snapshot_io::write(out, icc_sre_el1_) ||
       !snapshot_io::write(out, icc_bpr1_el1_) ||
@@ -4557,13 +5166,23 @@ bool Cpu::save_state(std::ostream& out) const {
       !snapshot_io::write(out, exclusive_size_)) {
     return false;
   }
-  const std::uint64_t tlb_size = static_cast<std::uint64_t>(tlb_page_map_.size());
+  std::uint64_t tlb_size = 0;
+  for (const auto& set : tlb_entries_) {
+    for (const auto& entry : set) {
+      tlb_size += entry.valid ? 1u : 0u;
+    }
+  }
   if (!snapshot_io::write(out, tlb_size)) {
     return false;
   }
-  for (const auto& [va_page, entry] : tlb_page_map_) {
-    if (!snapshot_io::write(out, va_page) || !write_tlb_entry(entry)) {
-      return false;
+  for (const auto& set : tlb_entries_) {
+    for (const auto& entry : set) {
+      if (!entry.valid) {
+        continue;
+      }
+      if (!snapshot_io::write(out, entry.va_page) || !write_tlb_entry(entry)) {
+        return false;
+      }
     }
   }
   const bool has_last_fault = last_translation_fault_.has_value();
@@ -4576,7 +5195,7 @@ bool Cpu::save_state(std::ostream& out) const {
   return snapshot_io::write(out, pc_) && snapshot_io::write(out, steps_) && snapshot_io::write_bool(out, halted_);
 }
 
-bool Cpu::load_state(std::istream& in) {
+bool Cpu::load_state(std::istream& in, std::uint32_t version) {
   const auto read_translation_fault = [&](TranslationFault& fault) {
     std::uint8_t kind = 0;
     if (!snapshot_io::read(in, kind) || kind > static_cast<std::uint8_t>(TranslationFault::Kind::Permission) ||
@@ -4619,13 +5238,33 @@ bool Cpu::load_state(std::istream& in) {
       !snapshot_io::read(in, exception_depth_) ||
       exception_depth_ > exception_is_irq_stack_.size() ||
       !snapshot_io::read_array(in, exception_is_irq_stack_) ||
-      !snapshot_io::read_array(in, exception_intid_stack_) ||
-      !snapshot_io::read_bool(in, sync_reported_) ||
+      !snapshot_io::read_array(in, exception_intid_stack_)) {
+    return false;
+  }
+  if (version >= 3) {
+    if (!snapshot_io::read_array(in, exception_prev_prio_stack_) ||
+        !snapshot_io::read_array(in, exception_prio_dropped_stack_)) {
+      return false;
+    }
+  } else {
+    exception_prev_prio_stack_.fill(0x100);
+    exception_prio_dropped_stack_.fill(false);
+  }
+  if (!snapshot_io::read_bool(in, sync_reported_) ||
       !snapshot_io::read_bool(in, waiting_for_interrupt_) ||
       !snapshot_io::read_bool(in, waiting_for_event_) ||
       !snapshot_io::read_bool(in, event_register_) ||
-      !snapshot_io::read(in, icc_pmr_el1_) ||
-      !snapshot_io::read(in, icc_ctlr_el1_) ||
+      !snapshot_io::read(in, icc_pmr_el1_)) {
+    return false;
+  }
+  if (version >= 3) {
+    if (!snapshot_io::read(in, running_priority_)) {
+      return false;
+    }
+  } else {
+    running_priority_ = 0x100;
+  }
+  if (!snapshot_io::read(in, icc_ctlr_el1_) ||
       !snapshot_io::read(in, icc_sre_el1_) ||
       !snapshot_io::read(in, icc_bpr1_el1_) ||
       !snapshot_io::read(in, icc_igrpen1_el1_) ||
@@ -4640,14 +5279,14 @@ bool Cpu::load_state(std::istream& in) {
   if (!snapshot_io::read(in, tlb_size) || tlb_size > (1ull << 20)) {
     return false;
   }
-  tlb_page_map_.clear();
+  tlb_flush_all();
   for (std::uint64_t i = 0; i < tlb_size; ++i) {
     std::uint64_t va_page = 0;
     TlbEntry entry{};
     if (!snapshot_io::read(in, va_page) || !read_tlb_entry(entry)) {
       return false;
     }
-    tlb_page_map_.emplace(va_page, entry);
+    tlb_insert_entry(va_page, entry);
   }
   bool has_last_fault = false;
   if (!snapshot_io::read_bool(in, has_last_fault)) {

@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <iostream>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <termios.h>
 #include <unistd.h>
@@ -19,6 +20,11 @@ namespace {
 struct BinaryLoad {
   std::string path;
   std::uint64_t addr = 0;
+};
+
+struct UartRxEvent {
+  std::uint64_t step = 0;
+  std::uint8_t byte = 0;
 };
 
 struct Options {
@@ -55,6 +61,45 @@ bool read_binary_file(const std::string& path, std::vector<std::uint8_t>& out) {
   }
   in.read(reinterpret_cast<char*>(out.data()), size);
   return static_cast<std::size_t>(in.gcount()) == out.size();
+}
+
+std::vector<UartRxEvent> parse_uart_rx_script_env() {
+  std::vector<UartRxEvent> events;
+  const char* script = std::getenv("AARCHVM_UART_RX_SCRIPT");
+  if (script == nullptr || *script == '\0') {
+    return events;
+  }
+
+  std::stringstream ss(script);
+  std::string item;
+  while (std::getline(ss, item, ',')) {
+    if (item.empty()) {
+      continue;
+    }
+    const std::size_t colon = item.find(':');
+    if (colon == std::string::npos || colon == 0 || colon + 1 >= item.size()) {
+      std::cerr << "Invalid AARCHVM_UART_RX_SCRIPT item: " << item << '\n';
+      continue;
+    }
+    events.push_back(UartRxEvent{
+        .step = parse_u64(item.substr(0, colon)),
+        .byte = static_cast<std::uint8_t>(parse_u64(item.substr(colon + 1)) & 0xFFu),
+    });
+  }
+
+  std::sort(events.begin(), events.end(), [](const UartRxEvent& a, const UartRxEvent& b) {
+    return a.step < b.step;
+  });
+  return events;
+}
+
+void inject_scheduled_uart_rx(const std::vector<UartRxEvent>& events,
+                              std::size_t& next_event,
+                              aarchvm::SoC& soc) {
+  while (next_event < events.size() && events[next_event].step <= soc.steps()) {
+    soc.inject_uart_rx(events[next_event].byte);
+    ++next_event;
+  }
 }
 
 void dump_bytes(const aarchvm::SoC& soc, std::uint64_t base, std::size_t len, const char* tag) {
@@ -166,7 +211,7 @@ public:
       return;
     }
     termios t = old_;
-    t.c_lflag &= static_cast<unsigned>(~(ICANON | ECHO));
+    cfmakeraw(&t);
     t.c_cc[VMIN] = 0;
     t.c_cc[VTIME] = 0;
     if (tcsetattr(STDIN_FILENO, TCSANOW, &t) != 0) {
@@ -323,10 +368,26 @@ int main(int argc, char** argv) {
 
   const bool interactive_stdin = isatty(STDIN_FILENO);
   RawStdinGuard stdin_guard;
+  const std::vector<UartRxEvent> uart_rx_events = parse_uart_rx_script_env();
+  std::size_t next_uart_rx_event = 0;
   std::size_t remaining = opt.max_steps;
-  const std::size_t run_chunk = interactive_stdin ? 2000u : 200000u;
   while (remaining > 0) {
     pump_stdin_to_uart(soc);
+    inject_scheduled_uart_rx(uart_rx_events, next_uart_rx_event, soc);
+
+    std::size_t run_chunk = 200000u;
+    if (interactive_stdin) {
+      // Keep tty response snappy: when the guest is idle on WFI/WFE, poll host
+      // stdin every guest step instead of disappearing into long chunks.
+      run_chunk = (soc.cpu_waiting_for_interrupt() || soc.cpu_waiting_for_event()) ? 1u : 256u;
+    }
+    if (next_uart_rx_event < uart_rx_events.size() && uart_rx_events[next_uart_rx_event].step > soc.steps()) {
+      const std::uint64_t until_inject = uart_rx_events[next_uart_rx_event].step - soc.steps();
+      run_chunk = std::min<std::size_t>(run_chunk, static_cast<std::size_t>(until_inject));
+    }
+    if (run_chunk == 0u) {
+      continue;
+    }
     const std::size_t n = std::min(run_chunk, remaining);
     if (!soc.run(n)) {
       std::cerr << "Simulation stopped unexpectedly\n";
@@ -334,7 +395,6 @@ int main(int argc, char** argv) {
     }
     remaining -= n;
   }
-
   if (const char* dump_post_addr_env = std::getenv("AARCHVM_DUMP_POST_ADDR"); dump_post_addr_env != nullptr) {
     const std::uint64_t dump_addr = parse_u64(std::string(dump_post_addr_env));
     const std::size_t dump_len =
@@ -350,6 +410,25 @@ int main(int argc, char** argv) {
   if (std::getenv("AARCHVM_PRINT_SUMMARY") != nullptr) {
     std::cerr << "SUMMARY: steps=" << soc.steps()
               << " pc=0x" << std::hex << soc.pc() << std::dec << '\n';
+  }
+  if (std::getenv("AARCHVM_PRINT_TIMER_SUMMARY") != nullptr) {
+    std::cerr << "TIMER-SUMMARY counter=0x" << std::hex << soc.timer_counter()
+              << " cntv_ctl=0x" << soc.timer_cntv_ctl()
+              << " cntv_cval=0x" << soc.timer_cntv_cval()
+              << " cntv_tval=0x" << soc.timer_cntv_tval()
+              << " cntp_ctl=0x" << soc.timer_cntp_ctl()
+              << " cntp_cval=0x" << soc.timer_cntp_cval()
+              << " cntp_tval=0x" << soc.timer_cntp_tval()
+              << std::dec << '\n';
+  }
+  if (std::getenv("AARCHVM_PRINT_IRQ_SUMMARY") != nullptr) {
+    std::cerr << "IRQ-SUMMARY masked=" << (soc.irq_masked() ? 1 : 0)
+              << " gic27(p/e)=" << (soc.gic_pending(27) ? 1 : 0) << '/' << (soc.gic_enabled(27) ? 1 : 0)
+              << " gic30(p/e)=" << (soc.gic_pending(30) ? 1 : 0) << '/' << (soc.gic_enabled(30) ? 1 : 0)
+              << " gic33(p/e)=" << (soc.gic_pending(33) ? 1 : 0) << '/' << (soc.gic_enabled(33) ? 1 : 0)
+              << " depth=" << soc.exception_depth()
+              << " wfi=" << (soc.cpu_waiting_for_interrupt() ? 1 : 0)
+              << std::dec << '\n';
   }
   if (std::getenv("AARCHVM_PRINT_UART_SUMMARY") != nullptr) {
     std::cerr << "UART-SUMMARY tx=" << soc.uart_tx_count()

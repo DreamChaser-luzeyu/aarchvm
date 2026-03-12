@@ -15,6 +15,7 @@
 - U-Boot 通过 `booti` 启动 Linux `Image`。
 - Linux `earlycon=pl011,...` 和正式 `ttyAMA0` 串口路径均可输出日志。
 - BusyBox `ash` 用户态 shell 已验证可交互输入。
+- 更完整的 static BusyBox 用户态工具集已验证可运行，至少包括 `ps`、`awk`、`find`、`free`。
 - 整机 snapshot 保存 / 恢复，可从 Linux shell 附近快速复现问题。
 
 当前已经在串口上看到并验证的 Linux / BusyBox 输出包括：
@@ -157,6 +158,33 @@ linux-6.12.76/build-aarchvm/scripts/dtc/dtc \
   dts/aarchvm-current.dts
 ```
 
+### 5. 构建 BusyBox 与 initramfs
+
+当前仓库实际使用的是基于 `defconfig` 的 static BusyBox，并额外关闭了少数会在当前宿主工具链环境下导致构建失败、且当前 guest 路径并不需要的选项。
+
+```bash
+make -C busybox-1.37.0 distclean
+make -C busybox-1.37.0 defconfig
+perl -0pi -e 's/^# CONFIG_STATIC is not set$/CONFIG_STATIC=y/m; s/^CONFIG_CROSS_COMPILER_PREFIX=.*$/CONFIG_CROSS_COMPILER_PREFIX="aarch64-linux-gnu-"/m; s/^CONFIG_TC=y$/# CONFIG_TC is not set/m; s/^CONFIG_FEATURE_TC_INGRESS=y$/# CONFIG_FEATURE_TC_INGRESS is not set/m; s/^CONFIG_SHA1_HWACCEL=y$/# CONFIG_SHA1_HWACCEL is not set/m; s/^CONFIG_SHA256_HWACCEL=y$/# CONFIG_SHA256_HWACCEL is not set/m' busybox-1.37.0/.config
+make -C busybox-1.37.0 oldconfig </dev/null
+make -C busybox-1.37.0 -j"$(nproc)"
+make -C busybox-1.37.0 install
+
+rm -rf out/initramfs-full-root
+mkdir -p out/initramfs-full-root
+cp -a busybox-1.37.0/_install/. out/initramfs-full-root/
+mkdir -p out/initramfs-full-root/{dev,proc,sys,tmp,run,root,mnt,etc}
+cp out/initramfs-root/init out/initramfs-full-root/init
+cp out/initramfs-root/bin/guest_diag out/initramfs-full-root/bin/guest_diag
+chmod 0755 out/initramfs-full-root/init out/initramfs-full-root/bin/guest_diag
+( cd out/initramfs-full-root && find . -print0 | cpio --null -o -H newc > ../initramfs-full.cpio )
+gzip -n -f -c out/initramfs-full.cpio > out/initramfs-full.cpio.gz
+```
+
+当前重新生成后的 `initramfs` 产物大小为：
+- `out/initramfs-full.cpio`：`0x2cd000`
+- `out/initramfs-full.cpio.gz`：`0x1662f8`
+
 ## 当前实际使用的关键配置项
 
 ### U-Boot 关键配置项
@@ -270,7 +298,7 @@ CONFIG_TMPFS_POSIX_ACL=y
 如果只是验证从 U-Boot 进入 Linux，可以使用一次性管道把 `booti` 命令喂给 U-Boot：
 
 ```bash
-printf 'setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel rdinit=/init\nbooti 0x40400000 0x46000000:0x8abf4 0x47f00000\n' | \
+printf 'setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel rdinit=/init\nbooti 0x40400000 0x46000000:0x1662f8 0x47f00000\n' | \
 AARCHVM_TIMER_SCALE=100000 \
 ./build/aarchvm \
   -bin u-boot-2026.01/build-qemu_arm64/u-boot.bin \
@@ -306,14 +334,14 @@ U-Boot 中输入：
 
 ```bash
 setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel rdinit=/init
-booti 0x40400000 0x46000000:0x8abf4 0x47f00000
+booti 0x40400000 0x46000000:0x1662f8 0x47f00000
 ```
 
 该启动链中使用的关键工件与地址：
 - 主 DTB：`dts/aarchvm-current.dtb`，用于让 U-Boot 识别当前模拟器平台。
 - Linux DTB：`dts/aarchvm-linux-min.dtb`，作为 `booti` 的第三个参数传给 Linux。
 - Kernel `Image`：加载到 `0x40400000`。
-- BusyBox `initramfs`：加载到 `0x46000000`，当前大小 `0x8abf4`。
+- BusyBox `initramfs`：加载到 `0x46000000`，当前大小 `0x1662f8`。
 - Linux DTB：加载到 `0x47f00000`。
 - U-Boot 初始 `sp`：`0x47fff000`。
 - `AARCHVM_TIMER_SCALE=100000`：用于加快当前解释执行模式下的 Linux 启动推进速度。
@@ -323,7 +351,7 @@ booti 0x40400000 0x46000000:0x8abf4 0x47f00000
 当前模拟器已经支持整机 snapshot。一次典型用法是先跑到 BusyBox shell，再保存快照：
 
 ```bash
-printf 'setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel rdinit=/init\nbooti 0x40400000 0x46000000:0x8abf4 0x47f00000\n' | \
+printf 'setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel rdinit=/init\nbooti 0x40400000 0x46000000:0x1662f8 0x47f00000\n' | \
 AARCHVM_TIMER_SCALE=100000 \
 ./build/aarchvm \
   -bin u-boot-2026.01/build-qemu_arm64/u-boot.bin \
@@ -384,6 +412,13 @@ BusyBox shell 输入问题最终依赖两个 CPU 语义修正：
 - `WFI/WFE` 在“中断已 pending 但暂时还不能立即投递”时也会先退出等待态，避免 Linux idle 卡死。
 - 允许 Linux 在已经处于 EL1 异常上下文时继续接收 IRQ，这对内核 idle/console 路径是必要条件。
 
+`busybox ps` 的非法指令问题则定位为一组 AdvSIMD 语义缺口：
+- `BIC (vector, immediate)` 先前错误地按普通逻辑立即数路径执行，现已改为真正的 `operand AND NOT(imm)`。
+- `DUP (element)` 先前缺失，现已补齐。
+- 向量逻辑类解码过宽，导致 `EOR` 曾被误判到 `BIT/BIF/BSL` 路径，现已收紧区分。
+
+这些修复之后，BusyBox `ps` 已能在 guest 中正常列出进程并返回 `0`。
+
 ## 测试
 
 构建全部测试二进制：
@@ -407,6 +442,9 @@ tests/arm64/run_all.sh
 - `snapshot_resume`：验证整机 snapshot 保存与恢复
 - 原子/排他访存测试
 - 多组 Linux bring-up 过程中补入的指令样例
+- `fpsimd_bic_imm`：验证 `BIC (vector, immediate)`
+- `fpsimd_dup_elem`：验证 `DUP (element)`
+- 扩展后的 `fpsimd_logic_more`：覆盖 `EOR/BIT/BIF/BSL` 区分
 
 ## 当前局限与下一步
 

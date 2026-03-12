@@ -53,6 +53,13 @@ public:
   [[nodiscard]] bool gic_pending(std::uint32_t intid) const;
   [[nodiscard]] bool gic_enabled(std::uint32_t intid) const;
   [[nodiscard]] std::uint32_t gicd_ctlr() const;
+  [[nodiscard]] std::uint64_t timer_counter() const;
+  [[nodiscard]] std::uint64_t timer_cntv_ctl() const;
+  [[nodiscard]] std::uint64_t timer_cntv_cval() const;
+  [[nodiscard]] std::uint64_t timer_cntv_tval() const;
+  [[nodiscard]] std::uint64_t timer_cntp_ctl() const;
+  [[nodiscard]] std::uint64_t timer_cntp_cval() const;
+  [[nodiscard]] std::uint64_t timer_cntp_tval() const;
   [[nodiscard]] bool save_snapshot(const std::string& path) const;
   [[nodiscard]] bool load_snapshot(const std::string& path);
 
@@ -67,7 +74,8 @@ private:
   static constexpr std::uint64_t kGicSize = 0x100000;
   static constexpr std::uint64_t kTimerBase = 0x0A000000;
   static constexpr std::uint64_t kTimerSize = 0x1000;
-  static constexpr std::uint32_t kTimerIntId = 11;
+  static constexpr std::uint32_t kTimerVirtIntId = 27; // PPI 11 => INTID 27
+  static constexpr std::uint32_t kTimerPhysIntId = 30; // PPI 14 => INTID 30
   static constexpr std::uint32_t kUartIntId = 33;
 
   Bus bus_;

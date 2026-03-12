@@ -6,12 +6,11 @@ _start:
 
     adr  x21, dst
 
-    movi v2.16b, #0xaa
-    movi v3.16b, #0x55
-    movi v4.16b, #0xf0
-    bit  v2.16b, v3.16b, v4.16b
+    movi v0.16b, #0xaa
+    movi v1.16b, #0x55
+    and  v2.16b, v0.16b, v1.16b
     str  q2, [x21]
-    adr  x22, exp_bit
+    adr  x22, exp_and
     ldr  x0, [x21]
     ldr  x1, [x22]
     cmp  x0, x1
@@ -21,14 +20,75 @@ _start:
     cmp  x0, x1
     b.ne fail
 
+    eor  v2.16b, v0.16b, v1.16b
+    str  q2, [x21, #16]
+    adr  x22, exp_eor
+    add  x23, x21, #16
+    ldr  x0, [x23]
+    ldr  x1, [x22]
+    cmp  x0, x1
+    b.ne fail
+    ldr  x0, [x23, #8]
+    ldr  x1, [x22, #8]
+    cmp  x0, x1
+    b.ne fail
+
+    movi v2.16b, #0xaa
+    movi v3.16b, #0x55
+    movi v4.16b, #0xf0
+    bit  v2.16b, v3.16b, v4.16b
+    str  q2, [x21, #32]
+    adr  x22, exp_bit
+    add  x23, x21, #32
+    ldr  x0, [x23]
+    ldr  x1, [x22]
+    cmp  x0, x1
+    b.ne fail
+    ldr  x0, [x23, #8]
+    ldr  x1, [x22, #8]
+    cmp  x0, x1
+    b.ne fail
+
+    movi v2.16b, #0xaa
+    movi v3.16b, #0x55
+    movi v4.16b, #0xf0
+    bif  v2.16b, v3.16b, v4.16b
+    str  q2, [x21, #48]
+    adr  x22, exp_bif
+    add  x23, x21, #48
+    ldr  x0, [x23]
+    ldr  x1, [x22]
+    cmp  x0, x1
+    b.ne fail
+    ldr  x0, [x23, #8]
+    ldr  x1, [x22, #8]
+    cmp  x0, x1
+    b.ne fail
+
+    movi v2.16b, #0xf0
+    movi v3.16b, #0xaa
+    movi v4.16b, #0x55
+    bsl  v2.16b, v3.16b, v4.16b
+    str  q2, [x21, #64]
+    adr  x22, exp_bsl
+    add  x23, x21, #64
+    ldr  x0, [x23]
+    ldr  x1, [x22]
+    cmp  x0, x1
+    b.ne fail
+    ldr  x0, [x23, #8]
+    ldr  x1, [x22, #8]
+    cmp  x0, x1
+    b.ne fail
+
     adr  x22, cmhs_lhs
     ld1  {v5.16b}, [x22]
     adr  x22, cmhs_rhs
     ld1  {v6.16b}, [x22]
     cmhs v7.16b, v5.16b, v6.16b
-    str  q7, [x21, #16]
+    str  q7, [x21, #80]
     adr  x22, exp_cmhs
-    add  x23, x21, #16
+    add  x23, x21, #80
     ldr  x0, [x23]
     ldr  x1, [x22]
     cmp  x0, x1
@@ -41,9 +101,9 @@ _start:
     adr  x22, umaxp_src
     ld1  {v8.16b}, [x22]
     umaxp v9.16b, v8.16b, v8.16b
-    str  q9, [x21, #32]
+    str  q9, [x21, #96]
     adr  x22, exp_umaxp
-    add  x23, x21, #32
+    add  x23, x21, #96
     ldr  x0, [x23]
     ldr  x1, [x22]
     cmp  x0, x1
@@ -55,8 +115,7 @@ _start:
 
     movz x0, #'W'
     str  x0, [x20]
-    movz x0, #'
-'
+    movz x0, #'\n'
     str  x0, [x20]
     brk  #0
 
@@ -68,10 +127,22 @@ fail:
     .data
     .balign 16
 dst:
-    .space 48
+    .space 112
+exp_and:
+    .quad 0x0000000000000000
+    .quad 0x0000000000000000
+exp_eor:
+    .quad 0xffffffffffffffff
+    .quad 0xffffffffffffffff
 exp_bit:
     .quad 0x5a5a5a5a5a5a5a5a
     .quad 0x5a5a5a5a5a5a5a5a
+exp_bif:
+    .quad 0xa5a5a5a5a5a5a5a5
+    .quad 0xa5a5a5a5a5a5a5a5
+exp_bsl:
+    .quad 0xa5a5a5a5a5a5a5a5
+    .quad 0xa5a5a5a5a5a5a5a5
 cmhs_lhs:
     .byte 1,3,2,4,5,7,6,8,9,11,10,12,13,15,14,16
 cmhs_rhs:

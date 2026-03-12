@@ -36,7 +36,18 @@ build_asm_prog fpsimd_ext
 build_asm_prog fp_scalar_elem_ls
 build_asm_prog fpsimd_uminp
 build_asm_prog fpsimd_umov_lane
+build_asm_prog fpsimd_dup_elem
 build_asm_prog fpsimd_stringops
+build_asm_prog fpsimd_bic_imm
+build_asm_prog fmov_scalar_imm
+build_asm_prog fpsimd_scalar_movi
+build_asm_prog fmov_scalar_reg
+build_asm_prog fp_scalar_arith
+build_asm_prog fcmp_e
+build_asm_prog fp_scalar_convert
+build_asm_prog fp_scalar_fcsel
+build_asm_prog fpsimd_ins_xtl
+build_asm_prog fpsimd_misc_more
 build_asm_prog pstate_pan
 build_asm_prog svc_sysreg_minimal
 build_asm_prog lse_atomics
@@ -61,6 +72,7 @@ build_asm_prog mmu_tcr_ips_mair_decode
 build_asm_prog mmu_af_fault
 build_asm_prog sync_exception_regs
 build_asm_prog gic_timer_sysreg
+build_asm_prog gic_timer_phys_sysreg
 build_asm_prog bitfield_basic
 build_asm_prog p1_core
 build_asm_prog atomics_minimal
@@ -78,6 +90,10 @@ build_asm_prog pair_exclusive
 build_asm_prog adc_sbc_minimal
 build_asm_prog snapshot_resume
 build_asm_prog irq_nested_el1_wfi
+build_asm_prog sp_ccmp_path
+build_asm_prog sp_alias_paths
+build_asm_prog addsub_shift_more
+build_asm_prog uart_irq_rx_spaced
 
 if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
   aarch64-linux-gnu-gcc -nostdlib -static -ffreestanding -fomit-frame-pointer -fno-stack-protector \

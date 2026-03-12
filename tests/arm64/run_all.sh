@@ -32,6 +32,7 @@ run mmu_tcr_ips_mair_decode.bin 4000000
 run mmu_af_fault.bin 4000000
 run sync_exception_regs.bin 2000000
 run gic_timer_sysreg.bin 2000000
+run gic_timer_phys_sysreg.bin 2000000
 run bitfield_basic.bin 400000
 run p1_core.bin 600000
 run atomics_minimal.bin 400000
@@ -67,7 +68,18 @@ run fpsimd_ext.bin 400000
 run fp_scalar_elem_ls.bin 400000
 run fpsimd_uminp.bin 400000
 run fpsimd_umov_lane.bin 400000
+run fpsimd_dup_elem.bin 400000
 run fpsimd_stringops.bin 600000
+run fpsimd_bic_imm.bin 200000
+run fmov_scalar_imm.bin 200000
+run fpsimd_scalar_movi.bin 200000
+run fmov_scalar_reg.bin 200000
+run fp_scalar_arith.bin 300000
+run fcmp_e.bin 200000
+run fp_scalar_convert.bin 200000
+run fp_scalar_fcsel.bin 200000
+run fpsimd_ins_xtl.bin 300000
+run fpsimd_misc_more.bin 300000
 run pstate_pan.bin 200000
 run svc_sysreg_minimal.bin 300000
 run lse_atomics.bin 400000
@@ -77,6 +89,17 @@ run irq_spsel.bin 1800000
 run logic_misc.bin 300000
 run mem_ext.bin 300000
 run branch_reg.bin 300000
+run sp_ccmp_path.bin 200000
+run sp_alias_paths.bin 300000
+run addsub_shift_more.bin 300000
+AARCHVM_UART_RX_SCRIPT='100:0x41,1000:0x42,5000:0x43' ./build/aarchvm -bin tests/arm64/out/uart_irq_rx_spaced.bin -load 0x0 -entry 0x0 -steps 200000 | grep -qx 'ABCP'
+
+UART_IRQ_SNAP=tests/arm64/out/uart_irq_rx_spaced.snap
+rm -f "$UART_IRQ_SNAP"
+AARCHVM_UART_RX_SCRIPT='100:0x41,1000:0x42' ./build/aarchvm -bin tests/arm64/out/uart_irq_rx_spaced.bin -load 0x0 -entry 0x0 -steps 2000 -snapshot-save "$UART_IRQ_SNAP" > tests/arm64/out/uart_irq_snapshot_pre.log
+AARCHVM_UART_RX_SCRIPT='5000:0x43' ./build/aarchvm -snapshot-load "$UART_IRQ_SNAP" -steps 10000 > tests/arm64/out/uart_irq_snapshot_post.log
+test "$(tr -d '\r\n' < tests/arm64/out/uart_irq_snapshot_pre.log)" = 'AB'
+test "$(tr -d '\r\n' < tests/arm64/out/uart_irq_snapshot_post.log)" = 'CP'
 
 SNAP=tests/arm64/out/snapshot_resume.snap
 rm -f "$SNAP"

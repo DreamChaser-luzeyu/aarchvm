@@ -21,6 +21,18 @@ bool env_enabled(const char* name) {
   return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 
+std::optional<std::uint64_t> env_timer_scale() {
+  const char* scale_env = std::getenv("AARCHVM_TIMER_SCALE");
+  if (scale_env == nullptr || *scale_env == '\0') {
+    return std::nullopt;
+  }
+  const unsigned long long scale = std::strtoull(scale_env, nullptr, 0);
+  if (scale == 0) {
+    return std::nullopt;
+  }
+  return static_cast<std::uint64_t>(scale);
+}
+
 } // namespace
 
 SoC::SoC()
@@ -41,11 +53,8 @@ SoC::SoC()
     bus_.set_fast_path(fast_path_);
   }
 
-  if (const char* scale_env = std::getenv("AARCHVM_TIMER_SCALE")) {
-    const unsigned long long scale = std::strtoull(scale_env, nullptr, 0);
-    if (scale > 0) {
-      timer_tick_scale_ = static_cast<std::uint64_t>(scale);
-    }
+  if (const auto scale = env_timer_scale(); scale.has_value()) {
+    timer_tick_scale_ = *scale;
   }
 
   timer_->set_cycles_per_step(timer_tick_scale_);
@@ -99,13 +108,9 @@ void SoC::inject_uart_rx(std::uint8_t byte) {
 bool SoC::run(std::size_t max_steps) {
   auto sync_devices = [&]() {
     timer_->sync_to_steps(cpu_.steps());
-    if (timer_->irq_pending()) {
-      gic_->set_pending(kTimerIntId);
-      timer_->clear_irq();
-    }
-    if (uart_->irq_pending()) {
-      gic_->set_pending(kUartIntId);
-    }
+    gic_->set_level(kTimerVirtIntId, timer_->irq_pending() || timer_->irq_pending_virtual());
+    gic_->set_level(kTimerPhysIntId, timer_->irq_pending_physical());
+    gic_->set_level(kUartIntId, uart_->irq_pending());
   };
 
   static constexpr std::size_t kMaxInternalChunk = 65536;
@@ -241,6 +246,34 @@ std::uint32_t SoC::gicd_ctlr() const {
   return gic_->gicd_ctlr();
 }
 
+std::uint64_t SoC::timer_counter() const {
+  return timer_->counter_at_steps(cpu_.steps());
+}
+
+std::uint64_t SoC::timer_cntv_ctl() const {
+  return timer_->read_cntv_ctl_el0(cpu_.steps());
+}
+
+std::uint64_t SoC::timer_cntv_cval() const {
+  return timer_->read_cntv_cval_el0();
+}
+
+std::uint64_t SoC::timer_cntv_tval() const {
+  return timer_->read_cntv_tval_el0(cpu_.steps());
+}
+
+std::uint64_t SoC::timer_cntp_ctl() const {
+  return timer_->read_cntp_ctl_el0(cpu_.steps());
+}
+
+std::uint64_t SoC::timer_cntp_cval() const {
+  return timer_->read_cntp_cval_el0();
+}
+
+std::uint64_t SoC::timer_cntp_tval() const {
+  return timer_->read_cntp_tval_el0(cpu_.steps());
+}
+
 bool SoC::save_snapshot(const std::string& path) const {
   const_cast<GenericTimer&>(*timer_).sync_to_steps(cpu_.steps());
 
@@ -249,7 +282,7 @@ bool SoC::save_snapshot(const std::string& path) const {
     return false;
   }
   static constexpr char kMagic[8] = {'A', 'A', 'R', 'C', 'H', 'S', 'N', 'P'};
-  static constexpr std::uint32_t kVersion = 1;
+  static constexpr std::uint32_t kVersion = 4;
   out.write(kMagic, sizeof(kMagic));
   if (!out ||
       !snapshot_io::write(out, kVersion) ||
@@ -288,16 +321,19 @@ bool SoC::load_snapshot(const std::string& path) {
       !snapshot_io::read(in, sdram_size) ||
       magic[0] != 'A' || magic[1] != 'A' || magic[2] != 'R' || magic[3] != 'C' ||
       magic[4] != 'H' || magic[5] != 'S' || magic[6] != 'N' || magic[7] != 'P' ||
-      version != 1 || boot_ram_base != kBootRamBase || boot_ram_size != kBootRamSize ||
+      (version != 1 && version != 2 && version != 3 && version != 4) || boot_ram_base != kBootRamBase || boot_ram_size != kBootRamSize ||
       sdram_base != kSdramBase || sdram_size != kSdramSize ||
       !snapshot_io::read(in, timer_tick_scale_) ||
       !boot_ram_->load_state(in) ||
       !sdram_->load_state(in) ||
       !uart_->load_state(in) ||
-      !gic_->load_state(in) ||
-      !timer_->load_state(in) ||
-      !cpu_.load_state(in)) {
+      !gic_->load_state(in, version) ||
+      !timer_->load_state(in, version) ||
+      !cpu_.load_state(in, version)) {
     return false;
+  }
+  if (const auto scale = env_timer_scale(); scale.has_value()) {
+    timer_tick_scale_ = *scale;
   }
   timer_->set_cycles_per_step(timer_tick_scale_);
   timer_->rebase_to_steps(cpu_.steps());

@@ -42,7 +42,7 @@ public:
   [[nodiscard]] std::uint64_t vbar_el1() const { return sysregs_.vbar_el1(); }
   [[nodiscard]] bool irq_masked() const { return sysregs_.irq_masked(); }
   [[nodiscard]] bool save_state(std::ostream& out) const;
-  [[nodiscard]] bool load_state(std::istream& in);
+  [[nodiscard]] bool load_state(std::istream& in, std::uint32_t version = 3);
 
 private:
   enum class AccessType {
@@ -112,6 +112,8 @@ private:
   };
 
   struct TlbEntry {
+    bool valid = false;
+    std::uint64_t va_page = 0;
     std::uint64_t pa_page = 0;
     std::uint8_t level = 3;
     std::uint8_t attr_index = 0;
@@ -146,6 +148,12 @@ private:
   [[nodiscard]] bool pa_within_ips(std::uint64_t pa, std::uint8_t ips_bits) const;
   void tlb_flush_all();
   void tlb_flush_va(std::uint64_t va);
+  [[nodiscard]] static constexpr std::uint64_t tlb_page_mask() { return (1ull << 44u) - 1ull; }
+  [[nodiscard]] static constexpr std::size_t tlb_set_index(std::uint64_t va_page) { return static_cast<std::size_t>(va_page) & (kTlbSets - 1u); }
+  [[nodiscard]] const TlbEntry* tlb_lookup(std::uint64_t va_page) const;
+  void tlb_insert(std::uint64_t va_page, const TranslationResult& result);
+  void tlb_insert_entry(std::uint64_t va_page, const TlbEntry& entry);
+  void tlb_invalidate_page(std::uint64_t va_page);
   void parse_pc_watch_list();
   void save_current_sp_to_bank();
   void load_current_sp_from_bank();
@@ -170,6 +178,10 @@ private:
 
   static std::int64_t sign_extend(std::uint64_t value, std::uint32_t bits);
 
+  static constexpr std::size_t kTlbEntries = 4096;
+  static constexpr std::size_t kTlbWays = 4;
+  static constexpr std::size_t kTlbSets = kTlbEntries / kTlbWays;
+
   Bus& bus_;
   GicV3& gic_;
   GenericTimer& timer_;
@@ -179,6 +191,8 @@ private:
   std::uint32_t exception_depth_ = 0;
   std::array<bool, 8> exception_is_irq_stack_{};
   std::array<std::uint32_t, 8> exception_intid_stack_{};
+  std::array<std::uint16_t, 8> exception_prev_prio_stack_{};
+  std::array<bool, 8> exception_prio_dropped_stack_{};
   bool sync_reported_ = false;
   bool trace_exceptions_ = false;
   bool trace_all_exceptions_ = false;
@@ -192,10 +206,12 @@ private:
   std::uint64_t trace_lower_sync_limit_ = 0;
   std::uint64_t trace_lower_sync_count_ = 0;
   std::unordered_map<std::uint64_t, bool> pc_watch_hits_;
+  bool pc_watch_enabled_ = false;
   bool waiting_for_interrupt_ = false;
   bool waiting_for_event_ = false;
   bool event_register_ = false;
   std::uint64_t icc_pmr_el1_ = 0xFF;
+  std::uint16_t running_priority_ = 0x100;
   std::uint64_t icc_ctlr_el1_ = 0;
   std::uint64_t icc_sre_el1_ = 0;
   std::uint64_t icc_bpr1_el1_ = 0;
@@ -205,7 +221,8 @@ private:
   bool exclusive_valid_ = false;
   std::uint64_t exclusive_addr_ = 0;
   std::uint8_t exclusive_size_ = 0;
-  std::unordered_map<std::uint64_t, TlbEntry> tlb_page_map_;
+  std::array<std::array<TlbEntry, kTlbWays>, kTlbSets> tlb_entries_{};
+  std::array<std::uint8_t, kTlbSets> tlb_next_replace_{};
   std::optional<TranslationFault> last_translation_fault_;
   std::uint64_t pc_ = 0;
   std::uint64_t steps_ = 0;

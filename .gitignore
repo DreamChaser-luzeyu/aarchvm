@@ -11,5 +11,6 @@ compile_commands.json
 busybox-1.37.0/
 **/*.log
 out/
+build-gprof/
 build-prof/
 gmon.out
