@@ -49,9 +49,13 @@ build_asm_prog fp_fcvtzu_scalar
 build_asm_prog fp_fcvt_flags
 build_asm_prog fp_scalar_fcsel
 build_asm_prog fp_scalar_fma
+build_asm_prog fp_scalar_misc
 build_asm_prog fpsimd_ins_xtl
 build_asm_prog fpsimd_misc_more
 build_asm_prog fpsimd_arith_shift_perm
+build_asm_prog fpsimd_fp_vector
+build_asm_prog fpsimd_structured_ls
+build_asm_prog fpsimd_widen_sat
 build_asm_prog pstate_pan
 build_asm_prog svc_sysreg_minimal
 build_asm_prog lse_atomics

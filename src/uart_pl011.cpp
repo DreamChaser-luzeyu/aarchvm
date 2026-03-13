@@ -12,6 +12,14 @@ namespace aarchvm {
 namespace {
 constexpr std::uint32_t kRxRis = 1u << 4;
 constexpr std::uint32_t kRtRis = 1u << 6;
+
+bool uart_trace_mmio_enabled() {
+  static const bool enabled = []() {
+    const char* value = std::getenv("AARCHVM_TRACE_UART_MMIO");
+    return value != nullptr && value[0] != '\0';
+  }();
+  return enabled;
+}
 }
 
 std::uint64_t UartPl011::read(std::uint64_t offset, std::size_t size) {
@@ -20,7 +28,7 @@ std::uint64_t UartPl011::read(std::uint64_t offset, std::size_t size) {
   }
 
   ++mmio_reads_;
-  const bool trace_mmio = (std::getenv("AARCHVM_TRACE_UART_MMIO") != nullptr);
+  const bool trace_mmio = uart_trace_mmio_enabled();
   if (trace_mmio && traced_read_offsets_.insert(offset).second) {
     std::cerr << "UART-READ offset=0x" << std::hex << offset << std::dec << "\n";
   }
@@ -115,7 +123,7 @@ void UartPl011::write(std::uint64_t offset, std::uint64_t value, std::size_t siz
     return;
   }
   ++mmio_writes_;
-  const bool trace_mmio = (std::getenv("AARCHVM_TRACE_UART_MMIO") != nullptr);
+  const bool trace_mmio = uart_trace_mmio_enabled();
   if (trace_mmio && traced_write_offsets_.insert(offset).second) {
     std::cerr << "UART-WRITE offset=0x" << std::hex << offset << " value=0x" << value << std::dec << "\n";
   }

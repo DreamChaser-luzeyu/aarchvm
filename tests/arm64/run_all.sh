@@ -81,9 +81,13 @@ run fp_fcvtzu_scalar.bin 200000
 run fp_fcvt_flags.bin 200000
 run fp_scalar_fcsel.bin 200000
 run fp_scalar_fma.bin 200000
+run fp_scalar_misc.bin 200000
 run fpsimd_ins_xtl.bin 300000
 run fpsimd_misc_more.bin 300000
 run fpsimd_arith_shift_perm.bin 300000
+run fpsimd_fp_vector.bin 400000
+run fpsimd_structured_ls.bin 400000
+run fpsimd_widen_sat.bin 400000
 run pstate_pan.bin 200000
 run svc_sysreg_minimal.bin 300000
 run lse_atomics.bin 400000

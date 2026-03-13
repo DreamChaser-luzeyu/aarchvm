@@ -9,12 +9,19 @@ namespace aarchvm {
 
 namespace {
 
+bool env_flag_enabled(const char* name) {
+  const char* value = std::getenv(name);
+  return value != nullptr && value[0] != '\0';
+}
+
 bool gic_trace_enabled() {
-  return std::getenv("AARCHVM_TRACE_GIC") != nullptr;
+  static const bool enabled = env_flag_enabled("AARCHVM_TRACE_GIC");
+  return enabled;
 }
 
 bool gic_pending_trace_enabled() {
-  return std::getenv("AARCHVM_TRACE_GIC_PENDING") != nullptr;
+  static const bool enabled = env_flag_enabled("AARCHVM_TRACE_GIC_PENDING");
+  return enabled;
 }
 
 void trace_gic(const char* tag, std::uint32_t intid, bool enable) {

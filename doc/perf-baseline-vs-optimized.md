@@ -213,3 +213,185 @@
 - `std::optional<TranslationResult>` 相关构造/判空符号已经不再停留在最核心热点组。
 - `Cpu::translate_address()` 仍然处在高频热点中，但现在热点更集中在函数本体、`Bus::read()`、`BusFastPath::read()`、`access_permitted()` 与寄存器/系统寄存器 helper 上。
 - 仍然明显存在的是 `std::optional<uint64_t>`，它主要来自 `Bus::read()` 返回值，这也再次指向下一阶段优化重点。
+
+## 第六轮波动复核
+
+为确认第六轮中几个运算类 case 的明显劣化是否来自代码回退，我又做了三次“从 BusyBox shell snapshot 直接启动 `bench_runner`”的复测，避免冷启动与 U-Boot 路径干扰。结果表明：
+- 多数 case 的 guest `steps`、`translate`、`tlb_lookup`、`bus_read` 等内部计数器在三次运行中完全一致或近乎一致。
+- 但 `host_ns` 波动很大，说明端到端时间主要被宿主机调度/频率/缓存状态噪声放大，而不是 guest 执行路径发生了同量级变化。
+
+### snapshot 复测摘要
+| case | steps 是否稳定 | host_ns 观测范围 |
+| --- | --- | ---: |
+| `base64-enc-4m` | 完全一致 | 20.10s - 27.17s |
+| `base64-dec-4m` | 完全一致 | 18.05s - 30.56s |
+| `fnv1a-16m` | 完全一致 | 24.19s - 32.81s |
+| `tlb-seq-hot-8m` | 完全一致 | 37.61ms - 84.91ms |
+| `tlb-seq-cold-32m` | 完全一致 | 44.81ms - 100.45ms |
+| `tlb-rand-32m` | 近乎一致 | 52.68ms - 115.48ms |
+
+### 复核结论
+- 第六轮代码改动确实改变了地址翻译热链的实现方式，但从重复实验看，并没有证据表明它必然造成了文档里那种幅度的稳定回退。
+- 相反，当前测量方法下，`host_ns` 已经足以在“内部 guest 计数器不变”的情况下发生非常大的波动。
+- 因此，如果目标是判断后续结构性优化是否真的有效，下一步更重要的不是继续做微小代码改动，而是引入更稳定的 benchmark 采样方法，例如：固定从 shell snapshot 起跑、重复多次取中位数，或者把 perf mailbox 的 case 单独拆成可独立运行脚本。
+
+## Release 模式切换
+
+当前主构建已经切到 `Release`：
+- `CMakeLists.txt` 在单配置生成器且未显式指定 `CMAKE_BUILD_TYPE` 时，默认使用 `Release`。
+- 当前构建目录 `build/` 的实际编译参数为 `-O3 -DNDEBUG`。
+
+### Release 回归验证
+- `tests/arm64/run_all.sh`：通过。
+- `tests/linux/build_linux_shell_snapshot.sh`：通过。
+- `AARCHVM_FUNCTIONAL_TIMEOUT=360s tests/linux/run_functional_suite.sh`：通过。
+
+这说明切换到 `Release` 后，当前主线的裸机指令测试、Linux 冷启动到 shell snapshot、以及 BusyBox 功能回归都没有引入行为回退。
+
+## Release 相对 Debug 的性能提升
+
+这次对比使用的是同一份当前源码，只切换 `CMAKE_BUILD_TYPE`，并使用同一套 `tests/linux/run_algorithm_perf.sh` 测试流程。
+
+构建与结果文件：
+- Debug 结果：`out/perf-debug-vs-release-debug-results.txt`
+- Release 结果：`out/perf-debug-vs-release-release-results.txt`
+
+### Debug vs Release 对比
+
+| case | debug host_ns | release host_ns | Release 相对 Debug 提升 |
+| --- | ---: | ---: | ---: |
+| `base64-enc-4m` | 23375218692 | 6964686507 | 70.20% |
+| `base64-dec-4m` | 22366702157 | 7242812003 | 67.62% |
+| `fnv1a-16m` | 21569307632 | 7102121288 | 67.07% |
+| `tlb-seq-hot-8m` | 41996373 | 12550518 | 70.12% |
+| `tlb-seq-cold-32m` | 45938540 | 13564623 | 70.47% |
+| `tlb-rand-32m` | 55415766 | 17172037 | 69.01% |
+
+### Debug vs Release 结论
+- 在当前代码基线下，`Release` 相对 `Debug` 的端到端 `host_ns` 提升约为 `67%` 到 `70%`。
+- 六个 case 的算术平均提升为 `69.08%`。
+- 这组结果说明：即便不继续修改模拟器实现，仅仅从 `Debug` 切到 `Release`，解释器主循环、MMU/TLB、总线访存和系统指令热链就能获得非常显著的整体收益。
+- 因此，后续所有性能结论都应优先基于 `Release` 构建讨论，否则很容易被非优化构建的额外开销掩盖真实热点。
+
+## Release 基线观测
+
+第一次 `Release` 基线已经执行，并保留了两类证据：
+- 运行记录：`out/perf-release-baseline.txt`
+- host `perf` 报告：`out/perf-release.report`
+
+需要说明的是：第一次 `Release` 基线的逐 case `PERF-RESULT` 明细当时来自 `out/perf-suite-results.txt`，但该文件后来被后续测试覆盖，没有单独归档。因此，当前文档无法再恢复“第一次 Release 基线”的完整逐 case 对比表，只能保留：
+- 回归已通过这一事实。
+- 基线热点分布。
+- 当前 `Release` 主线的逐 case 性能结果。
+
+### Release 基线热点
+
+基于 `out/perf-release.report`，`Release` 下最主要的热点已经重新集中到解释器本体，而不是调试/统计基础设施：
+
+| 热点 | 占比 |
+| --- | ---: |
+| `Cpu::exec_data_processing()` | 20.79% |
+| `Bus::read()` | 16.73% |
+| `Cpu::step()` | 14.09% |
+| `Cpu::exec_load_store()` | 11.63% |
+| `Cpu::translate_address()` | 10.03% |
+| `Cpu::exec_system()` | 8.55% |
+| `Cpu::try_take_irq()` | 4.72% |
+| `getenv` | 1.74% |
+
+这个基线有两个重要结论：
+- `Release` 之后，性能瓶颈已经比较干净地回到了 CPU 解释执行、地址翻译和总线访存热链。
+- 即便如此，仍能看到 `getenv` 这种与功能无关的固定成本留在热表里，说明还有一些低风险的“热路径杂音”可以继续清掉。
+
+## Release 下的小优化：trace getenv 缓存
+
+这轮只做了一个低风险小优化：
+- 把 CPU/GIC/timer/UART 中热路径 trace 开关的 `std::getenv()` 调用改成一次性静态缓存。
+- 相关文件：`src/cpu.cpp`、`src/gicv3.cpp`、`src/generic_timer.cpp`、`src/uart_pl011.cpp`。
+
+修改后重新执行：
+- `cmake --build build -j4`
+- `tests/arm64/run_all.sh`
+- `tests/linux/build_linux_shell_snapshot.sh`
+- `AARCHVM_FUNCTIONAL_TIMEOUT=360s tests/linux/run_functional_suite.sh`
+- `AARCHVM_PERF_TIMEOUT=900s tests/linux/run_algorithm_perf.sh`
+
+以上均已通过；结果文件与热点报告为：
+- `out/perf-release-opt1.txt`
+- `out/perf-suite-results-release-opt1.txt`
+- `out/perf-release-opt1.report`
+
+### 当前 Release 主线逐 case 结果
+
+| case | host_ns | steps | translate | tlb_lookup | tlb_miss | bus_read | gic_ack |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `base64-enc-4m` | 10385089524 | 162455933 | 226002612 | 24382169 | 5865 | 203901203 | 4874 |
+| `base64-dec-4m` | 11626692557 | 180216577 | 249463368 | 34860625 | 3546 | 227222387 | 5406 |
+| `fnv1a-16m` | 12638466450 | 219625734 | 287954453 | 24824284 | 4060 | 268440536 | 6588 |
+| `tlb-seq-hot-8m` | 27118554 | 455409 | 595991 | 68195 | 146 | 539365 | 14 |
+| `tlb-seq-cold-32m` | 29777839 | 471826 | 611984 | 84323 | 17142 | 622905 | 14 |
+| `tlb-rand-32m` | 35685861 | 526539 | 704658 | 113007 | 17207 | 708328 | 16 |
+
+### Release 优化后热点
+
+基于 `out/perf-release-opt1.report`，`getenv` 已经退出主热点表，剩余热点如下：
+
+| 热点 | 占比 |
+| --- | ---: |
+| `Cpu::exec_data_processing()` | 20.82% |
+| `Bus::read()` | 16.49% |
+| `Cpu::step()` | 15.21% |
+| `Cpu::exec_load_store()` | 11.52% |
+| `Cpu::translate_address()` | 10.05% |
+| `Cpu::exec_system()` | 8.46% |
+| `Cpu::try_take_irq()` | 5.09% |
+| `Bus::write()` | 1.01% |
+
+### Release 优化后的结论
+- 这轮优化的主要价值是“消掉热路径里的无关开销”，而不是改变 guest 指令行为，因此更可信的收益信号来自 `perf report`，不是单次 `host_ns` 波动。
+- `getenv` 从主热点中消失，说明这一类低风险 fixed cost 已经被压掉。
+- 但端到端性能的主体瓶颈并没有改变，仍然集中在三条热链：
+  - 指令执行分发与整数/系统指令解释。
+  - `translate_address()` 代表的 MMU/TLB/权限检查路径。
+  - `Bus::read()` 代表的访存返回路径。
+
+## 当前代码结构下的后续优化方向
+
+结合 `Release` 下的 `perf` 结果，当前最值得继续推进的方向如下。
+
+### 1. 压缩 `Bus::read()` / `Bus::write()` 的返回与分派成本
+- 当前 `Bus::read()` 仍然是第二大热点，说明“即便 fast path 已经固定编码”，通用总线 API 层本身仍然有明显成本。
+- 下一步可考虑的低到中风险方向：
+  - 让 RAM 热路径进一步内联化，减少 `Bus::read()` 函数边界本身的固定成本。
+  - 把 `std::optional<uint64_t>` 风格的返回协议继续收缩成更轻量的 `bool + out` 形式。
+  - 对常见 1/2/4/8 字节 RAM 访问做更扁平的专门路径，减少分支与 `memcpy` 式封装。
+
+### 2. 继续压缩 `Cpu::step()` 的固定成本
+- `Cpu::step()` 仍是非常高的固定热点，说明每条指令都在为取指、解码、异常检查、IRQ 检查承担固定管理开销。
+- 后续可以继续看：
+  - 取指路径是否还能与 fetch 翻译做更紧的热页缓存结合。
+  - dispatch 结构是否能减少重复位段提取和层层 helper 跳转。
+  - `try_take_irq()` 是否还能在“确定无中断变化”的区间里进一步少做检查。
+
+### 3. 继续针对 `translate_address()` 做结构性收缩
+- 现在热点已经不是 `std::optional<TranslationResult>` 本身，而是 `translate_address()` 函数体与其后续权限检查、页表步进、TLB 填充逻辑。
+- 后续收益更可能来自：
+  - 热页命中的更短路径。
+  - page walk 中 descriptor 读取与属性合成的分支压缩。
+  - 把 fetch/read/write 三种 access 共用路径里真正不共享的分支拆开，减少无关判断。
+
+### 4. `exec_system()` 偏热，说明 sysreg/系统指令路径值得单独拆看
+- 当前 `exec_system()` 约 8.5%，比例不低。
+- 这通常意味着 Linux 用户态 benchmark 期间，异常返回、系统寄存器访问、cache/TLB/system 指令路径仍有不小固定成本。
+- 若下一轮继续做热点跟踪，建议单独量化：
+  - `SystemRegisters::read/write()` 的占比。
+  - 进入 `exec_system()` 后到底是哪些子类指令最常出现。
+
+### 5. 真正的下一阶段收益，可能来自更“解释器结构级”的优化
+- 到了当前阶段，再继续堆零散 helper 内联，收益大概率已经不大。
+- 更有希望的方向反而是：
+  - 预解码或更紧凑的 dispatch 结构。
+  - 把设备同步进一步事件化，继续减少每条指令的固定轮询成本。
+  - 让 MMU/TLB 热路径和 RAM fast path 更强地协同，而不是每次都穿越多层通用接口。
+
+换句话说，当前性能还没有接近“解释执行的极限”；它更像是已经把最明显的低风险噪声压掉了，接下来要进入真正的结构性优化阶段。

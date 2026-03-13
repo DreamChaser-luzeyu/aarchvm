@@ -13,8 +13,14 @@ namespace aarchvm {
 
 namespace {
 
+bool env_flag_enabled(const char* name) {
+  const char* value = std::getenv(name);
+  return value != nullptr && value[0] != '\0';
+}
+
 bool timer_trace_enabled() {
-  return std::getenv("AARCHVM_TRACE_TIMER") != nullptr;
+  static const bool enabled = env_flag_enabled("AARCHVM_TRACE_TIMER");
+  return enabled;
 }
 
 void trace_timer(const char* tag, std::uint64_t a = 0, std::uint64_t b = 0, std::uint64_t c = 0) {
