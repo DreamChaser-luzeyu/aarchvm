@@ -19,6 +19,11 @@ FASTPATH="${AARCHVM_BUS_FASTPATH:-1}"
 STOP_PATTERN="${AARCHVM_STOP_ON_UART_PATTERN:-~ # }"
 UBOOT_DELAY_SEC="${AARCHVM_UBOOT_COMMAND_DELAY_SEC:-3}"
 PROMPT_DELAY_SEC="${AARCHVM_UBOOT_PROMPT_DELAY_SEC:-1}"
+AARCHVM_ARGS_RAW="${AARCHVM_ARGS:-}"
+AARCHVM_EXTRA_ARGS=()
+if [[ -n "$AARCHVM_ARGS_RAW" ]]; then
+  read -r -a AARCHVM_EXTRA_ARGS <<< "$AARCHVM_ARGS_RAW"
+fi
 INITRD="out/initramfs-usertests.cpio"
 INITRD_SIZE_HEX=$(printf '0x%x' "$(stat -c '%s' "$INITRD")")
 
@@ -36,7 +41,7 @@ set -o pipefail
 AARCHVM_PRINT_SUMMARY=1 \
 AARCHVM_BUS_FASTPATH="$FASTPATH" \
 AARCHVM_TIMER_SCALE="$TIMER_SCALE" \
-timeout "$TIMEOUT_SEC" ./build/aarchvm \
+timeout "$TIMEOUT_SEC" ./build/aarchvm "${AARCHVM_EXTRA_ARGS[@]}" \
   -bin u-boot-2026.01/build-qemu_arm64/u-boot.bin \
   -load 0x0 \
   -entry 0x0 \
@@ -59,7 +64,7 @@ echo "running snapshot restore sanity check..."
 AARCHVM_PRINT_SUMMARY=1 \
 AARCHVM_BUS_FASTPATH="$FASTPATH" \
 AARCHVM_TIMER_SCALE="$VERIFY_TIMER_SCALE" \
-timeout "$VERIFY_TIMEOUT_SEC" ./build/aarchvm \
+timeout "$VERIFY_TIMEOUT_SEC" ./build/aarchvm "${AARCHVM_EXTRA_ARGS[@]}" \
   -snapshot-load "$SNAPSHOT" \
   -steps "$VERIFY_STEPS" \
   </dev/null > "$VERIFY_LOG" 2>&1

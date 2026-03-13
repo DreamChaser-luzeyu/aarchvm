@@ -355,6 +355,58 @@
   - `translate_address()` 代表的 MMU/TLB/权限检查路径。
   - `Bus::read()` 代表的访存返回路径。
 
+## 中低风险优化尝试：Bus/GIC 热路径收缩
+
+这一轮做了三类中低风险改动：
+- `Bus` 增加 `bool + out` 读接口，并把 CPU 取指、页表 descriptor 读取、MMU 常见读路径切过去，减少热路径上的 `std::optional<uint64_t>` 构造。
+- `GicV3::acknowledge()` 改为 `bool + out`，避免 `try_take_irq()` 在“无中断可取”场景下频繁构造空 `optional`。
+- CPU 侧加入 IRQ 阈值缓存，把 `min(PMR, running_priority)` 从“每步现算”改成按状态变化更新。
+
+### 回归验证
+- `tests/arm64/run_all.sh`：通过。
+- `tests/linux/build_linux_shell_snapshot.sh`：通过。
+- `AARCHVM_FUNCTIONAL_TIMEOUT=360s tests/linux/run_functional_suite.sh`：通过。
+
+### 结果文件
+- 结果：`out/perf-lowrisk-opt3-results.txt`
+- 日志：`out/perf-lowrisk-opt3.log`
+- host perf 报告：`out/perf-lowrisk-opt3.report`
+
+### 与上一份已归档 Release 结果的对比
+
+这里使用上一份已归档的 Release 主线结果 `out/perf-suite-results-release-opt1.txt` 作为参照。
+
+| case | 参照 host_ns | 当前 host_ns | 提升 |
+| --- | ---: | ---: | ---: |
+| `base64-enc-4m` | 10385089524 | 9604452287 | 7.52% |
+| `base64-dec-4m` | 11626692557 | 11816621963 | -1.63% |
+| `fnv1a-16m` | 12638466450 | 12628215203 | 0.08% |
+| `tlb-seq-hot-8m` | 27118554 | 37773365 | -39.29% |
+| `tlb-seq-cold-32m` | 29777839 | 32939345 | -10.62% |
+| `tlb-rand-32m` | 35685861 | 36703898 | -2.85% |
+
+### 这一轮的结论
+- 这轮修改没有带来“稳定且全局为正”的端到端提速。
+- 标量大 workload 中，`base64-enc-4m` 有一次明显正收益，`fnv1a-16m` 基本持平；但三个 TLB 小 case 在这次采样里没有改善。
+- 因此，从 `host_ns` 看，这轮更像是一次“热点重分布”，而不是已经验证成功的吞吐优化。
+
+### perf 热点变化
+
+对比 `out/perf-release-opt1.report` 与 `out/perf-lowrisk-opt3.report`，可以看到一些方向上正确、但尚未转化成稳定 wall-clock 收益的变化：
+
+| 热点 | 之前 | 当前 |
+| --- | ---: | ---: |
+| `Cpu::try_take_irq()` | 5.09% | 4.66% |
+| `Bus::read()` | 16.49% | 5.47% |
+| `Cpu::exec_load_store()` 读 lambda | 3.35% | 7.55% |
+
+这说明：
+- `try_take_irq()` 的固定成本确实被压低了一点。
+- `Bus::read()` 符号本身的占比明显下降。
+- 但部分成本被重新分摊到了 `exec_load_store()` 里的读辅助路径上，整体没有换来稳定的总耗时下降。
+
+所以，这一轮可以视为一次“正确但不够”的中低风险尝试：功能稳定，热点有变化，但尚不足以证明总吞吐已经明显提升。
+
 ## 当前代码结构下的后续优化方向
 
 结合 `Release` 下的 `perf` 结果，当前最值得继续推进的方向如下。
@@ -395,3 +447,245 @@
   - 让 MMU/TLB 热路径和 RAM fast path 更强地协同，而不是每次都穿越多层通用接口。
 
 换句话说，当前性能还没有接近“解释执行的极限”；它更像是已经把最明显的低风险噪声压掉了，接下来要进入真正的结构性优化阶段。
+## 第七轮：最小预解码闭环
+
+这一轮引入的是一个可切换、保留慢路径的最小 predecode/decode-cache 闭环，目标不是一次性把解释器改成块缓存，而是先验证以下几件事：
+- 在不移除原慢路径的前提下，能否为高频整数/分支指令提供一条更短的执行路径。
+- 自修改代码、IC 失效、TLBI、TTBR/TCR/SCTLR 切换后，decode cache 是否能保持正确失效。
+- 在 Linux 用户态 workload 上，这个最小闭环是否已经能带来可观察收益。
+
+### 这一轮实现内容
+- 新增命令行选项 `-decode <fast|slow>`，默认 `fast`。
+- `fast` 模式下，`Cpu::step()` 在正常取指后，会优先查询 decode cache；若命中且属于已支持的预解码类型，则走 `exec_decoded()`；否则自动回退到原有慢路径。
+- `slow` 模式完全保留原先解释执行逻辑，用于回归、对比和问题定位。
+- 当前预解码覆盖的是最小高频整数子集：
+  - `B/BL (imm)`
+  - `B.cond`
+  - `CBZ/CBNZ`
+  - `TBZ/TBNZ`
+  - `MOVZ/MOVK/MOVN`
+  - `ADD/SUB (imm)`
+  - `ADD/SUB (shifted register)`
+- 已接入保守失效钩子，确保语义正确性：
+  - CPU 通过 MMU 写内存时
+  - `DC ZVA`
+  - `IC IALLU` / `IC IALLUIS` / `IC IVAU`
+  - `TLBI` 指令族
+  - `SCTLR_EL1` / `TTBR0_EL1` / `TTBR1_EL1` / `TCR_EL1` 改写
+  - reset / snapshot load / binary load
+
+### 新增裸机单元测试
+- `tests/arm64/predecode_dyn_codegen.S`
+  - 目标：验证动态生成代码 / 自修改代码后，decode cache 能被正确失效，不会执行陈旧译码。
+  - 期望输出：`AB`
+- `tests/arm64/predecode_va_exec_switch.S`
+  - 目标：验证虚拟地址空间切换后，同一 VA 下的执行不会误复用旧译码结果。
+  - 期望输出：`ABA`
+
+### 功能验证
+- `tests/arm64/run_all.sh`：通过。
+- `tests/linux/build_linux_shell_snapshot.sh`：通过。
+- `AARCHVM_FUNCTIONAL_TIMEOUT=360s tests/linux/run_functional_suite.sh`：通过。
+- 新增的两条 predecode 单测在 `fast` / `slow` 两种模式下都通过：
+  - `predecode_dyn_codegen.bin`：`AB`
+  - `predecode_va_exec_switch.bin`：`ABA`
+
+### 结果文件
+- `fast`：`out/perf-predecode-fast-results.txt`
+- `slow`：`out/perf-predecode-slow-results.txt`
+- `fast` 日志：`out/perf-predecode-fast.log`
+- `slow` 日志：`out/perf-predecode-slow.log`
+
+### Fast vs Slow 对比
+| case | slow host_ns | fast host_ns | 提升 |
+| --- | ---: | ---: | ---: |
+| `base64-enc-4m` | 10386126604 | 9836525120 | 5.29% |
+| `base64-dec-4m` | 12012712779 | 10288330563 | 14.35% |
+| `fnv1a-16m` | 11774782995 | 6654138192 | 43.49% |
+| `tlb-seq-hot-8m` | 12558498 | 21374770 | -70.20% |
+| `tlb-seq-cold-32m` | 13654272 | 16692573 | -22.25% |
+| `tlb-rand-32m` | 16225114 | 20825163 | -28.35% |
+
+### 这一轮结果解释
+- 结果呈现明显分化，而不是“统一正收益”。
+- 三个偏整数/分支、长时间顺序运行的 case 明显受益，尤其 `fnv1a-16m`，说明当前这批已预解码的整数/分支指令已经覆盖到了一段真实热路径。
+- 三个 TLB 压力 case 反而回退，说明当前最小闭环还没有触及它们的主热点。这个结论和实现范围是一致的：
+  - 这一轮没有预解码 `load/store` 主家族。
+  - 没有预解码 MMU/TLB 相关的访存密集路径。
+  - decode cache 自身也引入了额外的查询与失效维护成本。
+- 因此，这一轮更准确的结论不是“预解码已经全局提速”，而是：
+  - 可切换的最小闭环已经跑通；
+  - 正确性回归通过；
+  - 对整数/分支热点已经出现可见收益；
+  - 若想继续扩大收益面，下一步应优先覆盖 `load/store` 高频子集，而不是继续只加更多整数指令。
+
+### 当前边界
+- 这还不是块级缓存，也不是完整 IR/JIT；仍然是“取指后按单条指令执行”的解释器结构。
+- 当前 decode cache 采用保守失效策略，优先保证正确性，而不是最细粒度性能。
+- 现阶段它更像后续结构性优化的地基：已经证明“保留慢路径 + 增量引入快路径”这条路线是可行的。
+
+## 第八轮：load/store 最小闭环
+
+这一轮继续沿用“保留慢路径 + 可切换快路径”的策略，把 predecode 的覆盖面从整数/分支扩到最常见的一批标量 load/store 形式，验证两个问题：
+- 对 Linux 用户态热点中的数据访存，最小 load/store 快路径是否已经足以扩大收益面。
+- 在不引入更激进块缓存的前提下，generic load/store decoded exec 的固定成本是否可接受。
+
+### 这一轮实现内容
+- 在 decode kind 中新增 `LoadStore` 快路径类别。
+- 新增通用 MMU 访存 helper，统一快路径与慢路径的 data abort / code-write invalidation / exclusive monitor 清理语义。
+- 当前新覆盖的 load/store 子集：
+  - unsigned offset：`LDR/STR B/H/W/X`
+  - unsigned offset：`LDRSB/LDRSH/LDRSW`
+  - post-index / pre-index：最小 no-sign-extend 家族 `LDR/STR B/H/W/X`
+- 仍然保留原 `exec_load_store()`，未覆盖到的形式继续自动回退到慢路径。
+
+### 新增裸机单元测试
+- `tests/arm64/predecode_load_store_min.S`
+  - 覆盖 unsigned offset 的 `LDR/STR B/H/W/X`、`LDRSB/LDRSH/LDRSW`
+  - 覆盖 post-index / pre-index 的最小 `LDR/STR B/W`
+  - 覆盖 `SP` 作为 base 的路径
+  - `fast` / `slow` 期望输出都为 `L`
+
+### 功能验证
+- `tests/arm64/run_all.sh`：通过。
+- `tests/linux/build_linux_shell_snapshot.sh`：通过。
+- `AARCHVM_FUNCTIONAL_TIMEOUT=360s tests/linux/run_functional_suite.sh`：通过。
+- 新增 `predecode_load_store_min.bin` 在 `fast` / `slow` 两种模式下都通过。
+
+### 结果文件
+首轮对比：
+- `fast`：`out/perf-predecode-loadstore-fast-results.txt`
+- `slow`：`out/perf-predecode-loadstore-slow-results.txt`
+
+反向顺序复测：
+- `slow`：`out/perf-predecode-loadstore-slow-rerun-results.txt`
+- `fast`：`out/perf-predecode-loadstore-fast-rerun-results.txt`
+
+### 测量说明
+- 由于这一轮首轮与反向顺序复测的 `host_ns` 波动较大，单次结果不够稳。
+- 因此这里采用“同一 case 两次 fast、两次 slow，各自取中位数”的方式给出结论。
+- 两次测量中，guest 内部计数器如 `steps`、`translate`、`bus_read`、`ram_write` 基本一致，因此差异主要反映宿主机时间与解释器固定成本，而不是 guest 行为变化。
+
+### Fast vs Slow 中位数对比
+| case | slow median host_ns | fast median host_ns | 提升 |
+| --- | ---: | ---: | ---: |
+| `base64-enc-4m` | 5400051078 | 6451835198 | -19.48% |
+| `base64-dec-4m` | 5558519766 | 6710032552 | -20.72% |
+| `fnv1a-16m` | 6286994223 | 6883393437 | -9.49% |
+| `tlb-seq-hot-8m` | 16783918 | 19485330 | -16.10% |
+| `tlb-seq-cold-32m` | 13854323 | 16179937 | -16.79% |
+| `tlb-rand-32m` | 17464384 | 19966119 | -14.32% |
+
+### 这一轮结果解释
+- 和上一轮“整数/分支最小闭环”不同，这一轮在两次测量取中位数后，结论已经比较稳定：当前版本的 load/store 快路径整体是负收益。
+- 这说明现阶段的 `LoadStore` decoded exec 还没有比原来的 `exec_load_store()` 更短，反而叠加了：
+  - decode cache 查询成本
+  - generic `LoadStore` 分派成本
+  - 通用 helper 带来的额外函数边界与条件分支
+- 也就是说，虽然功能闭环已经成立，但这条路径还没有达到“值得替代慢路径热点分发”的成熟度。
+
+### 当前判断
+- 这一轮的主要价值在于：
+  - 证明了 load/store 语义也可以安全接入 predecode 框架；
+  - 验证了 `SP` base、sign-ext load、pre/post-index 这些边界在 fast/slow 下都一致；
+  - 明确表明“仅把慢路径逻辑机械搬进 decoded exec”并不会自动带来性能收益。
+- 下一步若还要继续扩 predecode，重点不该是继续扩大覆盖率，而应先压缩 decoded load/store 自身的固定成本，例如：
+  - 针对 `LDR/STR B/H/W/X [Xn,#imm]` 做更扁平的专门执行路径，而不是 generic switch + helper 组合。
+  - 让 decoded fast path 更直接复用 TLB/RAM hot path，减少额外函数边界。
+  - 或者干脆把优化重心转向“块级预解码/预分派”，避免每条 load/store 都重复经过解释器级别的统一入口。
+
+## 第九轮：专门化 `LDR/STR [Xn,#imm]` 快路径
+
+第八轮证明了一件事：把 load/store 机械搬进 generic decoded exec 并不会自动变快。于是这一轮不再扩大覆盖率，而是只盯最常见、最热的一条路径：
+- `LDR/STR B/H/W/X [Xn,#imm]`
+
+目标是把这条路径从 generic `LoadStore` 分发里剥离出来，压缩到更短的执行链，并尽量直接复用数据访问的 TLB/RAM 热路径。
+
+### 这一轮实现内容
+- 在 decode kind 中新增 `LoadStoreUImm`，专门承载 unsigned-immediate 的 `LDR/STR B/H/W/X`。
+- `LoadStoreUImm` 在执行时不再走 generic `LoadStore` 的 sign/writeback 分派逻辑，而是直接执行：
+  - base + imm 地址计算
+  - data-translation fast helper
+  - `Bus::read/write`
+  - 寄存器写回
+- 新增 `translate_data_address_fast()`：
+  - 针对 data access 单独复用 `tlb_last_data_`
+  - 避免为最热数据访问路径搬运完整 `TranslationResult`
+  - miss 时仍回落到 page walk + TLB fill，保持原有语义
+
+### 中途发现并修复的问题
+- 第一次把 `LoadStoreUImm` 接起来后，`perf` 明确显示 `Cpu::on_code_write()` 成为第一热点。
+- 根因不是访存本身，而是 decode cache 失效路径还在用“扫描整个 decode page 数组”的方式做 `VA/PA` 失效。
+- 由于普通数据 store 也会经过这条路径，这个 O(N) 失效开销被放大到了不可接受的程度。
+- 随后把 `invalidate_decode_va_page()` / `invalidate_decode_pa_page()` 改成了 direct-mapped 的定点失效，这一热点随即下降到几乎可以忽略。
+
+### 功能验证
+- `tests/arm64/run_all.sh`：通过。
+- `tests/linux/build_linux_shell_snapshot.sh`：通过。
+- `AARCHVM_FUNCTIONAL_TIMEOUT=360s tests/linux/run_functional_suite.sh`：通过。
+- `predecode_load_store_min.bin` 在 `fast` / `slow` 下继续通过。
+
+### 结果文件
+性能对比：
+- `fast`：`out/perf-predecode-uimm2-fast-results.txt`
+- `slow`：`out/perf-predecode-uimm2-slow-results.txt`
+- `slow rerun`：`out/perf-predecode-uimm2-slow-rerun-results.txt`
+- `fast rerun`：`out/perf-predecode-uimm2-fast-rerun-results.txt`
+
+热点追踪：
+- `perf data`：`out/perf-predecode-uimm2-fast.perf.data`
+- `perf report`：`out/perf-predecode-uimm2-fast.report`
+
+### 测量说明
+- 与前几轮一样，`host_ns` 仍存在宿主机侧波动，因此这里仍采用“两次 fast、两次 slow，各自取中位数”的方式判断。
+- 两轮中 guest 内部计数器保持一致量级，因此这次对比主要反映宿主机耗时与解释器固定成本的变化。
+
+### Fast vs Slow 中位数对比
+| case | slow median host_ns | fast median host_ns | 提升 |
+| --- | ---: | ---: | ---: |
+| `base64-enc-4m` | 7897606551 | 6250131218 | 20.86% |
+| `base64-dec-4m` | 8562295699 | 6057772263 | 29.25% |
+| `fnv1a-16m` | 9024054470 | 7542869397 | 16.41% |
+| `tlb-seq-hot-8m` | 23746195 | 16608722 | 30.06% |
+| `tlb-seq-cold-32m` | 22824542 | 14032309 | 38.52% |
+| `tlb-rand-32m` | 28177568 | 17696157 | 37.20% |
+
+### 这一轮结果解释
+- 这一轮和第八轮相比，结论发生了反转：
+  - 第八轮的 generic load/store 快路径整体负收益。
+  - 这一轮的专门化 `LoadStoreUImm` 路径，在两轮取中位数后已呈现全局正收益。
+- 这说明当前阶段真正有效的不是“覆盖更多”，而是“把最热路径做窄、做短”。
+- 特别是三类 TLB case 的收益很明显，说明：
+  - 数据访问热路径中，地址翻译和总线读写前后的固定解释器开销已经被压掉了一部分。
+  - 把 unsigned-immediate 的标量访存从 generic 分派里剥离出来是值得继续的方向。
+
+### 快路径热点追踪结果
+基于 `out/perf-predecode-uimm2-fast.report`，当前最值得关注的 user-space 热点大致如下：
+- `Cpu::step()`：约 17.6%
+- `Cpu::exec_data_processing()`：约 14.6%
+- `Cpu::translate_address()`：约 10.7%
+- `Cpu::exec_decoded()`：约 9.6%
+- `Cpu::lookup_decoded()`：约 9.4%
+- `Bus::read()`：约 6.4%
+- `Cpu::exec_load_store()`：约 6.0%
+- `Cpu::try_take_irq()`：约 4.4%
+- `Cpu::exec_system()`：约 4.2%
+- `Cpu::decode_insn()`：约 3.1%
+- `Cpu::translate_data_address_fast()`：约 2.0%
+- `Cpu::on_code_write()`：约 0.25%
+
+### 热点解读
+- `on_code_write()` 已经不再是主要瓶颈，说明 direct-mapped 失效修正是必要且有效的。
+- 当前最大的问题重新回到了“解释器主循环本身”：
+  - `step()`
+  - `exec_data_processing()`
+  - `translate_address()`
+  - `lookup_decoded()` / `exec_decoded()`
+- `exec_load_store()` 仍有 6% 左右，说明大量未进入专门快路径的 load/store 形式还在慢路径里消耗明显成本。
+- `Bus::read()` 仍然有 6% 左右，说明即便总线 fast path 已存在，RAM 热路径在接口层面仍然有可压缩空间。
+
+### 当前结论
+- 这轮验证了一个更明确的方向：
+  - “窄而专”的 decoded fast path 是有效的。
+  - “宽而泛”的 generic decoded fast path 在当前结构下反而容易变慢。
+- 未来如果继续沿 predecode 方向推进，最优先的不应该是盲目增加更多指令覆盖，而应继续挑最热、最单纯、最容易压平的子集逐个专门化。

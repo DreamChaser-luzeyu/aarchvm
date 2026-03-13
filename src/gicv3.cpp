@@ -589,7 +589,7 @@ bool GicV3::has_pending(std::uint8_t pmr) const {
   return best_pending_valid_ && best_pending_priority_ < pmr;
 }
 
-std::optional<std::uint32_t> GicV3::acknowledge() {
+bool GicV3::acknowledge(std::uint32_t& intid) {
   ++perf_counters_.acknowledge_calls;
   for (std::uint32_t word = 0; word < kWords; ++word) {
     const std::uint64_t bits = pending_enabled_bits_[word];
@@ -597,23 +597,25 @@ std::optional<std::uint32_t> GicV3::acknowledge() {
       continue;
     }
     const std::uint32_t bit = static_cast<std::uint32_t>(__builtin_ctzll(bits));
-    const std::uint32_t intid = word * 64u + bit;
+    intid = word * 64u + bit;
     set_pending_bit(intid, false);
     set_active_bit(intid, true);
-    return intid;
+    return true;
   }
-  return std::nullopt;
+  intid = 1023u;
+  return false;
 }
 
-std::optional<std::uint32_t> GicV3::acknowledge(std::uint8_t pmr) {
+bool GicV3::acknowledge(std::uint8_t pmr, std::uint32_t& intid) {
   ++perf_counters_.acknowledge_calls;
   if (!best_pending_valid_ || best_pending_priority_ >= pmr) {
-    return std::nullopt;
+    intid = 1023u;
+    return false;
   }
-  const std::uint32_t intid = best_pending_intid_;
+  intid = best_pending_intid_;
   set_pending_bit(intid, false);
   set_active_bit(intid, true);
-  return intid;
+  return true;
 }
 
 void GicV3::eoi(std::uint32_t intid) {

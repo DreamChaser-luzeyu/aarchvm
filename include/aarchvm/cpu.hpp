@@ -6,6 +6,7 @@
 #include "aarchvm/perf_types.hpp"
 #include "aarchvm/system_registers.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -23,6 +24,9 @@ public:
   bool step();
 
   void reset(std::uint64_t pc);
+  void set_predecode_enabled(bool enabled);
+  [[nodiscard]] bool predecode_enabled() const { return predecode_enabled_; }
+  void invalidate_decode_all();
   void set_cntvct(std::uint64_t value);
   void set_sp(std::uint64_t value);
   void set_x(std::uint32_t idx, std::uint64_t value) {
@@ -132,6 +136,48 @@ private:
     WalkAttributes walk_attrs{};
   };
 
+  enum class DecodedKind : std::uint8_t {
+    Fallback,
+    BImm,
+    BCond,
+    Cbz,
+    Tbz,
+    MovWide,
+    AddSubImm,
+    AddSubShifted,
+    LoadStoreUImm,
+    LoadStore,
+    LogicalShifted,
+    LogicalImm,
+    Bitfield,
+  };
+
+  struct DecodedInsn {
+    DecodedKind kind = DecodedKind::Fallback;
+    std::uint32_t raw = 0;
+    std::int32_t simm = 0;
+    std::uint32_t imm = 0;
+    std::uint8_t rd = 31;
+    std::uint8_t rn = 31;
+    std::uint8_t rm = 31;
+    std::uint8_t aux = 0;
+    std::uint8_t aux2 = 0;
+    std::uint16_t flags = 0;
+  };
+
+  static constexpr std::size_t kDecodePageBytes = 4096;
+  static constexpr std::size_t kDecodePageSlots = kDecodePageBytes / 4;
+  static constexpr std::size_t kDecodeCachePages = 64;
+
+  struct DecodePage {
+    bool valid = false;
+    std::uint64_t context_epoch = 0;
+    std::uint64_t va_page = 0;
+    std::uint64_t pa_page = 0;
+    std::array<DecodedInsn, kDecodePageSlots> insns{};
+    std::array<std::uint8_t, kDecodePageSlots> decoded{};
+  };
+
   bool try_take_irq();
   void enter_sync_exception(std::uint64_t fault_pc, std::uint32_t ec, std::uint32_t iss, bool far_valid, std::uint64_t far);
   [[nodiscard]] bool translate_address(std::uint64_t va,
@@ -186,9 +232,26 @@ private:
   void tlb_insert(std::uint64_t va_page, const TranslationResult& result);
   void tlb_insert_entry(std::uint64_t va_page, const TlbEntry& entry);
   void tlb_invalidate_page(std::uint64_t va_page);
+  void data_abort(std::uint64_t va);
+  [[nodiscard]] bool translate_data_address_fast(std::uint64_t va, bool write, std::uint64_t* out_pa);
+  [[nodiscard]] bool mmu_read_value(std::uint64_t va, std::size_t size, std::uint64_t* out);
+  [[nodiscard]] bool mmu_write_value(std::uint64_t va, std::uint64_t value, std::size_t size);
+  [[nodiscard]] DecodedInsn decode_insn(std::uint32_t insn) const;
+  [[nodiscard]] const DecodedInsn* lookup_decoded(std::uint64_t va, std::uint64_t pa, std::uint32_t insn);
+  bool exec_decoded(const DecodedInsn& decoded);
+  void invalidate_decode_va(std::uint64_t va, std::size_t size);
+  void invalidate_decode_pa(std::uint64_t pa, std::size_t size);
+  void invalidate_decode_va_page(std::uint64_t va_page);
+  void invalidate_decode_pa_page(std::uint64_t pa_page);
+  void invalidate_decode_tlb_context();
+  void on_code_write(std::uint64_t va, std::uint64_t pa, std::size_t size);
   void parse_pc_watch_list();
   void save_current_sp_to_bank();
   void load_current_sp_from_bank();
+  [[nodiscard]] std::uint16_t compute_irq_threshold() const {
+    return std::min<std::uint16_t>(static_cast<std::uint16_t>(icc_pmr_el1_ & 0xFFu), running_priority_);
+  }
+  void refresh_irq_threshold_cache() { irq_delivery_threshold_ = compute_irq_threshold(); }
 
   [[nodiscard]] std::uint64_t reg(std::uint32_t idx) const {
     if (idx >= 31) {
@@ -292,8 +355,13 @@ private:
   std::uint64_t steps_ = 0;
   std::uint64_t irq_query_epoch_ = 0;
   std::uint16_t irq_query_threshold_ = 0;
+  std::uint16_t irq_delivery_threshold_ = 0xFF;
   bool irq_query_negative_valid_ = false;
   bool halted_ = false;
+  bool predecode_enabled_ = true;
+  std::uint64_t decode_context_epoch_ = 1;
+  std::array<DecodePage, kDecodeCachePages> decode_pages_{};
+  DecodePage* decode_last_page_ = nullptr;
 };
 
 } // namespace aarchvm

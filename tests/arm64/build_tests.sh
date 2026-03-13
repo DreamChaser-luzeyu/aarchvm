@@ -102,6 +102,9 @@ build_asm_prog sp_ccmp_path
 build_asm_prog sp_alias_paths
 build_asm_prog addsub_shift_more
 build_asm_prog uart_irq_rx_spaced
+build_asm_prog predecode_dyn_codegen
+build_asm_prog predecode_va_exec_switch
+build_asm_prog predecode_load_store_min
 
 if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
   aarch64-linux-gnu-gcc -nostdlib -static -ffreestanding -fomit-frame-pointer -fno-stack-protector \

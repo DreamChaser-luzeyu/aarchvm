@@ -26,8 +26,8 @@ public:
   void set_level(std::uint32_t intid, bool asserted);
   [[nodiscard]] bool has_pending() const;
   [[nodiscard]] bool has_pending(std::uint8_t pmr) const;
-  [[nodiscard]] std::optional<std::uint32_t> acknowledge();
-  [[nodiscard]] std::optional<std::uint32_t> acknowledge(std::uint8_t pmr);
+  [[nodiscard]] bool acknowledge(std::uint32_t& intid);
+  [[nodiscard]] bool acknowledge(std::uint8_t pmr, std::uint32_t& intid);
   void eoi(std::uint32_t intid);
   [[nodiscard]] bool pending(std::uint32_t intid) const;
   [[nodiscard]] bool enabled(std::uint32_t intid) const;

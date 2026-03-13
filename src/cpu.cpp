@@ -29,6 +29,15 @@ bool branch_zero_trace_enabled() {
   return enabled;
 }
 
+constexpr std::uint16_t kDecodedFlagSf = 1u << 0;
+constexpr std::uint16_t kDecodedFlagSetFlags = 1u << 1;
+constexpr std::uint16_t kDecodedFlagSub = 1u << 2;
+constexpr std::uint16_t kDecodedFlagNonZero = 1u << 3;
+constexpr std::uint16_t kDecodedFlagLink = 1u << 4;
+constexpr std::uint16_t kDecodedFlagLoad = 1u << 5;
+constexpr std::uint16_t kDecodedFlagSigned = 1u << 6;
+constexpr std::uint16_t kDecodedFlagResult64 = 1u << 7;
+
 std::uint64_t ones(std::uint32_t bits) {
   if (bits == 0) {
     return 0;
@@ -354,6 +363,722 @@ UIntT saturate_unsigned_value(WideT value) {
 
 Cpu::Cpu(Bus& bus, GicV3& gic, GenericTimer& timer) : bus_(bus), gic_(gic), timer_(timer) {}
 
+void Cpu::set_predecode_enabled(bool enabled) {
+  if (predecode_enabled_ == enabled) {
+    return;
+  }
+  predecode_enabled_ = enabled;
+  invalidate_decode_all();
+}
+
+void Cpu::invalidate_decode_all() {
+  for (auto& page : decode_pages_) {
+    page.valid = false;
+  }
+  decode_last_page_ = nullptr;
+  ++decode_context_epoch_;
+  if (decode_context_epoch_ == 0) {
+    decode_context_epoch_ = 1;
+  }
+}
+
+void Cpu::invalidate_decode_va_page(std::uint64_t va_page) {
+  DecodePage& page = decode_pages_[static_cast<std::size_t>((va_page >> 12) & (kDecodeCachePages - 1u))];
+  if (page.valid && page.va_page == va_page) {
+    page.valid = false;
+    if (&page == decode_last_page_) {
+      decode_last_page_ = nullptr;
+    }
+  }
+}
+
+void Cpu::invalidate_decode_pa_page(std::uint64_t pa_page) {
+  DecodePage& page = decode_pages_[static_cast<std::size_t>((pa_page >> 12) & (kDecodeCachePages - 1u))];
+  if (page.valid && page.pa_page == pa_page) {
+    page.valid = false;
+    if (&page == decode_last_page_) {
+      decode_last_page_ = nullptr;
+    }
+  }
+}
+
+void Cpu::invalidate_decode_va(std::uint64_t va, std::size_t size) {
+  const std::uint64_t first_page = va & ~0xFFFull;
+  const std::uint64_t last_page = (va + static_cast<std::uint64_t>(size) - 1u) & ~0xFFFull;
+  for (std::uint64_t page = first_page;; page += 0x1000u) {
+    invalidate_decode_va_page(page);
+    if (page == last_page) {
+      break;
+    }
+  }
+}
+
+void Cpu::invalidate_decode_pa(std::uint64_t pa, std::size_t size) {
+  const std::uint64_t first_page = pa & ~0xFFFull;
+  const std::uint64_t last_page = (pa + static_cast<std::uint64_t>(size) - 1u) & ~0xFFFull;
+  for (std::uint64_t page = first_page;; page += 0x1000u) {
+    invalidate_decode_pa_page(page);
+    if (page == last_page) {
+      break;
+    }
+  }
+}
+
+void Cpu::invalidate_decode_tlb_context() {
+  invalidate_decode_all();
+}
+
+void Cpu::on_code_write(std::uint64_t va, std::uint64_t pa, std::size_t size) {
+  if (!predecode_enabled_) {
+    return;
+  }
+  invalidate_decode_va(va, size);
+  invalidate_decode_pa(pa, size);
+}
+
+void Cpu::data_abort(std::uint64_t va) {
+  const std::uint32_t iss = last_translation_fault_.has_value() ? fault_status_code(*last_translation_fault_) : 0u;
+  enter_sync_exception(pc_ - 4, sysregs_.in_el0() ? 0x24u : 0x25u, iss, true, va);
+}
+
+bool Cpu::translate_data_address_fast(std::uint64_t va, bool write, std::uint64_t* out_pa) {
+  ++perf_counters_.translate_calls;
+  last_translation_fault_.reset();
+
+  if (!sysregs_.mmu_enabled()) {
+    if (out_pa != nullptr) {
+      *out_pa = va;
+    }
+    return true;
+  }
+
+  const std::uint64_t page = (va >> 12) & tlb_page_mask();
+  const std::uint64_t off = va & 0xFFFull;
+  const TlbEntry* hit = nullptr;
+  if (tlb_last_data_.valid && tlb_last_data_.va_page == page) {
+    hit = &tlb_last_data_;
+  } else {
+    ++perf_counters_.tlb_lookups;
+    hit = tlb_lookup(page);
+    if (hit != nullptr) {
+      tlb_last_data_ = *hit;
+      hit = &tlb_last_data_;
+    }
+  }
+  if (hit != nullptr) {
+    ++perf_counters_.tlb_hits;
+    if (write && !hit->writable) {
+      last_translation_fault_ = TranslationFault{.kind = TranslationFault::Kind::Permission, .level = hit->level, .write = true};
+      return false;
+    }
+    if (out_pa != nullptr) {
+      *out_pa = (hit->pa_page << 12) | off;
+    }
+    return true;
+  }
+
+  ++perf_counters_.tlb_misses;
+  TranslationResult result{};
+  TranslationFault fault{};
+  const AccessType access = write ? AccessType::Write : AccessType::Read;
+  if (!walk_page_tables(va, access, &result, &fault)) {
+    last_translation_fault_ = fault;
+    return false;
+  }
+  tlb_insert(page, result);
+  if (out_pa != nullptr) {
+    *out_pa = result.pa;
+  }
+  return true;
+}
+
+bool Cpu::mmu_read_value(std::uint64_t va, std::size_t size, std::uint64_t* out) {
+  std::uint64_t pa = 0;
+  if (!translate_data_address_fast(va, false, &pa)) {
+    return false;
+  }
+  std::uint64_t value = 0;
+  if (!bus_.read(pa, size, value)) {
+    return false;
+  }
+  if (out != nullptr) {
+    *out = value;
+  }
+  return true;
+}
+
+bool Cpu::mmu_write_value(std::uint64_t va, std::uint64_t value, std::size_t size) {
+  static const std::optional<std::uint64_t> trace_write_va = []() -> std::optional<std::uint64_t> {
+    const char* env = std::getenv("AARCHVM_TRACE_WRITE_VA");
+    if (env == nullptr || *env == '\0') {
+      return std::nullopt;
+    }
+    try {
+      return static_cast<std::uint64_t>(std::stoull(env, nullptr, 0));
+    } catch (...) {
+      return std::nullopt;
+    }
+  }();
+
+  std::uint64_t pa = 0;
+  if (!translate_data_address_fast(va, true, &pa)) {
+    return false;
+  }
+  if (trace_write_va.has_value() && *trace_write_va >= va && *trace_write_va < (va + size)) {
+    const std::uint64_t current_task = sysregs_.sp_el0();
+    std::uint64_t task_stack = 0;
+    const bool have_task_stack = mmu_read_value(current_task + 32u, 8u, &task_stack);
+    std::cerr << std::dec << "WRITE-HIT va=0x" << std::hex << va
+              << " pa=0x" << pa
+              << " size=" << std::dec << size
+              << " value=0x" << std::hex << value
+              << " pc=0x" << (pc_ - 4)
+              << " sp=0x" << regs_[31]
+              << " x29=0x" << reg(29)
+              << " x30=0x" << reg(30)
+              << " sp_el0=0x" << current_task;
+    if (have_task_stack) {
+      std::cerr << " task_stack=0x" << task_stack;
+    }
+    std::cerr << '\n';
+  }
+  const bool ok = bus_.write(pa, value, size);
+  if (ok) {
+    on_code_write(va, pa, size);
+    exclusive_valid_ = false;
+    exclusive_addr_ = 0;
+    exclusive_size_ = 0;
+  }
+  return ok;
+}
+
+Cpu::DecodedInsn Cpu::decode_insn(std::uint32_t insn) const {
+  DecodedInsn decoded{};
+  decoded.raw = insn;
+
+  if ((insn & 0x7C000000u) == 0x14000000u) {
+    decoded.kind = DecodedKind::BImm;
+    decoded.simm = static_cast<std::int32_t>(sign_extend((insn & 0x03FFFFFFu) << 2u, 28));
+    if ((insn & 0x80000000u) != 0u) {
+      decoded.flags |= kDecodedFlagLink;
+    }
+    return decoded;
+  }
+  if ((insn & 0xFF000010u) == 0x54000000u) {
+    decoded.kind = DecodedKind::BCond;
+    decoded.aux = static_cast<std::uint8_t>(insn & 0xFu);
+    decoded.simm = static_cast<std::int32_t>(sign_extend(((insn >> 5) & 0x7FFFFu) << 2u, 21));
+    return decoded;
+  }
+  if ((insn & 0x7F000000u) == 0x34000000u || (insn & 0x7F000000u) == 0x35000000u) {
+    decoded.kind = DecodedKind::Cbz;
+    decoded.rd = static_cast<std::uint8_t>(insn & 0x1Fu);
+    decoded.simm = static_cast<std::int32_t>(sign_extend(((insn >> 5) & 0x7FFFFu) << 2u, 21));
+    if ((insn >> 31) != 0u) {
+      decoded.flags |= kDecodedFlagSf;
+    }
+    if ((insn & 0x01000000u) != 0u) {
+      decoded.flags |= kDecodedFlagNonZero;
+    }
+    return decoded;
+  }
+  if ((insn & 0x7F000000u) == 0x36000000u || (insn & 0x7F000000u) == 0x37000000u) {
+    decoded.kind = DecodedKind::Tbz;
+    decoded.rd = static_cast<std::uint8_t>(insn & 0x1Fu);
+    decoded.aux = static_cast<std::uint8_t>((((insn >> 31) & 0x1u) << 5) | ((insn >> 19) & 0x1Fu));
+    decoded.simm = static_cast<std::int32_t>(sign_extend(((insn >> 5) & 0x3FFFu) << 2u, 16));
+    if ((insn & 0x01000000u) != 0u) {
+      decoded.flags |= kDecodedFlagNonZero;
+    }
+    return decoded;
+  }
+  if ((insn & 0x7F800000u) == 0x52800000u || (insn & 0x7F800000u) == 0x72800000u ||
+      (insn & 0x7F800000u) == 0x12800000u) {
+    decoded.kind = DecodedKind::MovWide;
+    decoded.rd = static_cast<std::uint8_t>(insn & 0x1Fu);
+    decoded.aux = static_cast<std::uint8_t>((insn >> 29) & 0x3u);
+    decoded.aux2 = static_cast<std::uint8_t>(((insn >> 21) & 0x3u) * 16u);
+    decoded.imm = (insn >> 5) & 0xFFFFu;
+    if ((insn >> 31) != 0u) {
+      decoded.flags |= kDecodedFlagSf;
+    }
+    return decoded;
+  }
+  if ((insn & 0x7F000000u) == 0x11000000u || (insn & 0x7F000000u) == 0x31000000u ||
+      (insn & 0x7F000000u) == 0x51000000u || (insn & 0x7F000000u) == 0x71000000u) {
+    decoded.kind = DecodedKind::AddSubImm;
+    decoded.rd = static_cast<std::uint8_t>(insn & 0x1Fu);
+    decoded.rn = static_cast<std::uint8_t>((insn >> 5) & 0x1Fu);
+    decoded.imm = (insn >> 10) & 0xFFFu;
+    decoded.aux = static_cast<std::uint8_t>(((insn >> 22) & 0x1u) * 12u);
+    if ((insn >> 31) != 0u) {
+      decoded.flags |= kDecodedFlagSf;
+    }
+    if ((insn & 0x40000000u) != 0u) {
+      decoded.flags |= kDecodedFlagSub;
+    }
+    if ((insn & 0x20000000u) != 0u) {
+      decoded.flags |= kDecodedFlagSetFlags;
+    }
+    return decoded;
+  }
+  if ((insn & 0x7F200000u) == 0x2B000000u || (insn & 0x7F200000u) == 0x6B000000u ||
+      (insn & 0x7F200000u) == 0x4B000000u) {
+    const std::uint32_t shift_type = (insn >> 22) & 0x3u;
+    if (shift_type > 2u) {
+      return decoded;
+    }
+    decoded.kind = DecodedKind::AddSubShifted;
+    decoded.rd = static_cast<std::uint8_t>(insn & 0x1Fu);
+    decoded.rn = static_cast<std::uint8_t>((insn >> 5) & 0x1Fu);
+    decoded.rm = static_cast<std::uint8_t>((insn >> 16) & 0x1Fu);
+    decoded.aux = static_cast<std::uint8_t>(shift_type);
+    decoded.aux2 = static_cast<std::uint8_t>((insn >> 10) & 0x3Fu);
+    if ((insn >> 31) != 0u) {
+      decoded.flags |= kDecodedFlagSf;
+    }
+    if ((insn & 0x40000000u) != 0u) {
+      decoded.flags |= kDecodedFlagSub;
+    }
+    if ((insn & 0x20000000u) != 0u) {
+      decoded.flags |= kDecodedFlagSetFlags;
+    }
+    return decoded;
+  }
+
+  if ((insn & 0xFFC00000u) == 0xF9400000u) {
+    decoded.kind = DecodedKind::LoadStoreUImm;
+    decoded.rd = static_cast<std::uint8_t>(insn & 0x1Fu);
+    decoded.rn = static_cast<std::uint8_t>((insn >> 5) & 0x1Fu);
+    decoded.imm = ((insn >> 10) & 0xFFFu) << 3u;
+    decoded.aux = 8u;
+    decoded.flags = kDecodedFlagLoad | kDecodedFlagResult64;
+    return decoded;
+  }
+  if ((insn & 0xFFC00000u) == 0xF9000000u) {
+    decoded.kind = DecodedKind::LoadStoreUImm;
+    decoded.rd = static_cast<std::uint8_t>(insn & 0x1Fu);
+    decoded.rn = static_cast<std::uint8_t>((insn >> 5) & 0x1Fu);
+    decoded.imm = ((insn >> 10) & 0xFFFu) << 3u;
+    decoded.aux = 8u;
+    return decoded;
+  }
+  if ((insn & 0xFFC00000u) == 0xB9400000u) {
+    decoded.kind = DecodedKind::LoadStoreUImm;
+    decoded.rd = static_cast<std::uint8_t>(insn & 0x1Fu);
+    decoded.rn = static_cast<std::uint8_t>((insn >> 5) & 0x1Fu);
+    decoded.imm = ((insn >> 10) & 0xFFFu) << 2u;
+    decoded.aux = 4u;
+    decoded.flags = kDecodedFlagLoad;
+    return decoded;
+  }
+  if ((insn & 0xFFC00000u) == 0xB9000000u) {
+    decoded.kind = DecodedKind::LoadStoreUImm;
+    decoded.rd = static_cast<std::uint8_t>(insn & 0x1Fu);
+    decoded.rn = static_cast<std::uint8_t>((insn >> 5) & 0x1Fu);
+    decoded.imm = ((insn >> 10) & 0xFFFu) << 2u;
+    decoded.aux = 4u;
+    return decoded;
+  }
+  if ((insn & 0xFFC00000u) == 0xB9800000u) {
+    decoded.kind = DecodedKind::LoadStore;
+    decoded.rd = static_cast<std::uint8_t>(insn & 0x1Fu);
+    decoded.rn = static_cast<std::uint8_t>((insn >> 5) & 0x1Fu);
+    decoded.imm = ((insn >> 10) & 0xFFFu) << 2u;
+    decoded.aux = 4u;
+    decoded.flags = kDecodedFlagLoad | kDecodedFlagSigned | kDecodedFlagResult64;
+    return decoded;
+  }
+  if ((insn & 0xFFC00000u) == 0x39C00000u) {
+    decoded.kind = DecodedKind::LoadStore;
+    decoded.rd = static_cast<std::uint8_t>(insn & 0x1Fu);
+    decoded.rn = static_cast<std::uint8_t>((insn >> 5) & 0x1Fu);
+    decoded.imm = (insn >> 10) & 0xFFFu;
+    decoded.aux = 1u;
+    decoded.flags = kDecodedFlagLoad | kDecodedFlagSigned;
+    return decoded;
+  }
+  if ((insn & 0xFFC00000u) == 0x39800000u) {
+    decoded.kind = DecodedKind::LoadStore;
+    decoded.rd = static_cast<std::uint8_t>(insn & 0x1Fu);
+    decoded.rn = static_cast<std::uint8_t>((insn >> 5) & 0x1Fu);
+    decoded.imm = (insn >> 10) & 0xFFFu;
+    decoded.aux = 1u;
+    decoded.flags = kDecodedFlagLoad | kDecodedFlagSigned | kDecodedFlagResult64;
+    return decoded;
+  }
+  if ((insn & 0xFFC00000u) == 0x79C00000u) {
+    decoded.kind = DecodedKind::LoadStore;
+    decoded.rd = static_cast<std::uint8_t>(insn & 0x1Fu);
+    decoded.rn = static_cast<std::uint8_t>((insn >> 5) & 0x1Fu);
+    decoded.imm = ((insn >> 10) & 0xFFFu) << 1u;
+    decoded.aux = 2u;
+    decoded.flags = kDecodedFlagLoad | kDecodedFlagSigned;
+    return decoded;
+  }
+  if ((insn & 0xFFC00000u) == 0x79800000u) {
+    decoded.kind = DecodedKind::LoadStore;
+    decoded.rd = static_cast<std::uint8_t>(insn & 0x1Fu);
+    decoded.rn = static_cast<std::uint8_t>((insn >> 5) & 0x1Fu);
+    decoded.imm = ((insn >> 10) & 0xFFFu) << 1u;
+    decoded.aux = 2u;
+    decoded.flags = kDecodedFlagLoad | kDecodedFlagSigned | kDecodedFlagResult64;
+    return decoded;
+  }
+  if ((insn & 0xFFC00000u) == 0x39400000u) {
+    decoded.kind = DecodedKind::LoadStoreUImm;
+    decoded.rd = static_cast<std::uint8_t>(insn & 0x1Fu);
+    decoded.rn = static_cast<std::uint8_t>((insn >> 5) & 0x1Fu);
+    decoded.imm = (insn >> 10) & 0xFFFu;
+    decoded.aux = 1u;
+    decoded.flags = kDecodedFlagLoad;
+    return decoded;
+  }
+  if ((insn & 0xFFC00000u) == 0x39000000u) {
+    decoded.kind = DecodedKind::LoadStoreUImm;
+    decoded.rd = static_cast<std::uint8_t>(insn & 0x1Fu);
+    decoded.rn = static_cast<std::uint8_t>((insn >> 5) & 0x1Fu);
+    decoded.imm = (insn >> 10) & 0xFFFu;
+    decoded.aux = 1u;
+    return decoded;
+  }
+  if ((insn & 0xFFC00000u) == 0x79400000u) {
+    decoded.kind = DecodedKind::LoadStoreUImm;
+    decoded.rd = static_cast<std::uint8_t>(insn & 0x1Fu);
+    decoded.rn = static_cast<std::uint8_t>((insn >> 5) & 0x1Fu);
+    decoded.imm = ((insn >> 10) & 0xFFFu) << 1u;
+    decoded.aux = 2u;
+    decoded.flags = kDecodedFlagLoad;
+    return decoded;
+  }
+  if ((insn & 0xFFC00000u) == 0x79000000u) {
+    decoded.kind = DecodedKind::LoadStoreUImm;
+    decoded.rd = static_cast<std::uint8_t>(insn & 0x1Fu);
+    decoded.rn = static_cast<std::uint8_t>((insn >> 5) & 0x1Fu);
+    decoded.imm = ((insn >> 10) & 0xFFFu) << 1u;
+    decoded.aux = 2u;
+    return decoded;
+  }
+
+  if ((insn & 0xFFC00C00u) == 0x38400400u || (insn & 0xFFC00C00u) == 0x38000400u ||
+      (insn & 0xFFC00C00u) == 0x38400C00u || (insn & 0xFFC00C00u) == 0x38000C00u ||
+      (insn & 0xFFC00C00u) == 0x78400400u || (insn & 0xFFC00C00u) == 0x78000400u ||
+      (insn & 0xFFC00C00u) == 0x78400C00u || (insn & 0xFFC00C00u) == 0x78000C00u ||
+      (insn & 0xFFC00C00u) == 0xB8400400u || (insn & 0xFFC00C00u) == 0xB8000400u ||
+      (insn & 0xFFC00C00u) == 0xB8400C00u || (insn & 0xFFC00C00u) == 0xB8000C00u ||
+      (insn & 0xFFC00C00u) == 0xF8400400u || (insn & 0xFFC00C00u) == 0xF8000400u ||
+      (insn & 0xFFC00C00u) == 0xF8400C00u || (insn & 0xFFC00C00u) == 0xF8000C00u) {
+    const std::uint32_t mode = insn & 0xFFC00C00u;
+    decoded.kind = DecodedKind::LoadStore;
+    decoded.rd = static_cast<std::uint8_t>(insn & 0x1Fu);
+    decoded.rn = static_cast<std::uint8_t>((insn >> 5) & 0x1Fu);
+    decoded.simm = static_cast<std::int32_t>(sign_extend((insn >> 12) & 0x1FFu, 9));
+    if (mode == 0x38400400u || mode == 0x38400C00u || mode == 0x78400400u || mode == 0x78400C00u ||
+        mode == 0xB8400400u || mode == 0xB8400C00u || mode == 0xF8400400u || mode == 0xF8400C00u) {
+      decoded.flags |= kDecodedFlagLoad;
+    }
+    if (mode == 0x38400400u || mode == 0x38000400u || mode == 0x38400C00u || mode == 0x38000C00u) {
+      decoded.aux = 1u;
+    } else if (mode == 0x78400400u || mode == 0x78000400u || mode == 0x78400C00u || mode == 0x78000C00u) {
+      decoded.aux = 2u;
+    } else if (mode == 0xB8400400u || mode == 0xB8000400u || mode == 0xB8400C00u || mode == 0xB8000C00u) {
+      decoded.aux = 4u;
+    } else {
+      decoded.aux = 8u;
+      if ((decoded.flags & kDecodedFlagLoad) != 0u) {
+        decoded.flags |= kDecodedFlagResult64;
+      }
+    }
+    decoded.aux2 = (mode == 0x38400C00u || mode == 0x38000C00u || mode == 0x78400C00u || mode == 0x78000C00u ||
+                    mode == 0xB8400C00u || mode == 0xB8000C00u || mode == 0xF8400C00u || mode == 0xF8000C00u)
+        ? 1u
+        : 2u;
+    return decoded;
+  }
+
+  return decoded;
+}
+
+const Cpu::DecodedInsn* Cpu::lookup_decoded(std::uint64_t va, std::uint64_t pa, std::uint32_t insn) {
+  if (!predecode_enabled_) {
+    return nullptr;
+  }
+  const std::uint64_t va_page = va & ~0xFFFull;
+  const std::uint64_t pa_page = pa & ~0xFFFull;
+  const std::size_t slot = static_cast<std::size_t>((va >> 2) & (kDecodePageSlots - 1u));
+
+  DecodePage* page = decode_last_page_;
+  if (page == nullptr || !page->valid || page->context_epoch != decode_context_epoch_ ||
+      page->va_page != va_page || page->pa_page != pa_page) {
+    page = &decode_pages_[static_cast<std::size_t>((va_page >> 12) & (kDecodeCachePages - 1u))];
+    if (!page->valid || page->context_epoch != decode_context_epoch_ || page->va_page != va_page || page->pa_page != pa_page) {
+      page->valid = true;
+      page->context_epoch = decode_context_epoch_;
+      page->va_page = va_page;
+      page->pa_page = pa_page;
+      page->decoded.fill(0);
+    }
+    decode_last_page_ = page;
+  }
+
+  if (!page->decoded[slot] || page->insns[slot].raw != insn) {
+    page->insns[slot] = decode_insn(insn);
+    page->decoded[slot] = 1;
+  }
+  return &page->insns[slot];
+}
+
+bool Cpu::exec_decoded(const DecodedInsn& decoded) {
+  switch (decoded.kind) {
+    case DecodedKind::Fallback:
+      return false;
+    case DecodedKind::BImm: {
+      if ((decoded.flags & kDecodedFlagLink) != 0u) {
+        set_reg(30, pc_);
+      }
+      pc_ = static_cast<std::uint64_t>(static_cast<std::int64_t>(pc_) + decoded.simm - 4);
+      return true;
+    }
+    case DecodedKind::BCond: {
+      if (condition_holds(decoded.aux)) {
+        pc_ = static_cast<std::uint64_t>(static_cast<std::int64_t>(pc_) + decoded.simm - 4);
+      }
+      return true;
+    }
+    case DecodedKind::Cbz: {
+      const bool sf = (decoded.flags & kDecodedFlagSf) != 0u;
+      const bool nonzero = (decoded.flags & kDecodedFlagNonZero) != 0u;
+      const std::uint64_t value = sf ? reg(decoded.rd) : static_cast<std::uint64_t>(reg32(decoded.rd));
+      const bool take = nonzero ? (value != 0u) : (value == 0u);
+      if (take) {
+        pc_ = static_cast<std::uint64_t>(static_cast<std::int64_t>(pc_) + decoded.simm - 4);
+      }
+      return true;
+    }
+    case DecodedKind::Tbz: {
+      const bool nonzero = (decoded.flags & kDecodedFlagNonZero) != 0u;
+      const bool bit_set = ((reg(decoded.rd) >> decoded.aux) & 1u) != 0u;
+      const bool take = nonzero ? bit_set : !bit_set;
+      if (take) {
+        pc_ = static_cast<std::uint64_t>(static_cast<std::int64_t>(pc_) + decoded.simm - 4);
+      }
+      return true;
+    }
+    case DecodedKind::MovWide: {
+      const bool sf = (decoded.flags & kDecodedFlagSf) != 0u;
+      const std::uint64_t value = static_cast<std::uint64_t>(decoded.imm) << decoded.aux2;
+      if (decoded.aux == 2u) {
+        if (sf) {
+          set_reg(decoded.rd, value);
+        } else {
+          set_reg32(decoded.rd, static_cast<std::uint32_t>(value));
+        }
+      } else if (decoded.aux == 3u) {
+        if (sf) {
+          const std::uint64_t mask = ~(0xFFFFull << decoded.aux2);
+          set_reg(decoded.rd, (reg(decoded.rd) & mask) | value);
+        } else {
+          if (decoded.aux2 > 16u) {
+            return false;
+          }
+          const std::uint32_t mask = ~(static_cast<std::uint32_t>(0xFFFFu) << decoded.aux2);
+          set_reg32(decoded.rd, (reg32(decoded.rd) & mask) | static_cast<std::uint32_t>(value));
+        }
+      } else if (decoded.aux == 0u) {
+        const std::uint64_t neg = ~value;
+        if (sf) {
+          set_reg(decoded.rd, neg);
+        } else {
+          if (decoded.aux2 > 16u) {
+            return false;
+          }
+          set_reg32(decoded.rd, static_cast<std::uint32_t>(neg));
+        }
+      } else {
+        return false;
+      }
+      return true;
+    }
+    case DecodedKind::AddSubImm: {
+      const bool sf = (decoded.flags & kDecodedFlagSf) != 0u;
+      const bool set_flags = (decoded.flags & kDecodedFlagSetFlags) != 0u;
+      const bool is_sub = (decoded.flags & kDecodedFlagSub) != 0u;
+      const std::uint64_t lhs = sp_or_reg(decoded.rn);
+      const std::uint64_t rhs = static_cast<std::uint64_t>(decoded.imm) << decoded.aux;
+      const std::uint64_t value = is_sub
+          ? (sf ? (lhs - rhs) : static_cast<std::uint32_t>(lhs - rhs))
+          : (sf ? (lhs + rhs) : static_cast<std::uint32_t>(lhs + rhs));
+      if (set_flags) {
+        if (sf) {
+          set_reg(decoded.rd, value);
+          if (is_sub) {
+            set_flags_sub(lhs, rhs, value, false);
+          } else {
+            set_flags_add(lhs, rhs, value, false);
+          }
+        } else {
+          set_reg32(decoded.rd, static_cast<std::uint32_t>(value));
+          if (is_sub) {
+            set_flags_sub(static_cast<std::uint32_t>(lhs), static_cast<std::uint32_t>(rhs), static_cast<std::uint32_t>(value), true);
+          } else {
+            set_flags_add(static_cast<std::uint32_t>(lhs), static_cast<std::uint32_t>(rhs), static_cast<std::uint32_t>(value), true);
+          }
+        }
+      } else {
+        set_sp_or_reg(decoded.rd, value, !sf);
+      }
+      return true;
+    }
+    case DecodedKind::AddSubShifted: {
+      const bool sf = (decoded.flags & kDecodedFlagSf) != 0u;
+      const bool set_flags = (decoded.flags & kDecodedFlagSetFlags) != 0u;
+      const bool is_sub = (decoded.flags & kDecodedFlagSub) != 0u;
+      std::uint64_t rhs = 0;
+      if (sf) {
+        const std::uint64_t v = reg(decoded.rm);
+        const std::uint32_t sh = decoded.aux2 & 63u;
+        if (decoded.aux == 0u) {
+          rhs = (sh >= 64u) ? 0u : (v << sh);
+        } else if (decoded.aux == 1u) {
+          rhs = (sh >= 64u) ? 0u : (v >> sh);
+        } else {
+          rhs = static_cast<std::uint64_t>(static_cast<std::int64_t>(v) >> sh);
+        }
+      } else {
+        const std::uint32_t v = reg32(decoded.rm);
+        const std::uint32_t sh = decoded.aux2 & 31u;
+        if (decoded.aux == 0u) {
+          rhs = static_cast<std::uint32_t>(v << sh);
+        } else if (decoded.aux == 1u) {
+          rhs = static_cast<std::uint32_t>(v >> sh);
+        } else {
+          rhs = static_cast<std::uint32_t>(static_cast<std::int32_t>(v) >> sh);
+        }
+      }
+      const std::uint64_t lhs = sf ? reg(decoded.rn) : reg32(decoded.rn);
+      const std::uint64_t value = is_sub
+          ? (sf ? (lhs - rhs) : static_cast<std::uint32_t>(lhs - rhs))
+          : (sf ? (lhs + rhs) : static_cast<std::uint32_t>(lhs + rhs));
+      if (set_flags) {
+        if (sf) {
+          set_reg(decoded.rd, value);
+          if (is_sub) {
+            set_flags_sub(lhs, rhs, value, false);
+          } else {
+            set_flags_add(lhs, rhs, value, false);
+          }
+        } else {
+          set_reg32(decoded.rd, static_cast<std::uint32_t>(value));
+          if (is_sub) {
+            set_flags_sub(static_cast<std::uint32_t>(lhs), static_cast<std::uint32_t>(rhs), static_cast<std::uint32_t>(value), true);
+          } else {
+            set_flags_add(static_cast<std::uint32_t>(lhs), static_cast<std::uint32_t>(rhs), static_cast<std::uint32_t>(value), true);
+          }
+        }
+      } else {
+        set_sp_or_reg(decoded.rd, value, !sf);
+      }
+      return true;
+    }
+    case DecodedKind::LoadStoreUImm: {
+      const bool is_load = (decoded.flags & kDecodedFlagLoad) != 0u;
+      const bool result64 = (decoded.flags & kDecodedFlagResult64) != 0u;
+      const std::uint64_t addr = sp_or_reg(decoded.rn) + static_cast<std::uint64_t>(decoded.imm);
+      std::uint64_t pa = 0;
+      if (!translate_data_address_fast(addr, !is_load, &pa)) {
+        data_abort(addr);
+        return true;
+      }
+      if (is_load) {
+        std::uint64_t value = 0;
+        if (!bus_.read(pa, decoded.aux, value)) {
+          data_abort(addr);
+          return true;
+        }
+        if (result64) {
+          set_reg(decoded.rd, value);
+        } else {
+          set_reg32(decoded.rd, static_cast<std::uint32_t>(value));
+        }
+      } else {
+        const std::uint64_t value =
+            (decoded.aux == 8u) ? reg(decoded.rd)
+            : (decoded.aux == 4u) ? static_cast<std::uint64_t>(reg32(decoded.rd))
+            : (decoded.aux == 2u) ? static_cast<std::uint64_t>(reg32(decoded.rd) & 0xFFFFu)
+                                 : static_cast<std::uint64_t>(reg32(decoded.rd) & 0xFFu);
+        if (!bus_.write(pa, value, decoded.aux)) {
+          data_abort(addr);
+          return true;
+        }
+        on_code_write(addr, pa, decoded.aux);
+        exclusive_valid_ = false;
+        exclusive_addr_ = 0;
+        exclusive_size_ = 0;
+      }
+      return true;
+    }
+    case DecodedKind::LoadStore: {
+      const bool is_load = (decoded.flags & kDecodedFlagLoad) != 0u;
+      const bool is_signed = (decoded.flags & kDecodedFlagSigned) != 0u;
+      const bool result64 = (decoded.flags & kDecodedFlagResult64) != 0u;
+      const std::uint64_t base = sp_or_reg(decoded.rn);
+      std::uint64_t addr = 0;
+      std::uint64_t wb_addr = 0;
+      if (decoded.aux2 == 1u) {
+        addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + decoded.simm);
+        wb_addr = addr;
+      } else if (decoded.aux2 == 2u) {
+        addr = base;
+        wb_addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + decoded.simm);
+      } else {
+        addr = base + static_cast<std::uint64_t>(decoded.imm);
+      }
+      if (is_load) {
+        std::uint64_t value = 0;
+        if (!mmu_read_value(addr, decoded.aux, &value)) {
+          data_abort(addr);
+          return true;
+        }
+        if (is_signed) {
+          const std::uint64_t bits = static_cast<std::uint64_t>(decoded.aux) * 8u;
+          const std::uint64_t mask = bits >= 64u ? ~0ull : ((1ull << bits) - 1ull);
+          const std::uint64_t signed_value = static_cast<std::uint64_t>(sign_extend(value & mask, static_cast<std::uint32_t>(bits)));
+          if (result64) {
+            set_reg(decoded.rd, signed_value);
+          } else {
+            set_reg32(decoded.rd, static_cast<std::uint32_t>(signed_value));
+          }
+        } else if (result64) {
+          set_reg(decoded.rd, value);
+        } else {
+          set_reg32(decoded.rd, static_cast<std::uint32_t>(value));
+        }
+      } else {
+        std::uint64_t value = 0;
+        if (decoded.aux == 8u) {
+          value = reg(decoded.rd);
+        } else if (decoded.aux == 4u) {
+          value = reg32(decoded.rd);
+        } else if (decoded.aux == 2u) {
+          value = reg32(decoded.rd) & 0xFFFFu;
+        } else {
+          value = reg32(decoded.rd) & 0xFFu;
+        }
+        if (!mmu_write_value(addr, value, decoded.aux)) {
+          data_abort(addr);
+          return true;
+        }
+      }
+      if (decoded.aux2 != 0u) {
+        set_sp_or_reg(decoded.rn, wb_addr, false);
+      }
+      return true;
+    }
+    default:
+      return false;
+  }
+}
+
 void Cpu::set_sp(std::uint64_t value) {
   regs_[31] = value;
   if (sysregs_.current_uses_sp_el0()) {
@@ -453,9 +1178,11 @@ void Cpu::reset(std::uint64_t pc) {
   irq_query_epoch_ = 0;
   irq_query_threshold_ = 0;
   irq_query_negative_valid_ = false;
+  irq_delivery_threshold_ = 0xFF;
   event_register_ = false;
   icc_pmr_el1_ = 0xFF;
   running_priority_ = 0x100;
+  refresh_irq_threshold_cache();
   icc_ctlr_el1_ = 0;
   icc_sre_el1_ = 0;
   icc_bpr1_el1_ = 0;
@@ -466,6 +1193,7 @@ void Cpu::reset(std::uint64_t pc) {
   exclusive_addr_ = 0;
   exclusive_size_ = 0;
   tlb_flush_all();
+  invalidate_decode_all();
   last_translation_fault_.reset();
   pc_ = pc;
   steps_ = 0;
@@ -478,6 +1206,7 @@ void Cpu::set_cntvct(std::uint64_t value) {
 
 void Cpu::perf_flush_tlb_all() {
   tlb_flush_all();
+  invalidate_decode_all();
 }
 
 bool Cpu::step() {
@@ -544,13 +1273,13 @@ bool Cpu::step() {
     return true;
   }
 
-  const auto fetch = bus_.read(fetch_result.pa, 4);
-  if (!fetch.has_value()) {
+  std::uint64_t fetch = 0;
+  if (!bus_.read(fetch_result.pa, 4, fetch)) {
     enter_sync_exception(pc_, sysregs_.in_el0() ? 0x20u : 0x21u, 0u, true, pc_);
     return true;
   }
 
-  const std::uint32_t insn = static_cast<std::uint32_t>(*fetch);
+  const std::uint32_t insn = static_cast<std::uint32_t>(fetch);
   const std::uint64_t this_pc = pc_;
   pc_ += 4;
   ++steps_;
@@ -621,6 +1350,7 @@ bool Cpu::step() {
       const std::uint32_t idx = exception_depth_ - 1;
       if (exception_is_irq_stack_[idx] && !exception_prio_dropped_stack_[idx]) {
         running_priority_ = exception_prev_prio_stack_[idx];
+        refresh_irq_threshold_cache();
       }
       --exception_depth_;
     }
@@ -651,6 +1381,11 @@ bool Cpu::step() {
     return true;
   }
 
+  if (predecode_enabled_) {
+    if (const DecodedInsn* decoded = lookup_decoded(this_pc, fetch_result.pa, insn); decoded != nullptr && exec_decoded(*decoded)) {
+      return true;
+    }
+  }
   if (exec_branch(insn)) {
     return true;
   }
@@ -679,13 +1414,13 @@ bool Cpu::try_take_irq() {
   if (sysregs_.irq_masked() || icc_igrpen1_el1_ == 0) {
     return false;
   }
-  const std::uint16_t irq_threshold = std::min<std::uint16_t>(static_cast<std::uint16_t>(icc_pmr_el1_ & 0xFFu), running_priority_);
+  const std::uint16_t irq_threshold = irq_delivery_threshold_;
   const std::uint64_t irq_epoch = gic_.state_epoch();
   if (irq_query_negative_valid_ && irq_query_epoch_ == irq_epoch && irq_query_threshold_ == irq_threshold) {
     return false;
   }
-  const auto intid = gic_.acknowledge(static_cast<std::uint8_t>(irq_threshold & 0xFFu));
-  if (!intid.has_value()) {
+  std::uint32_t intid = 1023u;
+  if (!gic_.acknowledge(static_cast<std::uint8_t>(irq_threshold & 0xFFu), intid)) {
     irq_query_epoch_ = irq_epoch;
     irq_query_threshold_ = irq_threshold;
     irq_query_negative_valid_ = true;
@@ -701,13 +1436,14 @@ bool Cpu::try_take_irq() {
   }
   save_current_sp_to_bank();
   exception_is_irq_stack_[exception_depth_] = true;
-  exception_intid_stack_[exception_depth_] = *intid;
+  exception_intid_stack_[exception_depth_] = intid;
   exception_prev_prio_stack_[exception_depth_] = running_priority_;
   exception_prio_dropped_stack_[exception_depth_] = false;
-  const std::uint8_t new_prio = gic_.priority(*intid);
+  const std::uint8_t new_prio = gic_.priority(intid);
   running_priority_ = new_prio;
+  refresh_irq_threshold_cache();
   if (irq_take_trace_enabled()) {
-    std::cerr << std::dec << "IRQ-TAKE intid=" << *intid
+    std::cerr << std::dec << "IRQ-TAKE intid=" << intid
               << " prio=0x" << std::hex << static_cast<std::uint32_t>(new_prio)
               << " pmr=0x" << static_cast<std::uint32_t>(icc_pmr_el1_ & 0xFFu)
               << " depth=" << std::dec << (exception_depth_ + 1)
@@ -785,9 +1521,9 @@ void Cpu::enter_sync_exception(std::uint64_t fault_pc,
               << " sctlr=0x" << sysregs_.sctlr_el1();
     TranslationResult trace_fetch{};
     if (translate_address(fault_pc, AccessType::Fetch, &trace_fetch, false, false)) {
-      const auto trace_insn = bus_.read(trace_fetch.pa, 4);
-      if (trace_insn.has_value()) {
-        std::cerr << " insn=0x" << (*trace_insn & 0xFFFFFFFFu);
+      std::uint64_t trace_insn = 0;
+      if (bus_.read(trace_fetch.pa, 4, trace_insn)) {
+        std::cerr << " insn=0x" << (trace_insn & 0xFFFFFFFFu);
       }
     }
     std::cerr << std::dec << '\n';
@@ -983,21 +1719,22 @@ bool Cpu::walk_page_tables(std::uint64_t va,
   for (std::uint32_t level = start_level; level < 4u; ++level) {
     const std::uint64_t desc_addr = table_base + idx[level] * 8u;
     ++perf_counters_.page_walk_desc_reads;
-    const auto desc_opt = bus_.read(desc_addr, 8);
+    std::uint64_t desc = 0;
+    const bool desc_ok = bus_.read(desc_addr, 8, desc);
     if (trace_va) {
       std::ostringstream oss;
       oss << "TRACE-VA-L" << level
           << ": idx=0x" << std::hex << idx[level]
           << " table_base=0x" << table_base
           << " desc_addr=0x" << desc_addr;
-      if (desc_opt.has_value()) {
-        oss << " desc=0x" << *desc_opt;
+      if (desc_ok) {
+        oss << " desc=0x" << desc;
       } else {
         oss << " desc=<bus-fail>";
       }
       trace_va_log(oss.str());
     }
-    if (!desc_opt.has_value()) {
+    if (!desc_ok) {
       if (fault != nullptr) {
         *fault = TranslationFault{.kind = TranslationFault::Kind::Translation,
                                   .level = static_cast<std::uint8_t>(level),
@@ -1006,7 +1743,6 @@ bool Cpu::walk_page_tables(std::uint64_t va,
       return false;
     }
 
-    const std::uint64_t desc = *desc_opt;
     const bool valid = (desc & 1u) != 0;
     const bool bit1 = (desc & 2u) != 0;
     if (!valid) {
@@ -1428,6 +2164,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
   // TLBI VMALLE1 / VMALLE1IS
   if (insn == 0xD508871Fu || insn == 0xD508831Fu) {
     tlb_flush_all();
+    invalidate_decode_all();
     return true;
   }
 
@@ -1444,6 +2181,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
       (insn & 0xFFFFFFE0u) == 0xD50883E0u) {
     const std::uint32_t rt = insn & 0x1Fu;
     tlb_flush_va(reg(rt));
+    invalidate_decode_va(reg(rt), 1u);
     return true;
   }
 
@@ -1452,21 +2190,26 @@ bool Cpu::exec_system(std::uint32_t insn) {
   if ((insn & 0xFFFFFFE0u) == 0xD5088740u ||
       (insn & 0xFFFFFFE0u) == 0xD5088340u) {
     tlb_flush_all();
+    invalidate_decode_all();
     return true;
   }
 
   // IC IALLU
   if (insn == 0xD508751Fu) {
+    invalidate_decode_all();
     return true;
   }
 
   // IC IALLUIS
   if (insn == 0xD508711Fu) {
+    invalidate_decode_all();
     return true;
   }
 
   // IC IVAU, Xt
   if ((insn & 0xFFFFFFE0u) == 0xD50B7520u) {
+    const std::uint32_t rt = insn & 0x1Fu;
+    invalidate_decode_va(reg(rt), 1u);
     return true;
   }
 
@@ -1500,6 +2243,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
         enter_sync_exception(pc_ - 4, sysregs_.in_el0() ? 0x24u : 0x25u, iss, true, va);
         return true;
       }
+      on_code_write(va, result.pa, 8u);
     }
     exclusive_valid_ = false;
     exclusive_addr_ = 0;
@@ -1684,6 +2428,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
         const std::uint32_t idx = exception_depth_ - 1;
         if (exception_is_irq_stack_[idx] && exception_intid_stack_[idx] == static_cast<std::uint32_t>(reg(rt))) {
           running_priority_ = exception_prev_prio_stack_[idx];
+          refresh_irq_threshold_cache();
           exception_prio_dropped_stack_[idx] = true;
           const bool eoi_drop_dir = ((icc_ctlr_el1_ >> 1) & 0x1u) != 0u;
           if (!eoi_drop_dir) {
@@ -1695,6 +2440,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
     }
     if (key == ((3u << 14) | (0u << 11) | (4u << 7) | (6u << 3) | 0u)) { // ICC_PMR_EL1
       icc_pmr_el1_ = reg(rt);
+      refresh_irq_threshold_cache();
       return true;
     }
     if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (12u << 3) | 4u)) { // ICC_CTLR_EL1
@@ -1799,6 +2545,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
         key == ((3u << 14) | (0u << 11) | (2u << 7) | (0u << 3) | 1u) || // TTBR1_EL1
         key == ((3u << 14) | (0u << 11) | (2u << 7) | (0u << 3) | 2u)) { // TCR_EL1
       tlb_flush_all();
+      invalidate_decode_all();
     }
     return true;
   }
@@ -4158,7 +4905,11 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     if (!translate_address(va, AccessType::Read, &result, true)) {
       return std::nullopt;
     }
-    return bus_.read(result.pa, size);
+    std::uint64_t value = 0;
+    if (!bus_.read(result.pa, size, value)) {
+      return std::nullopt;
+    }
+    return value;
   };
   const auto mmu_write = [this, insn, &mmu_read](std::uint64_t va, std::uint64_t value, std::size_t size) -> bool {
     static const std::optional<std::uint64_t> trace_write_va = []() -> std::optional<std::uint64_t> {
@@ -4196,6 +4947,7 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     }
     const bool ok = bus_.write(result.pa, value, size);
     if (ok) {
+      on_code_write(va, result.pa, size);
       exclusive_valid_ = false;
       exclusive_addr_ = 0;
       exclusive_size_ = 0;
@@ -6083,6 +6835,7 @@ bool Cpu::load_state(std::istream& in, std::uint32_t version) {
   irq_query_epoch_ = 0;
   irq_query_threshold_ = 0;
   irq_query_negative_valid_ = false;
+  irq_delivery_threshold_ = 0xFF;
   if (!sysregs_.load_state(in) ||
       !snapshot_io::read(in, exception_depth_) ||
       exception_depth_ > exception_is_irq_stack_.size() ||
@@ -6113,6 +6866,7 @@ bool Cpu::load_state(std::istream& in, std::uint32_t version) {
   } else {
     running_priority_ = 0x100;
   }
+  refresh_irq_threshold_cache();
   if (!snapshot_io::read(in, icc_ctlr_el1_) ||
       !snapshot_io::read(in, icc_sre_el1_) ||
       !snapshot_io::read(in, icc_bpr1_el1_) ||

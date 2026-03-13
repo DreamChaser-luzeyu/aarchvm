@@ -39,6 +39,7 @@ struct Options {
   std::optional<std::string> snapshot_save_path;
   std::vector<BinaryLoad> extra_bins;
   std::optional<std::string> stop_on_uart_pattern;
+  bool predecode_enabled = true;
 };
 
 std::uint64_t parse_u64(const std::string& text) {
@@ -132,7 +133,7 @@ void print_usage(const char* argv0) {
       << "[-load <addr>] [-entry <pc>] [-steps <n>] [-sp <addr>] "
       << "[-dtb <file>] [-dtb-addr <addr>] [-segment <file@addr>]... "
       << "[-snapshot-load <file>] [-snapshot-save <file>] \n"
-      << "[-stop-on-uart <text>]\n";
+      << "[-stop-on-uart <text>] [-decode <fast|slow>]\n";
 }
 
 std::optional<Options> parse_args(int argc, char** argv) {
@@ -179,6 +180,15 @@ std::optional<Options> parse_args(int argc, char** argv) {
       opt.snapshot_save_path = val;
     } else if (key == "-stop-on-uart") {
       opt.stop_on_uart_pattern = val;
+    } else if (key == "-decode") {
+      if (val == "fast") {
+        opt.predecode_enabled = true;
+      } else if (val == "slow") {
+        opt.predecode_enabled = false;
+      } else {
+        std::cerr << "Invalid -decode value (expected fast or slow): " << val << '\n';
+        return std::nullopt;
+      }
     } else if (key == "-segment") {
       const std::size_t at = val.rfind('@');
       if (at == std::string::npos || at == 0 || at + 1 >= val.size()) {
@@ -294,6 +304,7 @@ int main(int argc, char** argv) {
   const Options& opt = *parsed;
 
   aarchvm::SoC soc;
+  soc.set_predecode_enabled(opt.predecode_enabled);
   if (opt.stop_on_uart_pattern.has_value()) {
     soc.set_stop_on_uart_pattern(*opt.stop_on_uart_pattern);
   } else if (const char* stop_on_uart = std::getenv("AARCHVM_STOP_ON_UART"); stop_on_uart != nullptr) {
@@ -377,6 +388,7 @@ int main(int argc, char** argv) {
 
   const bool interactive_stdin = isatty(STDIN_FILENO);
   (void)interactive_stdin;
+  
   RawStdinGuard stdin_guard;
   const std::vector<UartRxEvent> uart_rx_events = parse_uart_rx_script_env();
   std::size_t next_uart_rx_event = 0;
@@ -404,6 +416,7 @@ int main(int argc, char** argv) {
       break;
     }
   }
+
   if (const char* dump_post_addr_env = std::getenv("AARCHVM_DUMP_POST_ADDR"); dump_post_addr_env != nullptr) {
     const std::uint64_t dump_addr = parse_u64(std::string(dump_post_addr_env));
     const std::size_t dump_len =

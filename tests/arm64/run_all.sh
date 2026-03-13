@@ -115,3 +115,28 @@ rm -f "$SNAP"
 ./build/aarchvm -snapshot-load "$SNAP" -steps 200000 > tests/arm64/out/snapshot_post.log
 test "$(tr -d '\r\n' < tests/arm64/out/snapshot_pre.log)" = 'A'
 test "$(tr -d '\r\n' < tests/arm64/out/snapshot_post.log)" = 'B'
+
+run predecode_dyn_codegen.bin 400000
+run predecode_va_exec_switch.bin 5000000
+run predecode_load_store_min.bin 400000
+
+PRE_FAST=tests/arm64/out/predecode_fast.log
+PRE_SLOW=tests/arm64/out/predecode_slow.log
+./build/aarchvm -bin tests/arm64/out/predecode_dyn_codegen.bin -load 0x0 -entry 0x0 -steps 400000 > "$PRE_FAST"
+./build/aarchvm -decode slow -bin tests/arm64/out/predecode_dyn_codegen.bin -load 0x0 -entry 0x0 -steps 400000 > "$PRE_SLOW"
+test "$(tr -d '\r\n' < "$PRE_FAST")" = 'AB'
+test "$(tr -d '\r\n' < "$PRE_SLOW")" = 'AB'
+
+VA_FAST=tests/arm64/out/predecode_va_fast.log
+VA_SLOW=tests/arm64/out/predecode_va_slow.log
+./build/aarchvm -bin tests/arm64/out/predecode_va_exec_switch.bin -load 0x0 -entry 0x0 -steps 5000000 > "$VA_FAST"
+./build/aarchvm -decode slow -bin tests/arm64/out/predecode_va_exec_switch.bin -load 0x0 -entry 0x0 -steps 5000000 > "$VA_SLOW"
+test "$(tr -d '\r\n' < "$VA_FAST")" = 'ABA'
+test "$(tr -d '\r\n' < "$VA_SLOW")" = 'ABA'
+
+LS_FAST=tests/arm64/out/predecode_ls_fast.log
+LS_SLOW=tests/arm64/out/predecode_ls_slow.log
+./build/aarchvm -bin tests/arm64/out/predecode_load_store_min.bin -load 0x0 -entry 0x0 -steps 400000 > "$LS_FAST"
+./build/aarchvm -decode slow -bin tests/arm64/out/predecode_load_store_min.bin -load 0x0 -entry 0x0 -steps 400000 > "$LS_SLOW"
+test "$(tr -d '\r\n' < "$LS_FAST")" = 'L'
+test "$(tr -d '\r\n' < "$LS_SLOW")" = 'L'

@@ -26,6 +26,7 @@ public:
   bool load_image(std::uint64_t addr, const std::vector<std::uint32_t>& words);
   bool load_binary(std::uint64_t addr, const std::vector<std::uint8_t>& bytes);
   void reset(std::uint64_t entry_pc);
+  void set_predecode_enabled(bool enabled);
   void set_sp(std::uint64_t sp);
   void set_x(std::uint32_t idx, std::uint64_t value);
   void inject_uart_rx(std::uint8_t byte);

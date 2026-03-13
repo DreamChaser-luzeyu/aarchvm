@@ -117,24 +117,30 @@ SoC::SoC()
 
 bool SoC::load_image(std::uint64_t addr, const std::vector<std::uint32_t>& words) {
   std::uint64_t offset = 0;
+  bool ok = false;
   if (in_range(addr, kBootRamBase, kBootRamSize, offset)) {
-    return boot_ram_->load(offset, words);
+    ok = boot_ram_->load(offset, words);
+  } else if (in_range(addr, kSdramBase, kSdramSize, offset)) {
+    ok = sdram_->load(offset, words);
   }
-  if (in_range(addr, kSdramBase, kSdramSize, offset)) {
-    return sdram_->load(offset, words);
+  if (ok) {
+    cpu_.invalidate_decode_all();
   }
-  return false;
+  return ok;
 }
 
 bool SoC::load_binary(std::uint64_t addr, const std::vector<std::uint8_t>& bytes) {
   std::uint64_t offset = 0;
+  bool ok = false;
   if (in_range(addr, kBootRamBase, kBootRamSize, offset)) {
-    return boot_ram_->load_bytes(offset, bytes);
+    ok = boot_ram_->load_bytes(offset, bytes);
+  } else if (in_range(addr, kSdramBase, kSdramSize, offset)) {
+    ok = sdram_->load_bytes(offset, bytes);
   }
-  if (in_range(addr, kSdramBase, kSdramSize, offset)) {
-    return sdram_->load_bytes(offset, bytes);
+  if (ok) {
+    cpu_.invalidate_decode_all();
   }
-  return false;
+  return ok;
 }
 
 void SoC::reset(std::uint64_t entry_pc) {
@@ -142,6 +148,10 @@ void SoC::reset(std::uint64_t entry_pc) {
   timer_->set_cycles_per_step(timer_tick_scale_);
   timer_->rebase_to_steps(cpu_.steps());
   reset_perf_measurement_state();
+}
+
+void SoC::set_predecode_enabled(bool enabled) {
+  cpu_.set_predecode_enabled(enabled);
 }
 
 void SoC::set_sp(std::uint64_t sp) {
@@ -360,11 +370,11 @@ bool SoC::run(std::size_t max_steps) {
 }
 
 std::optional<std::uint8_t> SoC::read_u8(std::uint64_t addr) const {
-  const auto value = bus_.read(addr, 1);
-  if (!value.has_value()) {
+  std::uint64_t value = 0;
+  if (!bus_.read(addr, 1, value)) {
     return std::nullopt;
   }
-  return static_cast<std::uint8_t>(*value & 0xFFu);
+  return static_cast<std::uint8_t>(value & 0xFFu);
 }
 
 std::uint64_t SoC::pc() const {

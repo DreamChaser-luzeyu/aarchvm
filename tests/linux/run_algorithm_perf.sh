@@ -15,6 +15,11 @@ PROMPT_DELAY_SEC="${AARCHVM_UBOOT_PROMPT_DELAY_SEC:-1}"
 COMMAND_STEP_DELTA="${AARCHVM_PERF_COMMAND_STEP_DELTA:-50000}"
 COMMAND_STEP_GAP="${AARCHVM_PERF_COMMAND_STEP_GAP:-2000}"
 BUILD_LOG="${AARCHVM_USERTEST_SNAPSHOT_LOG:-out/linux-usertests-shell-v1-build.log}"
+AARCHVM_ARGS_RAW="${AARCHVM_ARGS:-}"
+AARCHVM_EXTRA_ARGS=()
+if [[ -n "$AARCHVM_ARGS_RAW" ]]; then
+  read -r -a AARCHVM_EXTRA_ARGS <<< "$AARCHVM_ARGS_RAW"
+fi
 INITRD="out/initramfs-usertests.cpio"
 INITRD_SIZE_HEX=$(printf '0x%x' "$(stat -c '%s' "$INITRD")")
 CMD="${AARCHVM_PERF_COMMAND:-bench_runner}"
@@ -53,7 +58,7 @@ set -o pipefail
 AARCHVM_UART_RX_SCRIPT="$RX_SCRIPT" \
 AARCHVM_BUS_FASTPATH="$FASTPATH" \
 AARCHVM_TIMER_SCALE="$TIMER_SCALE" \
-timeout "$TIMEOUT_SEC" ./build/aarchvm \
+timeout "$TIMEOUT_SEC" ./build/aarchvm "${AARCHVM_EXTRA_ARGS[@]}" \
   -bin u-boot-2026.01/build-qemu_arm64/u-boot.bin \
   -load 0x0 \
   -entry 0x0 \
