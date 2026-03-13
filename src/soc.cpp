@@ -104,14 +104,6 @@ SoC::SoC()
     bus_.set_fast_path(fast_path_);
   }
 
-  if (fast_path_ != nullptr) {
-    fast_path_ = std::make_shared<BusFastPath>(*boot_ram_, *sdram_, *uart_, *perf_mailbox_, *gic_, *timer_);
-    bus_.set_fast_path(fast_path_);
-  }
-  if (fast_path_ != nullptr) {
-    fast_path_ = std::make_shared<BusFastPath>(*boot_ram_, *sdram_, *uart_, *perf_mailbox_, *gic_, *timer_);
-    bus_.set_fast_path(fast_path_);
-  }
   if (const auto scale = env_timer_scale(); scale.has_value()) {
     timer_tick_scale_ = *scale;
   }
@@ -291,6 +283,11 @@ void SoC::reset_perf_measurement_state() {
   stop_requested_ = false;
   perf_session_ = {};
   local_perf_counters_ = {};
+  device_sync_valid_ = false;
+  device_sync_steps_ = 0;
+  last_timer_virt_level_ = false;
+  last_timer_phys_level_ = false;
+  last_uart_level_ = false;
   bus_.reset_perf_counters();
   if (fast_path_ != nullptr) {
     fast_path_->reset_perf_counters();
@@ -302,10 +299,31 @@ void SoC::reset_perf_measurement_state() {
 bool SoC::run(std::size_t max_steps) {
   auto sync_devices = [&]() {
     ++local_perf_counters_.sync_devices;
-    timer_->sync_to_steps(cpu_.steps());
-    gic_->set_level(kTimerVirtIntId, timer_->irq_pending() || timer_->irq_pending_virtual());
-    gic_->set_level(kTimerPhysIntId, timer_->irq_pending_physical());
-    gic_->set_level(kUartIntId, uart_->irq_pending());
+    const std::uint64_t steps = cpu_.steps();
+    if (!device_sync_valid_ || device_sync_steps_ != steps) {
+      timer_->sync_to_steps(steps);
+      device_sync_steps_ = steps;
+    }
+
+    const bool timer_virt_level = timer_->irq_pending() || timer_->irq_pending_virtual();
+    if (!device_sync_valid_ || timer_virt_level != last_timer_virt_level_) {
+      gic_->set_level(kTimerVirtIntId, timer_virt_level);
+      last_timer_virt_level_ = timer_virt_level;
+    }
+
+    const bool timer_phys_level = timer_->irq_pending_physical();
+    if (!device_sync_valid_ || timer_phys_level != last_timer_phys_level_) {
+      gic_->set_level(kTimerPhysIntId, timer_phys_level);
+      last_timer_phys_level_ = timer_phys_level;
+    }
+
+    const bool uart_level = uart_->irq_pending();
+    if (!device_sync_valid_ || uart_level != last_uart_level_) {
+      gic_->set_level(kUartIntId, uart_level);
+      last_uart_level_ = uart_level;
+    }
+
+    device_sync_valid_ = true;
   };
 
   static constexpr std::size_t kMaxInternalChunk = 65536;

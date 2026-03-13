@@ -508,14 +508,14 @@ bool Cpu::step() {
     }
   }
 
-  const auto fetch_result = translate_address(pc_, AccessType::Fetch, true);
-  if (!fetch_result.has_value()) {
+  TranslationResult fetch_result{};
+  if (!translate_address(pc_, AccessType::Fetch, &fetch_result, true)) {
     const std::uint32_t iss = last_translation_fault_.has_value() ? fault_status_code(*last_translation_fault_) : 0u;
     enter_sync_exception(pc_, sysregs_.in_el0() ? 0x20u : 0x21u, iss, true, pc_);
     return true;
   }
 
-  const auto fetch = bus_.read(fetch_result->pa, 4);
+  const auto fetch = bus_.read(fetch_result.pa, 4);
   if (!fetch.has_value()) {
     enter_sync_exception(pc_, sysregs_.in_el0() ? 0x20u : 0x21u, 0u, true, pc_);
     return true;
@@ -604,13 +604,13 @@ bool Cpu::step() {
         std::cerr << " x" << i << "=0x" << regs_[i];
       }
       std::cerr << " sp=0x" << regs_[31];
-      const auto x6_pa = translate_address(regs_[6], AccessType::Read, false, false);
-      if (x6_pa.has_value()) {
-        std::cerr << " x6_pa=0x" << x6_pa->pa;
+      TranslationResult x6_pa{};
+      if (translate_address(regs_[6], AccessType::Read, &x6_pa, false, false)) {
+        std::cerr << " x6_pa=0x" << x6_pa.pa;
       }
-      const auto x12_pa = translate_address(regs_[12], AccessType::Read, false, false);
-      if (x12_pa.has_value()) {
-        std::cerr << " x12_pa=0x" << x12_pa->pa;
+      TranslationResult x12_pa{};
+      if (translate_address(regs_[12], AccessType::Read, &x12_pa, false, false)) {
+        std::cerr << " x12_pa=0x" << x12_pa.pa;
       }
       std::cerr << std::dec << '\n';
     }
@@ -754,9 +754,9 @@ void Cpu::enter_sync_exception(std::uint64_t fault_pc,
               << " ttbr1=0x" << sysregs_.ttbr1_el1()
               << " tcr=0x" << sysregs_.tcr_el1()
               << " sctlr=0x" << sysregs_.sctlr_el1();
-    const auto trace_fetch = translate_address(fault_pc, AccessType::Fetch, false, false);
-    if (trace_fetch.has_value()) {
-      const auto trace_insn = bus_.read(trace_fetch->pa, 4);
+    TranslationResult trace_fetch{};
+    if (translate_address(fault_pc, AccessType::Fetch, &trace_fetch, false, false)) {
+      const auto trace_insn = bus_.read(trace_fetch.pa, 4);
       if (trace_insn.has_value()) {
         std::cerr << " insn=0x" << (*trace_insn & 0xFFFFFFFFu);
       }
@@ -769,27 +769,27 @@ void Cpu::enter_sync_exception(std::uint64_t fault_pc,
   pc_ = sysregs_.vbar_el1() + (from_lower_el ? 0x400u : (from_spx ? 0x200u : 0x0u));
 }
 
-std::optional<Cpu::TranslationResult> Cpu::translate_address(std::uint64_t va,
-                                                             AccessType access,
-                                                             bool allow_tlb_fill,
-                                                             bool use_tlb) {
+bool Cpu::translate_address(std::uint64_t va,
+                            AccessType access,
+                            TranslationResult* out_result,
+                            bool allow_tlb_fill,
+                            bool use_tlb) {
   ++perf_counters_.translate_calls;
   last_translation_fault_.reset();
 
   if (!sysregs_.mmu_enabled()) {
-    TranslationResult result{};
-    result.pa = va;
-    result.level = 3;
-    result.attr_index = 0;
-    result.mair_attr = 0;
-    result.writable = true;
-    result.executable = true;
-    result.pxn = false;
-    result.uxn = false;
-    result.memory_type = MemoryType::Normal;
-    result.leaf_shareability = Shareability::InnerShareable;
-    result.walk_attrs = decode_walk_attributes(false);
-    return result;
+    out_result->pa = va;
+    out_result->level = 3;
+    out_result->attr_index = 0;
+    out_result->mair_attr = 0;
+    out_result->writable = true;
+    out_result->executable = true;
+    out_result->pxn = false;
+    out_result->uxn = false;
+    out_result->memory_type = MemoryType::Normal;
+    out_result->leaf_shareability = Shareability::InnerShareable;
+    out_result->walk_attrs = decode_walk_attributes(false);
+    return true;
   }
 
   const std::uint64_t page = (va >> 12) & tlb_page_mask();
@@ -809,49 +809,48 @@ std::optional<Cpu::TranslationResult> Cpu::translate_address(std::uint64_t va,
     }
     if (hit != nullptr) {
       ++perf_counters_.tlb_hits;
-      TranslationResult result{};
-      result.pa = (hit->pa_page << 12) | off;
-      result.level = hit->level;
-      result.attr_index = hit->attr_index;
-      result.mair_attr = hit->mair_attr;
-      result.writable = hit->writable;
-      result.executable = hit->executable;
-      result.pxn = hit->pxn;
-      result.uxn = hit->uxn;
-      result.memory_type = hit->memory_type;
-      result.leaf_shareability = hit->leaf_shareability;
-      result.walk_attrs = hit->walk_attrs;
+      out_result->pa = (hit->pa_page << 12) | off;
+      out_result->level = hit->level;
+      out_result->attr_index = hit->attr_index;
+      out_result->mair_attr = hit->mair_attr;
+      out_result->writable = hit->writable;
+      out_result->executable = hit->executable;
+      out_result->pxn = hit->pxn;
+      out_result->uxn = hit->uxn;
+      out_result->memory_type = hit->memory_type;
+      out_result->leaf_shareability = hit->leaf_shareability;
+      out_result->walk_attrs = hit->walk_attrs;
       TranslationFault fault{};
-      if (!access_permitted(result, access, result.level, &fault)) {
+      if (!access_permitted(*out_result, access, out_result->level, &fault)) {
         last_translation_fault_ = fault;
-        return std::nullopt;
+        return false;
       }
-      return result;
+      return true;
     }
     ++perf_counters_.tlb_misses;
   }
 
   TranslationFault fault{};
-  const auto result = walk_page_tables(va, access, &fault);
-  if (!result.has_value()) {
+  if (!walk_page_tables(va, access, out_result, &fault)) {
     last_translation_fault_ = fault;
-    return std::nullopt;
+    return false;
   }
 
   if (allow_tlb_fill) {
-    tlb_insert(page, *result);
+    tlb_insert(page, *out_result);
   }
-  return result;
+  return true;
 }
 
-std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
-                                                            AccessType access,
-                                                            TranslationFault* fault) {
+bool Cpu::walk_page_tables(std::uint64_t va,
+                       AccessType access,
+                       TranslationResult* out_result,
+                       TranslationFault* fault) {
   ++perf_counters_.page_walks;
   const bool trace_va = trace_va_.has_value() && *trace_va_ == va && !trace_va_hit_;
   const auto trace_va_log = [&](const std::string& msg) {
     if (trace_va && trace_exceptions_) {
-      std::cerr << msg << std::dec << '\n';
+      std::cerr << msg << std::dec << std::endl;
     }
   };
   const std::uint64_t tcr = sysregs_.tcr_el1();
@@ -865,7 +864,7 @@ std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
     if (fault != nullptr) {
       *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize, .level = 0, .write = access == AccessType::Write};
     }
-    return std::nullopt;
+    return false;
   }
 
   const std::uint32_t va_bits = 64u - txsz;
@@ -873,7 +872,7 @@ std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
     if (fault != nullptr) {
       *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize, .level = 0, .write = access == AccessType::Write};
     }
-    return std::nullopt;
+    return false;
   }
 
   const std::uint32_t tg = va_upper
@@ -884,7 +883,7 @@ std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
     if (fault != nullptr) {
       *fault = TranslationFault{.kind = TranslationFault::Kind::Translation, .level = 0, .write = access == AccessType::Write};
     }
-    return std::nullopt;
+    return false;
   }
 
   const bool epd = va_upper ? (((tcr >> 23) & 0x1u) != 0) : (((tcr >> 7) & 0x1u) != 0);
@@ -892,7 +891,7 @@ std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
     if (fault != nullptr) {
       *fault = TranslationFault{.kind = TranslationFault::Kind::Translation, .level = 0, .write = access == AccessType::Write};
     }
-    return std::nullopt;
+    return false;
   }
 
   const std::uint64_t low_limit = (va_bits == 64u) ? ~0ull : ((1ull << va_bits) - 1ull);
@@ -900,7 +899,7 @@ std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
     if (fault != nullptr) {
       *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize, .level = 0, .write = access == AccessType::Write};
     }
-    return std::nullopt;
+    return false;
   }
   if (va_upper && va_bits < 64u) {
     const std::uint64_t upper_tag_mask = ~low_limit;
@@ -908,7 +907,7 @@ std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
       if (fault != nullptr) {
         *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize, .level = 0, .write = access == AccessType::Write};
       }
-      return std::nullopt;
+      return false;
     }
   }
 
@@ -918,7 +917,7 @@ std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
     if (fault != nullptr) {
       *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize, .level = 0, .write = access == AccessType::Write};
     }
-    return std::nullopt;
+    return false;
   }
 
   const std::uint32_t levels = (va_bits <= 12u) ? 1u : ((va_bits - 12u + 8u) / 9u);
@@ -941,7 +940,7 @@ std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
     if (fault != nullptr) {
       *fault = TranslationFault{.kind = TranslationFault::Kind::Translation, .level = 0, .write = access == AccessType::Write};
     }
-    return std::nullopt;
+    return false;
   }
 
   const std::uint64_t idx[4] = {
@@ -975,7 +974,7 @@ std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
                                   .level = static_cast<std::uint8_t>(level),
                                   .write = access == AccessType::Write};
       }
-      return std::nullopt;
+      return false;
     }
 
     const std::uint64_t desc = *desc_opt;
@@ -987,7 +986,7 @@ std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
                                   .level = static_cast<std::uint8_t>(level),
                                   .write = access == AccessType::Write};
       }
-      return std::nullopt;
+      return false;
     }
 
     if (level == 3u) {
@@ -997,7 +996,7 @@ std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
                                     .level = static_cast<std::uint8_t>(level),
                                     .write = access == AccessType::Write};
         }
-        return std::nullopt;
+        return false;
       }
 
       const bool af = ((desc >> 10) & 0x1u) != 0;
@@ -1014,33 +1013,32 @@ std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
                                     .level = static_cast<std::uint8_t>(level),
                                     .write = access == AccessType::Write};
         }
-        return std::nullopt;
+        return false;
       }
 
-      TranslationResult result{};
-      result.pa = page_base | (va & 0xFFFull);
-      result.level = static_cast<std::uint8_t>(level);
-      result.attr_index = attr_index;
-      result.mair_attr = mair_attr;
-      result.writable = !(inherited.write_protect || (leaf_ro && !dbm));
-      result.pxn = pxn || inherited.pxn;
-      result.uxn = uxn || inherited.uxn;
-      result.executable = !result.pxn;
-      result.memory_type = decode_memory_type(mair_attr);
-      result.leaf_shareability = static_cast<Shareability>((desc >> 8) & 0x3u);
-      result.walk_attrs = walk_attrs;
+      out_result->pa = page_base | (va & 0xFFFull);
+      out_result->level = static_cast<std::uint8_t>(level);
+      out_result->attr_index = attr_index;
+      out_result->mair_attr = mair_attr;
+      out_result->writable = !(inherited.write_protect || (leaf_ro && !dbm));
+      out_result->pxn = pxn || inherited.pxn;
+      out_result->uxn = uxn || inherited.uxn;
+      out_result->executable = !out_result->pxn;
+      out_result->memory_type = decode_memory_type(mair_attr);
+      out_result->leaf_shareability = static_cast<Shareability>((desc >> 8) & 0x3u);
+      out_result->walk_attrs = walk_attrs;
       if (!af) {
         if (fault != nullptr) {
           *fault = TranslationFault{.kind = TranslationFault::Kind::AccessFlag,
                                     .level = static_cast<std::uint8_t>(level),
                                     .write = access == AccessType::Write};
         }
-        return std::nullopt;
+        return false;
       }
-      if (!access_permitted(result, access, static_cast<std::uint8_t>(level), fault)) {
-        return std::nullopt;
+      if (!access_permitted(*out_result, access, static_cast<std::uint8_t>(level), fault)) {
+        return false;
       }
-      return result;
+      return true;
     }
 
     if (bit1) {
@@ -1054,7 +1052,7 @@ std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
                                     .level = static_cast<std::uint8_t>(level),
                                     .write = access == AccessType::Write};
         }
-        return std::nullopt;
+        return false;
       }
       continue;
     }
@@ -1065,7 +1063,7 @@ std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
                                   .level = static_cast<std::uint8_t>(level),
                                   .write = access == AccessType::Write};
       }
-      return std::nullopt;
+      return false;
     }
 
     const bool af = ((desc >> 10) & 0x1u) != 0;
@@ -1085,67 +1083,44 @@ std::optional<Cpu::TranslationResult> Cpu::walk_page_tables(std::uint64_t va,
                                   .level = static_cast<std::uint8_t>(level),
                                   .write = access == AccessType::Write};
       }
-      return std::nullopt;
+      return false;
     }
 
-    TranslationResult result{};
-    result.pa = pa_base | (va & block_mask);
-    result.level = static_cast<std::uint8_t>(level);
-    result.attr_index = attr_index;
-    result.mair_attr = mair_attr;
-    result.writable = !(inherited.write_protect || (leaf_ro && !dbm));
-    result.pxn = pxn || inherited.pxn;
-    result.uxn = uxn || inherited.uxn;
-    result.executable = !result.pxn;
-    result.memory_type = decode_memory_type(mair_attr);
-    result.leaf_shareability = static_cast<Shareability>((desc >> 8) & 0x3u);
-    result.walk_attrs = walk_attrs;
+    out_result->pa = pa_base | (va & block_mask);
+    out_result->level = static_cast<std::uint8_t>(level);
+    out_result->attr_index = attr_index;
+    out_result->mair_attr = mair_attr;
+    out_result->writable = !(inherited.write_protect || (leaf_ro && !dbm));
+    out_result->pxn = pxn || inherited.pxn;
+    out_result->uxn = uxn || inherited.uxn;
+    out_result->executable = !out_result->pxn;
+    out_result->memory_type = decode_memory_type(mair_attr);
+    out_result->leaf_shareability = static_cast<Shareability>((desc >> 8) & 0x3u);
+    out_result->walk_attrs = walk_attrs;
     if (!af) {
       if (fault != nullptr) {
         *fault = TranslationFault{.kind = TranslationFault::Kind::AccessFlag,
                                   .level = static_cast<std::uint8_t>(level),
                                   .write = access == AccessType::Write};
       }
-      return std::nullopt;
+      return false;
     }
-    if (!access_permitted(result, access, static_cast<std::uint8_t>(level), fault)) {
+    if (!access_permitted(*out_result, access, static_cast<std::uint8_t>(level), fault)) {
       if (trace_va) {
         trace_va_hit_ = true;
       }
-      return std::nullopt;
+      return false;
     }
     if (trace_va) {
       trace_va_hit_ = true;
     }
-    return result;
+    return true;
   }
 
   if (trace_va) {
     trace_va_hit_ = true;
   }
-  return std::nullopt;
-}
-
-bool Cpu::access_permitted(const TranslationResult& result,
-                           AccessType access,
-                           std::uint8_t level,
-                           TranslationFault* fault) const {
-  if (access == AccessType::Write && !result.writable) {
-    if (fault != nullptr) {
-      *fault = TranslationFault{.kind = TranslationFault::Kind::Permission, .level = level, .write = true};
-    }
-    return false;
-  }
-  if (access == AccessType::Fetch) {
-    const bool execute_blocked = sysregs_.in_el0() ? result.uxn : result.pxn;
-    if (execute_blocked) {
-      if (fault != nullptr) {
-        *fault = TranslationFault{.kind = TranslationFault::Kind::Permission, .level = level, .write = false};
-      }
-      return false;
-    }
-  }
-  return true;
+  return false;
 }
 
 std::uint32_t Cpu::fault_status_code(const TranslationFault& fault) const {
@@ -1230,16 +1205,6 @@ void Cpu::tlb_flush_all() {
   tlb_next_replace_.fill(0);
 }
 
-const Cpu::TlbEntry* Cpu::tlb_lookup(std::uint64_t va_page) const {
-  const auto& set = tlb_entries_[tlb_set_index(va_page)];
-  for (const TlbEntry& entry : set) {
-    if (entry.valid && entry.va_page == va_page) {
-      return &entry;
-    }
-  }
-  return nullptr;
-}
-
 void Cpu::tlb_insert(std::uint64_t va_page, const TranslationResult& result) {
   ++perf_counters_.tlb_inserts;
   TlbEntry entry{};
@@ -1312,47 +1277,6 @@ void Cpu::tlb_flush_va(std::uint64_t va) {
   // local tests historically passed raw VAs. Accept both encodings here.
   tlb_invalidate_page((va >> 12) & tlb_page_mask());
   tlb_invalidate_page(va & tlb_page_mask());
-}
-
-std::uint64_t Cpu::reg(std::uint32_t idx) const {
-  if (idx >= 31) {
-    return 0;
-  }
-  return regs_[idx];
-}
-
-std::uint32_t Cpu::reg32(std::uint32_t idx) const {
-  return static_cast<std::uint32_t>(reg(idx) & 0xFFFFFFFFu);
-}
-
-void Cpu::set_reg(std::uint32_t idx, std::uint64_t value) {
-  if (idx >= 31) {
-    return;
-  }
-  regs_[idx] = value;
-}
-
-void Cpu::set_reg32(std::uint32_t idx, std::uint32_t value) {
-  set_reg(idx, value);
-}
-
-std::uint64_t Cpu::sp_or_reg(std::uint32_t idx) const {
-  if (idx == 31) {
-    return regs_[31];
-  }
-  return reg(idx);
-}
-
-void Cpu::set_sp_or_reg(std::uint32_t idx, std::uint64_t value, bool is_32bit) {
-  if (idx == 31) {
-    regs_[31] = is_32bit ? static_cast<std::uint32_t>(value) : value;
-    return;
-  }
-  if (is_32bit) {
-    set_reg32(idx, static_cast<std::uint32_t>(value));
-  } else {
-    set_reg(idx, value);
-  }
 }
 
 std::uint64_t Cpu::q_reg_lane(std::uint32_t idx, std::size_t lane) const {
@@ -1541,8 +1465,8 @@ bool Cpu::exec_system(std::uint32_t insn) {
     const std::uint64_t base = reg(rt) & ~0x3Full;
     for (std::uint64_t off = 0; off < 64u; off += 8u) {
       const std::uint64_t va = base + off;
-      const auto result = translate_address(va, AccessType::Write, true);
-      if (!result.has_value() || !bus_.write(result->pa, 0, 8)) {
+      TranslationResult result{};
+      if (!translate_address(va, AccessType::Write, &result, true) || !bus_.write(result.pa, 0, 8)) {
         const std::uint32_t iss = last_translation_fault_.has_value() ? fault_status_code(*last_translation_fault_) : 0u;
         enter_sync_exception(pc_ - 4, sysregs_.in_el0() ? 0x24u : 0x25u, iss, true, va);
         return true;
@@ -1572,9 +1496,9 @@ bool Cpu::exec_system(std::uint32_t insn) {
   // AT S1E1R, Xt
   if ((insn & 0xFFFFFFE0u) == 0xD5087800u) {
     const std::uint32_t rt = insn & 0x1Fu;
-    const auto result = translate_address(reg(rt), AccessType::Read, false, false);
-    if (result.has_value()) {
-      sysregs_.set_par_el1(result->pa & 0x0000FFFFFFFFF000ull);
+    TranslationResult result{};
+    if (translate_address(reg(rt), AccessType::Read, &result, false, false)) {
+      sysregs_.set_par_el1(result.pa & 0x0000FFFFFFFFF000ull);
     } else if (last_translation_fault_.has_value()) {
       set_par_el1_for_fault(*last_translation_fault_);
     } else {
@@ -1586,9 +1510,9 @@ bool Cpu::exec_system(std::uint32_t insn) {
   // AT S1E1W, Xt
   if ((insn & 0xFFFFFFE0u) == 0xD5087820u) {
     const std::uint32_t rt = insn & 0x1Fu;
-    const auto result = translate_address(reg(rt), AccessType::Write, false, false);
-    if (result.has_value()) {
-      sysregs_.set_par_el1(result->pa & 0x0000FFFFFFFFF000ull);
+    TranslationResult result{};
+    if (translate_address(reg(rt), AccessType::Write, &result, false, false)) {
+      sysregs_.set_par_el1(result.pa & 0x0000FFFFFFFFF000ull);
     } else if (last_translation_fault_.has_value()) {
       set_par_el1_for_fault(*last_translation_fault_);
     } else {
@@ -3708,11 +3632,11 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     enter_sync_exception(pc_ - 4, sysregs_.in_el0() ? 0x24u : 0x25u, iss, true, va);
   };
   const auto mmu_read = [this](std::uint64_t va, std::size_t size) -> std::optional<std::uint64_t> {
-    const auto result = translate_address(va, AccessType::Read, true);
-    if (!result.has_value()) {
+    TranslationResult result{};
+    if (!translate_address(va, AccessType::Read, &result, true)) {
       return std::nullopt;
     }
-    return bus_.read(result->pa, size);
+    return bus_.read(result.pa, size);
   };
   const auto mmu_write = [this, insn, &mmu_read](std::uint64_t va, std::uint64_t value, std::size_t size) -> bool {
     static const std::optional<std::uint64_t> trace_write_va = []() -> std::optional<std::uint64_t> {
@@ -3726,15 +3650,15 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
         return std::nullopt;
       }
     }();
-    const auto result = translate_address(va, AccessType::Write, true);
-    if (!result.has_value()) {
+    TranslationResult result{};
+    if (!translate_address(va, AccessType::Write, &result, true)) {
       return false;
     }
     if (trace_write_va.has_value() && *trace_write_va >= va && *trace_write_va < (va + size)) {
       const std::uint64_t current_task = sysregs_.sp_el0();
       const auto task_stack = mmu_read(current_task + 32u, 8u);
       std::cerr << std::dec << "WRITE-HIT va=0x" << std::hex << va
-                << " pa=0x" << result->pa
+                << " pa=0x" << result.pa
                 << " size=" << std::dec << size
                 << " value=0x" << std::hex << value
                 << " pc=0x" << (pc_ - 4)
@@ -3748,7 +3672,7 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       }
       std::cerr << '\n';
     }
-    const bool ok = bus_.write(result->pa, value, size);
+    const bool ok = bus_.write(result.pa, value, size);
     if (ok) {
       exclusive_valid_ = false;
       exclusive_addr_ = 0;

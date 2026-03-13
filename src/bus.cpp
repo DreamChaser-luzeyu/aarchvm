@@ -10,14 +10,15 @@ void Bus::map(std::uint64_t base, std::uint64_t size, std::shared_ptr<Device> de
 
 void Bus::set_fast_path(std::shared_ptr<BusFastPath> fast_path) {
   fast_path_ = std::move(fast_path);
+  fast_path_raw_ = fast_path_.get();
 }
 
 std::optional<std::uint64_t> Bus::read(std::uint64_t addr, std::size_t size) const {
   ++perf_counters_.read_ops;
   perf_counters_.read_bytes += size;
-  if (fast_path_ != nullptr) {
+  if (fast_path_raw_ != nullptr) {
     std::uint64_t value = 0;
-    if (fast_path_->read(addr, size, value)) {
+    if (fast_path_raw_->read(addr, size, value)) {
       return value;
     }
   }
@@ -33,7 +34,7 @@ std::optional<std::uint64_t> Bus::read(std::uint64_t addr, std::size_t size) con
 bool Bus::write(std::uint64_t addr, std::uint64_t value, std::size_t size) const {
   ++perf_counters_.write_ops;
   perf_counters_.write_bytes += size;
-  if (fast_path_ != nullptr && fast_path_->write(addr, value, size)) {
+  if (fast_path_raw_ != nullptr && fast_path_raw_->write(addr, value, size)) {
     return true;
   }
 

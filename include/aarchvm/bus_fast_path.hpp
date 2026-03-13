@@ -58,110 +58,136 @@ public:
         timer_(&timer) {}
 
   [[nodiscard]] bool read(std::uint64_t addr, std::size_t size, std::uint64_t& value) const {
-    const std::uint64_t sdram_off = addr - kSdramBase;
-    if (likely(sdram_off < kSdramSize && size <= (kSdramSize - sdram_off))) {
-      if (load_ram(sdram_bytes_ + static_cast<std::size_t>(sdram_off), size, value)) {
+    if (likely(kSdramBase <= addr && addr < kSdramBase + kSdramSize)) {
+      const std::uint64_t sdram_off = addr - kSdramBase;
+      if (size <= (kSdramSize - sdram_off)) {
+        if (load_ram(sdram_bytes_ + static_cast<std::size_t>(sdram_off), size, value)) {
+          ++perf_counters_.read_ops;
+          perf_counters_.read_bytes += size;
+          return true;
+        }
+        return false;
+      }
+    }
+
+    if (kBootRamBase <= addr && addr < kBootRamBase + kBootRamSize) {
+      const std::uint64_t boot_off = addr - kBootRamBase;
+      if (size <= (kBootRamSize - boot_off)) {
+        if (load_ram(boot_ram_bytes_ + static_cast<std::size_t>(boot_off), size, value)) {
+          ++perf_counters_.read_ops;
+          perf_counters_.read_bytes += size;
+          return true;
+        }
+        return false;
+      }
+    }
+
+    if (kUartBase <= addr && addr < kUartBase + kUartSize) {
+      const std::uint64_t uart_off = addr - kUartBase;
+      if (size <= (kUartSize - uart_off)) {
         ++perf_counters_.read_ops;
         perf_counters_.read_bytes += size;
+        value = uart_->read(uart_off, size);
         return true;
       }
-      return false;
     }
 
-    if (addr < kBootRamSize && size <= (kBootRamSize - addr)) {
-      if (load_ram(boot_ram_bytes_ + static_cast<std::size_t>(addr), size, value)) {
+    if (kPerfBase <= addr && addr < kPerfBase + kPerfSize) {
+      const std::uint64_t perf_off = addr - kPerfBase;
+      if (size <= (kPerfSize - perf_off)) {
         ++perf_counters_.read_ops;
         perf_counters_.read_bytes += size;
+        value = perf_mailbox_->read(perf_off, size);
         return true;
       }
-      return false;
     }
 
-    const std::uint64_t uart_off = addr - kUartBase;
-    if (uart_off < kUartSize && size <= (kUartSize - uart_off)) {
-      ++perf_counters_.read_ops;
-      perf_counters_.read_bytes += size;
-      value = uart_->read(uart_off, size);
-      return true;
+    if (kGicBase <= addr && addr < kGicBase + kGicSize) {
+      const std::uint64_t gic_off = addr - kGicBase;
+      if (size <= (kGicSize - gic_off)) {
+        ++perf_counters_.read_ops;
+        perf_counters_.read_bytes += size;
+        value = gic_->read(gic_off, size);
+        return true;
+      }
     }
 
-    const std::uint64_t perf_off = addr - kPerfBase;
-    if (perf_off < kPerfSize && size <= (kPerfSize - perf_off)) {
-      ++perf_counters_.read_ops;
-      perf_counters_.read_bytes += size;
-      value = perf_mailbox_->read(perf_off, size);
-      return true;
-    }
-
-    const std::uint64_t gic_off = addr - kGicBase;
-    if (gic_off < kGicSize && size <= (kGicSize - gic_off)) {
-      ++perf_counters_.read_ops;
-      perf_counters_.read_bytes += size;
-      value = gic_->read(gic_off, size);
-      return true;
-    }
-
-    const std::uint64_t timer_off = addr - kTimerBase;
-    if (timer_off < kTimerSize && size <= (kTimerSize - timer_off)) {
-      ++perf_counters_.read_ops;
-      perf_counters_.read_bytes += size;
-      value = timer_->read(timer_off, size);
-      return true;
+    if (kTimerBase <= addr && addr < kTimerBase + kTimerSize) {
+      const std::uint64_t timer_off = addr - kTimerBase;
+      if (size <= (kTimerSize - timer_off)) {
+        ++perf_counters_.read_ops;
+        perf_counters_.read_bytes += size;
+        value = timer_->read(timer_off, size);
+        return true;
+      }
     }
 
     return false;
   }
 
   [[nodiscard]] bool write(std::uint64_t addr, std::uint64_t value, std::size_t size) const {
-    if (addr < kBootRamSize && size <= (kBootRamSize - addr)) {
-      if (store_ram(boot_ram_mutable_ + static_cast<std::size_t>(addr), value, size)) {
+    if (kBootRamBase <= addr && addr < kBootRamBase + kBootRamSize) {
+      const std::uint64_t boot_off = addr - kBootRamBase;
+      if (size <= (kBootRamSize - boot_off)) {
+        if (store_ram(boot_ram_mutable_ + static_cast<std::size_t>(boot_off), value, size)) {
+          ++perf_counters_.write_ops;
+          perf_counters_.write_bytes += size;
+          return true;
+        }
+        return false;
+      }
+    }
+
+    if (kSdramBase <= addr && addr < kSdramBase + kSdramSize) {
+      const std::uint64_t sdram_off = addr - kSdramBase;
+      if (size <= (kSdramSize - sdram_off)) {
+        if (store_ram(sdram_mutable_ + static_cast<std::size_t>(sdram_off), value, size)) {
+          ++perf_counters_.write_ops;
+          perf_counters_.write_bytes += size;
+          return true;
+        }
+        return false;
+      }
+    }
+
+    if (kUartBase <= addr && addr < kUartBase + kUartSize) {
+      const std::uint64_t uart_off = addr - kUartBase;
+      if (size <= (kUartSize - uart_off)) {
         ++perf_counters_.write_ops;
         perf_counters_.write_bytes += size;
+        uart_->write(uart_off, value, size);
         return true;
       }
-      return false;
     }
 
-    const std::uint64_t sdram_off = addr - kSdramBase;
-    if (sdram_off < kSdramSize && size <= (kSdramSize - sdram_off)) {
-      if (store_ram(sdram_mutable_ + static_cast<std::size_t>(sdram_off), value, size)) {
+    if (kPerfBase <= addr && addr < kPerfBase + kPerfSize) {
+      const std::uint64_t perf_off = addr - kPerfBase;
+      if (size <= (kPerfSize - perf_off)) {
         ++perf_counters_.write_ops;
         perf_counters_.write_bytes += size;
+        perf_mailbox_->write(perf_off, value, size);
         return true;
       }
-      return false;
     }
 
-    const std::uint64_t uart_off = addr - kUartBase;
-    if (uart_off < kUartSize && size <= (kUartSize - uart_off)) {
-      ++perf_counters_.write_ops;
-      perf_counters_.write_bytes += size;
-      uart_->write(uart_off, value, size);
-      return true;
+    if (kGicBase <= addr && addr < kGicBase + kGicSize) {
+      const std::uint64_t gic_off = addr - kGicBase;
+      if (size <= (kGicSize - gic_off)) {
+        ++perf_counters_.write_ops;
+        perf_counters_.write_bytes += size;
+        gic_->write(gic_off, value, size);
+        return true;
+      }
     }
 
-    const std::uint64_t perf_off = addr - kPerfBase;
-    if (perf_off < kPerfSize && size <= (kPerfSize - perf_off)) {
-      ++perf_counters_.write_ops;
-      perf_counters_.write_bytes += size;
-      perf_mailbox_->write(perf_off, value, size);
-      return true;
-    }
-
-    const std::uint64_t gic_off = addr - kGicBase;
-    if (gic_off < kGicSize && size <= (kGicSize - gic_off)) {
-      ++perf_counters_.write_ops;
-      perf_counters_.write_bytes += size;
-      gic_->write(gic_off, value, size);
-      return true;
-    }
-
-    const std::uint64_t timer_off = addr - kTimerBase;
-    if (timer_off < kTimerSize && size <= (kTimerSize - timer_off)) {
-      ++perf_counters_.write_ops;
-      perf_counters_.write_bytes += size;
-      timer_->write(timer_off, value, size);
-      return true;
+    if (kTimerBase <= addr && addr < kTimerBase + kTimerSize) {
+      const std::uint64_t timer_off = addr - kTimerBase;
+      if (size <= (kTimerSize - timer_off)) {
+        ++perf_counters_.write_ops;
+        perf_counters_.write_bytes += size;
+        timer_->write(timer_off, value, size);
+        return true;
+      }
     }
 
     return false;

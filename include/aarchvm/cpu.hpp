@@ -134,17 +134,36 @@ private:
 
   bool try_take_irq();
   void enter_sync_exception(std::uint64_t fault_pc, std::uint32_t ec, std::uint32_t iss, bool far_valid, std::uint64_t far);
-  [[nodiscard]] std::optional<TranslationResult> translate_address(std::uint64_t va,
-                                                                   AccessType access,
-                                                                   bool allow_tlb_fill,
-                                                                   bool use_tlb = true);
-  [[nodiscard]] std::optional<TranslationResult> walk_page_tables(std::uint64_t va,
-                                                                  AccessType access,
-                                                                  TranslationFault* fault);
+  [[nodiscard]] bool translate_address(std::uint64_t va,
+                                     AccessType access,
+                                     TranslationResult* out_result,
+                                     bool allow_tlb_fill,
+                                     bool use_tlb = true);
+  [[nodiscard]] bool walk_page_tables(std::uint64_t va,
+                                  AccessType access,
+                                  TranslationResult* out_result,
+                                  TranslationFault* fault);
   [[nodiscard]] bool access_permitted(const TranslationResult& result,
                                       AccessType access,
                                       std::uint8_t level,
-                                      TranslationFault* fault) const;
+                                      TranslationFault* fault) const {
+    if (access == AccessType::Write && !result.writable) {
+      if (fault != nullptr) {
+        *fault = TranslationFault{.kind = TranslationFault::Kind::Permission, .level = level, .write = true};
+      }
+      return false;
+    }
+    if (access == AccessType::Fetch) {
+      const bool execute_blocked = sysregs_.in_el0() ? result.uxn : result.pxn;
+      if (execute_blocked) {
+        if (fault != nullptr) {
+          *fault = TranslationFault{.kind = TranslationFault::Kind::Permission, .level = level, .write = false};
+        }
+        return false;
+      }
+    }
+    return true;
+  }
   [[nodiscard]] std::uint32_t fault_status_code(const TranslationFault& fault) const;
   void set_par_el1_for_fault(const TranslationFault& fault);
   [[nodiscard]] WalkAttributes decode_walk_attributes(bool va_upper) const;
@@ -155,7 +174,15 @@ private:
   void tlb_flush_va(std::uint64_t va);
   [[nodiscard]] static constexpr std::uint64_t tlb_page_mask() { return (1ull << 44u) - 1ull; }
   [[nodiscard]] static constexpr std::size_t tlb_set_index(std::uint64_t va_page) { return static_cast<std::size_t>(va_page) & (kTlbSets - 1u); }
-  [[nodiscard]] const TlbEntry* tlb_lookup(std::uint64_t va_page) const;
+  [[nodiscard]] const TlbEntry* tlb_lookup(std::uint64_t va_page) const {
+    const auto& set = tlb_entries_[tlb_set_index(va_page)];
+    for (const TlbEntry& entry : set) {
+      if (entry.valid && entry.va_page == va_page) {
+        return &entry;
+      }
+    }
+    return nullptr;
+  }
   void tlb_insert(std::uint64_t va_page, const TranslationResult& result);
   void tlb_insert_entry(std::uint64_t va_page, const TlbEntry& entry);
   void tlb_invalidate_page(std::uint64_t va_page);
@@ -163,12 +190,41 @@ private:
   void save_current_sp_to_bank();
   void load_current_sp_from_bank();
 
-  [[nodiscard]] std::uint64_t reg(std::uint32_t idx) const;
-  [[nodiscard]] std::uint32_t reg32(std::uint32_t idx) const;
-  void set_reg(std::uint32_t idx, std::uint64_t value);
-  void set_reg32(std::uint32_t idx, std::uint32_t value);
-  [[nodiscard]] std::uint64_t sp_or_reg(std::uint32_t idx) const;
-  void set_sp_or_reg(std::uint32_t idx, std::uint64_t value, bool is_32bit);
+  [[nodiscard]] std::uint64_t reg(std::uint32_t idx) const {
+    if (idx >= 31) {
+      return 0;
+    }
+    return regs_[idx];
+  }
+  [[nodiscard]] std::uint32_t reg32(std::uint32_t idx) const {
+    return static_cast<std::uint32_t>(reg(idx) & 0xFFFFFFFFu);
+  }
+  void set_reg(std::uint32_t idx, std::uint64_t value) {
+    if (idx >= 31) {
+      return;
+    }
+    regs_[idx] = value;
+  }
+  void set_reg32(std::uint32_t idx, std::uint32_t value) {
+    set_reg(idx, value);
+  }
+  [[nodiscard]] std::uint64_t sp_or_reg(std::uint32_t idx) const {
+    if (idx == 31) {
+      return regs_[31];
+    }
+    return reg(idx);
+  }
+  void set_sp_or_reg(std::uint32_t idx, std::uint64_t value, bool is_32bit) {
+    if (idx == 31) {
+      regs_[31] = is_32bit ? static_cast<std::uint32_t>(value) : value;
+      return;
+    }
+    if (is_32bit) {
+      set_reg32(idx, static_cast<std::uint32_t>(value));
+    } else {
+      set_reg(idx, value);
+    }
+  }
   [[nodiscard]] std::uint64_t q_reg_lane(std::uint32_t idx, std::size_t lane) const;
   void set_q_reg_lane(std::uint32_t idx, std::size_t lane, std::uint64_t value);
 

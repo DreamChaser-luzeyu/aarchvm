@@ -121,6 +121,11 @@ private:
   mutable LocalPerfCounters local_perf_counters_{};
   std::string stop_on_uart_pattern_;
   std::string stop_on_uart_window_;
+  bool device_sync_valid_ = false;
+  std::uint64_t device_sync_steps_ = 0;
+  bool last_timer_virt_level_ = false;
+  bool last_timer_phys_level_ = false;
+  bool last_uart_level_ = false;
 };
 
 } // namespace aarchvm

@@ -44,6 +44,7 @@ private:
 
   std::vector<Mapping> mappings_;
   std::shared_ptr<BusFastPath> fast_path_;
+  BusFastPath* fast_path_raw_ = nullptr;
   mutable PerfCounters perf_counters_{};
 };
 

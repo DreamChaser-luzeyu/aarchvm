@@ -22,6 +22,16 @@ Now capable of booting Linux into an interactive BusyBox shell.
 ## Demo
 ![alt text](doc/demo.gif)
 
+## Star History
+
+<a href="https://www.star-history.com/?repos=DreamChaser-luzeyu%2Faarchvm&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=DreamChaser-luzeyu/aarchvm&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=DreamChaser-luzeyu/aarchvm&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=DreamChaser-luzeyu/aarchvm&type=date&legend=top-left" />
+ </picture>
+</a>
+
 ## License
 
 This project is licensed under the MIT License.
