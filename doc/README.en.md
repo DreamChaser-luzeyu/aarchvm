@@ -448,7 +448,7 @@ The current regression suite covers:
 - `fpsimd_arith_shift_perm` for `ADD/SUB/MUL (vector)`, `USHR/SSHR`, `ZIP1/UZP1/TRN1`, and the `MOV (vector)` alias path
 - `fp_scalar_ls` now covers scalar FP `S/D` load/store plus `post-index` / `pre-index` forms
 
-Linux shell snapshot build and cold-boot verification:
+Linux shell snapshot build and prompt-step capture:
 
 ```bash
 tests/linux/build_linux_shell_snapshot.sh
@@ -458,7 +458,9 @@ This script will:
 - build the unified `initramfs-usertests` rootfs
 - cold-boot Linux through U-Boot
 - stop immediately when UART output matches the selected sequence, using `-stop-on-uart`
-- save and verify the unified shell snapshot
+- save the unified shell snapshot
+- verify that the snapshot can be restored and resumed
+- record the BusyBox prompt step count in `out/linux-usertests-shell-v1-build.log` via `SUMMARY: steps=...`
 
 Linux functional and ISA-integrity regression:
 
@@ -466,18 +468,22 @@ Linux functional and ISA-integrity regression:
 tests/linux/run_functional_suite.sh
 ```
 
+This script cold-boots Linux, reuses the prompt-step measured by `build_linux_shell_snapshot.sh`, and injects `run_functional_suite` through `AARCHVM_UART_RX_SCRIPT` at a deterministic guest-step offset.
+
 Linux algorithm performance suite:
 
 ```bash
 tests/linux/run_algorithm_perf.sh
 ```
 
+This script uses the same prompt-step driven UART injection path to start `bench_runner` from a cold boot and then extracts `PERF-RESULT` lines into `out/perf-suite-results.txt`.
+
 The current Linux userspace self-test validates these key groups:
 - vector logic: `AND/EOR/BIT/BIF/BSL/ORR(MOV alias)`
 - vector permutation: `EXT/ZIP1/UZP1/TRN1`
 - vector integer arithmetic: `ADD/SUB/MUL`
 - vector shift/extend: `USHR/SSHR/SHRN/UXTL/SXTL`
-- scalar FP: `FADD/FSUB/FMUL/FDIV/FABS/FNEG/SCVTF/UCVTF/FCVTZS/FCVTZU/FCSEL`
+- scalar FP: `FADD/FSUB/FMUL/FDIV/FMADD/FMSUB/FNMADD/FNMSUB/FABS/FNEG/SCVTF/UCVTF/FCVTZS/FCVTZU/FCSEL`
 - scalar FP memory ops: `STR/LDR S/D` plus the `post-index` / `pre-index` subset
 
 ## Current Limitations and Next Steps

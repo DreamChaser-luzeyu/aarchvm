@@ -27,11 +27,6 @@ struct UartRxEvent {
   std::uint8_t byte = 0;
 };
 
-enum class StdinMode {
-  Auto,
-  Fast,
-};
-
 struct Options {
   std::string bin_path;
   std::uint64_t load_addr = 0;
@@ -44,21 +39,10 @@ struct Options {
   std::optional<std::string> snapshot_save_path;
   std::vector<BinaryLoad> extra_bins;
   std::optional<std::string> stop_on_uart_pattern;
-  StdinMode stdin_mode = StdinMode::Auto;
 };
 
 std::uint64_t parse_u64(const std::string& text) {
   return std::stoull(text, nullptr, 0);
-}
-
-StdinMode parse_stdin_mode(const std::string& text) {
-  if (text == "auto") {
-    return StdinMode::Auto;
-  }
-  if (text == "fast") {
-    return StdinMode::Fast;
-  }
-  throw std::invalid_argument("stdin mode must be auto or fast");
 }
 
 bool read_binary_file(const std::string& path, std::vector<std::uint8_t>& out) {
@@ -148,7 +132,7 @@ void print_usage(const char* argv0) {
       << "[-load <addr>] [-entry <pc>] [-steps <n>] [-sp <addr>] "
       << "[-dtb <file>] [-dtb-addr <addr>] [-segment <file@addr>]... "
       << "[-snapshot-load <file>] [-snapshot-save <file>] \n"
-      << "[-stop-on-uart <text>] [-stdin-mode <auto|fast>]\n";
+      << "[-stop-on-uart <text>]\n";
 }
 
 std::optional<Options> parse_args(int argc, char** argv) {
@@ -195,13 +179,6 @@ std::optional<Options> parse_args(int argc, char** argv) {
       opt.snapshot_save_path = val;
     } else if (key == "-stop-on-uart") {
       opt.stop_on_uart_pattern = val;
-    } else if (key == "-stdin-mode") {
-      try {
-        opt.stdin_mode = parse_stdin_mode(val);
-      } catch (const std::exception& ex) {
-        std::cerr << "Invalid -stdin-mode value: " << val << " (" << ex.what() << ")\n";
-        return std::nullopt;
-      }
     } else if (key == "-segment") {
       const std::size_t at = val.rfind('@');
       if (at == std::string::npos || at == 0 || at + 1 >= val.size()) {
@@ -398,20 +375,8 @@ int main(int argc, char** argv) {
     }
   }
 
-  StdinMode stdin_mode = opt.stdin_mode;
-  if (stdin_mode == StdinMode::Auto) {
-    if (const char* stdin_mode_env = std::getenv("AARCHVM_STDIN_MODE"); stdin_mode_env != nullptr) {
-      try {
-        stdin_mode = parse_stdin_mode(std::string(stdin_mode_env));
-      } catch (const std::exception& ex) {
-        std::cerr << "Invalid AARCHVM_STDIN_MODE: " << stdin_mode_env << " (" << ex.what() << ")\n";
-        return 1;
-      }
-    }
-  }
-
   const bool interactive_stdin = isatty(STDIN_FILENO);
-  const bool use_interactive_throttle = interactive_stdin && stdin_mode != StdinMode::Fast;
+  (void)interactive_stdin;
   RawStdinGuard stdin_guard;
   const std::vector<UartRxEvent> uart_rx_events = parse_uart_rx_script_env();
   std::size_t next_uart_rx_event = 0;
@@ -421,11 +386,7 @@ int main(int argc, char** argv) {
     inject_scheduled_uart_rx(uart_rx_events, next_uart_rx_event, soc);
 
     std::size_t run_chunk = 200000u;
-    if (use_interactive_throttle) {
-      // Keep tty response snappy: when the guest is idle on WFI/WFE, poll host
-      // stdin every guest step instead of disappearing into long chunks.
-      run_chunk = (soc.cpu_waiting_for_interrupt() || soc.cpu_waiting_for_event()) ? 1u : 256u;
-    }
+
     if (next_uart_rx_event < uart_rx_events.size() && uart_rx_events[next_uart_rx_event].step > soc.steps()) {
       const std::uint64_t until_inject = uart_rx_events[next_uart_rx_event].step - soc.steps();
       run_chunk = std::min<std::size_t>(run_chunk, static_cast<std::size_t>(until_inject));

@@ -100,10 +100,18 @@ SoC::SoC()
   bus_.map(kTimerBase, kTimerSize, timer_);
 
   if (env_enabled("AARCHVM_BUS_FASTPATH") || env_enabled("AARCHVM_RAM_FASTPATH")) {
-    fast_path_ = std::make_shared<BusFastPath>(*boot_ram_, *sdram_);
+    fast_path_ = std::make_shared<BusFastPath>(*boot_ram_, *sdram_, *uart_, *perf_mailbox_, *gic_, *timer_);
     bus_.set_fast_path(fast_path_);
   }
 
+  if (fast_path_ != nullptr) {
+    fast_path_ = std::make_shared<BusFastPath>(*boot_ram_, *sdram_, *uart_, *perf_mailbox_, *gic_, *timer_);
+    bus_.set_fast_path(fast_path_);
+  }
+  if (fast_path_ != nullptr) {
+    fast_path_ = std::make_shared<BusFastPath>(*boot_ram_, *sdram_, *uart_, *perf_mailbox_, *gic_, *timer_);
+    bus_.set_fast_path(fast_path_);
+  }
   if (const auto scale = env_timer_scale(); scale.has_value()) {
     timer_tick_scale_ = *scale;
   }
@@ -522,6 +530,10 @@ bool SoC::load_snapshot(const std::string& path) {
       !timer_->load_state(in, version) ||
       !cpu_.load_state(in, version)) {
     return false;
+  }
+  if (fast_path_ != nullptr) {
+    fast_path_ = std::make_shared<BusFastPath>(*boot_ram_, *sdram_, *uart_, *perf_mailbox_, *gic_, *timer_);
+    bus_.set_fast_path(fast_path_);
   }
   if (const auto scale = env_timer_scale(); scale.has_value()) {
     timer_tick_scale_ = *scale;

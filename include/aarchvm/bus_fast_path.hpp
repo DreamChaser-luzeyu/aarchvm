@@ -1,11 +1,24 @@
 #pragma once
 
+#include "aarchvm/generic_timer.hpp"
+#include "aarchvm/gicv3.hpp"
+#include "aarchvm/perf_mailbox.hpp"
+#include "aarchvm/ram.hpp"
+#include "aarchvm/uart_pl011.hpp"
+
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+
+#ifdef __GNUC__
+#define likely(x) __builtin_expect(!!(x), 1)
+#define unlikely(x) __builtin_expect(!!(x), 0)
+#else
+#define likely(x) (x)
+#define unlikely(x) (x)
+#endif
 
 namespace aarchvm {
-
-class Ram;
 
 class BusFastPath {
 public:
@@ -16,17 +29,205 @@ public:
     std::uint64_t write_bytes = 0;
   };
 
-  BusFastPath(Ram& boot_ram, Ram& sdram);
+  static constexpr std::uint64_t kBootRamBase = 0x00000000ull;
+  static constexpr std::uint64_t kBootRamSize = 128ull * 1024ull * 1024ull;
+  static constexpr std::uint64_t kSdramBase = 0x40000000ull;
+  static constexpr std::uint64_t kSdramSize = 128ull * 1024ull * 1024ull;
+  static constexpr std::uint64_t kUartBase = 0x09000000ull;
+  static constexpr std::uint64_t kUartSize = 0x1000ull;
+  static constexpr std::uint64_t kPerfBase = 0x09020000ull;
+  static constexpr std::uint64_t kPerfSize = 0x1000ull;
+  static constexpr std::uint64_t kGicBase = 0x08000000ull;
+  static constexpr std::uint64_t kGicSize = 0x100000ull;
+  static constexpr std::uint64_t kTimerBase = 0x0A000000ull;
+  static constexpr std::uint64_t kTimerSize = 0x1000ull;
 
-  [[nodiscard]] bool read(std::uint64_t addr, std::size_t size, std::uint64_t& value) const;
-  [[nodiscard]] bool write(std::uint64_t addr, std::uint64_t value, std::size_t size) const;
+  BusFastPath(Ram& boot_ram,
+              Ram& sdram,
+              UartPl011& uart,
+              PerfMailbox& perf_mailbox,
+              GicV3& gic,
+              GenericTimer& timer)
+      : boot_ram_bytes_(boot_ram.bytes().data()),
+        boot_ram_mutable_(const_cast<std::uint8_t*>(boot_ram.bytes().data())),
+        sdram_bytes_(sdram.bytes().data()),
+        sdram_mutable_(const_cast<std::uint8_t*>(sdram.bytes().data())),
+        uart_(&uart),
+        perf_mailbox_(&perf_mailbox),
+        gic_(&gic),
+        timer_(&timer) {}
+
+  [[nodiscard]] bool read(std::uint64_t addr, std::size_t size, std::uint64_t& value) const {
+    const std::uint64_t sdram_off = addr - kSdramBase;
+    if (likely(sdram_off < kSdramSize && size <= (kSdramSize - sdram_off))) {
+      if (load_ram(sdram_bytes_ + static_cast<std::size_t>(sdram_off), size, value)) {
+        ++perf_counters_.read_ops;
+        perf_counters_.read_bytes += size;
+        return true;
+      }
+      return false;
+    }
+
+    if (addr < kBootRamSize && size <= (kBootRamSize - addr)) {
+      if (load_ram(boot_ram_bytes_ + static_cast<std::size_t>(addr), size, value)) {
+        ++perf_counters_.read_ops;
+        perf_counters_.read_bytes += size;
+        return true;
+      }
+      return false;
+    }
+
+    const std::uint64_t uart_off = addr - kUartBase;
+    if (uart_off < kUartSize && size <= (kUartSize - uart_off)) {
+      ++perf_counters_.read_ops;
+      perf_counters_.read_bytes += size;
+      value = uart_->read(uart_off, size);
+      return true;
+    }
+
+    const std::uint64_t perf_off = addr - kPerfBase;
+    if (perf_off < kPerfSize && size <= (kPerfSize - perf_off)) {
+      ++perf_counters_.read_ops;
+      perf_counters_.read_bytes += size;
+      value = perf_mailbox_->read(perf_off, size);
+      return true;
+    }
+
+    const std::uint64_t gic_off = addr - kGicBase;
+    if (gic_off < kGicSize && size <= (kGicSize - gic_off)) {
+      ++perf_counters_.read_ops;
+      perf_counters_.read_bytes += size;
+      value = gic_->read(gic_off, size);
+      return true;
+    }
+
+    const std::uint64_t timer_off = addr - kTimerBase;
+    if (timer_off < kTimerSize && size <= (kTimerSize - timer_off)) {
+      ++perf_counters_.read_ops;
+      perf_counters_.read_bytes += size;
+      value = timer_->read(timer_off, size);
+      return true;
+    }
+
+    return false;
+  }
+
+  [[nodiscard]] bool write(std::uint64_t addr, std::uint64_t value, std::size_t size) const {
+    if (addr < kBootRamSize && size <= (kBootRamSize - addr)) {
+      if (store_ram(boot_ram_mutable_ + static_cast<std::size_t>(addr), value, size)) {
+        ++perf_counters_.write_ops;
+        perf_counters_.write_bytes += size;
+        return true;
+      }
+      return false;
+    }
+
+    const std::uint64_t sdram_off = addr - kSdramBase;
+    if (sdram_off < kSdramSize && size <= (kSdramSize - sdram_off)) {
+      if (store_ram(sdram_mutable_ + static_cast<std::size_t>(sdram_off), value, size)) {
+        ++perf_counters_.write_ops;
+        perf_counters_.write_bytes += size;
+        return true;
+      }
+      return false;
+    }
+
+    const std::uint64_t uart_off = addr - kUartBase;
+    if (uart_off < kUartSize && size <= (kUartSize - uart_off)) {
+      ++perf_counters_.write_ops;
+      perf_counters_.write_bytes += size;
+      uart_->write(uart_off, value, size);
+      return true;
+    }
+
+    const std::uint64_t perf_off = addr - kPerfBase;
+    if (perf_off < kPerfSize && size <= (kPerfSize - perf_off)) {
+      ++perf_counters_.write_ops;
+      perf_counters_.write_bytes += size;
+      perf_mailbox_->write(perf_off, value, size);
+      return true;
+    }
+
+    const std::uint64_t gic_off = addr - kGicBase;
+    if (gic_off < kGicSize && size <= (kGicSize - gic_off)) {
+      ++perf_counters_.write_ops;
+      perf_counters_.write_bytes += size;
+      gic_->write(gic_off, value, size);
+      return true;
+    }
+
+    const std::uint64_t timer_off = addr - kTimerBase;
+    if (timer_off < kTimerSize && size <= (kTimerSize - timer_off)) {
+      ++perf_counters_.write_ops;
+      perf_counters_.write_bytes += size;
+      timer_->write(timer_off, value, size);
+      return true;
+    }
+
+    return false;
+  }
 
   [[nodiscard]] const PerfCounters& perf_counters() const { return perf_counters_; }
   void reset_perf_counters() const { perf_counters_ = {}; }
 
 private:
-  Ram* boot_ram_ = nullptr;
-  Ram* sdram_ = nullptr;
+  static bool load_ram(const std::uint8_t* base, std::size_t size, std::uint64_t& value) {
+    switch (size) {
+      case 1u:
+        value = base[0];
+        return true;
+      case 2u: {
+        std::uint16_t v;
+        std::memcpy(&v, base, sizeof(v));
+        value = v;
+        return true;
+      }
+      case 4u: {
+        std::uint32_t v;
+        std::memcpy(&v, base, sizeof(v));
+        value = v;
+        return true;
+      }
+      case 8u:
+        std::memcpy(&value, base, sizeof(value));
+        return true;
+      default:
+        value = 0;
+        return false;
+    }
+  }
+
+  static bool store_ram(std::uint8_t* base, std::uint64_t value, std::size_t size) {
+    switch (size) {
+      case 1u:
+        base[0] = static_cast<std::uint8_t>(value);
+        return true;
+      case 2u: {
+        const std::uint16_t v = static_cast<std::uint16_t>(value);
+        std::memcpy(base, &v, sizeof(v));
+        return true;
+      }
+      case 4u: {
+        const std::uint32_t v = static_cast<std::uint32_t>(value);
+        std::memcpy(base, &v, sizeof(v));
+        return true;
+      }
+      case 8u:
+        std::memcpy(base, &value, sizeof(value));
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  const std::uint8_t* boot_ram_bytes_ = nullptr;
+  std::uint8_t* boot_ram_mutable_ = nullptr;
+  const std::uint8_t* sdram_bytes_ = nullptr;
+  std::uint8_t* sdram_mutable_ = nullptr;
+  UartPl011* uart_ = nullptr;
+  PerfMailbox* perf_mailbox_ = nullptr;
+  GicV3* gic_ = nullptr;
+  GenericTimer* timer_ = nullptr;
   mutable PerfCounters perf_counters_{};
 };
 

@@ -36,6 +36,7 @@ public:
 
   [[nodiscard]] const PerfCounters& perf_counters() const { return perf_counters_; }
   void reset_perf_counters() const { perf_counters_ = {}; }
+  [[nodiscard]] std::uint64_t state_epoch() const { return state_epoch_; }
 
   [[nodiscard]] bool save_state(std::ostream& out) const;
   [[nodiscard]] bool load_state(std::istream& in, std::uint32_t version = 4);
@@ -89,6 +90,7 @@ private:
   std::uint32_t gicr_igroupr0_ = 0xFFFFFFFFu;
   std::uint32_t gicr_icfgr0_ = 0xAAAAAAAAu;
   std::uint32_t gicr_icfgr1_ = 0;
+    std::uint64_t state_epoch_ = 1;
   mutable PerfCounters perf_counters_{};
 };
 

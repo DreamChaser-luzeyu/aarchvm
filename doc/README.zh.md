@@ -448,7 +448,7 @@ tests/arm64/run_all.sh
 - `fpsimd_arith_shift_perm`：验证 `ADD/SUB/MUL (vector)`、`USHR/SSHR`、`ZIP1/UZP1/TRN1` 以及 `MOV (vector)` 别名路径
 - `fp_scalar_ls`：覆盖标量 FP `S/D` 的基本 load/store 与 `post-index` / `pre-index` 形式
 
-Linux shell snapshot 构建与冷启动验证：
+Linux shell snapshot 构建与提示符步数捕获：
 
 ```bash
 tests/linux/build_linux_shell_snapshot.sh
@@ -458,7 +458,9 @@ tests/linux/build_linux_shell_snapshot.sh
 - 构建统一 `initramfs-usertests` rootfs
 - 通过 U-Boot 冷启动 Linux
 - 使用 `-stop-on-uart` 在 UART 输出命中指定序列时立即停止
-- 保存并验证统一 shell snapshot
+- 保存统一 shell snapshot
+- 验证该 snapshot 可以恢复并继续运行
+- 在 `out/linux-usertests-shell-v1-build.log` 中通过 `SUMMARY: steps=...` 记录 BusyBox 提示符对应的 guest 步数
 
 Linux 功能与指令完整性回归：
 
@@ -466,18 +468,22 @@ Linux 功能与指令完整性回归：
 tests/linux/run_functional_suite.sh
 ```
 
+该脚本会冷启动 Linux，复用 `build_linux_shell_snapshot.sh` 测得的提示符步数，并通过 `AARCHVM_UART_RX_SCRIPT` 在确定的 guest-step 偏移处注入 `run_functional_suite`。
+
 Linux 算法性能测试：
 
 ```bash
 tests/linux/run_algorithm_perf.sh
 ```
 
+该脚本使用同样的“提示符步数 + UART 注入”路径，在冷启动后启动 `bench_runner`，并把 `PERF-RESULT` 行提取到 `out/perf-suite-results.txt`。
+
 当前 Linux 用户态自检覆盖并验证的关键族包括：
 - 向量逻辑：`AND/EOR/BIT/BIF/BSL/ORR(MOV alias)`
 - 向量重排：`EXT/ZIP1/UZP1/TRN1`
 - 向量整数算术：`ADD/SUB/MUL`
 - 向量移位/扩展：`USHR/SSHR/SHRN/UXTL/SXTL`
-- 标量 FP：`FADD/FSUB/FMUL/FDIV/FABS/FNEG/SCVTF/UCVTF/FCVTZS/FCVTZU/FCSEL`
+- 标量 FP：`FADD/FSUB/FMUL/FDIV/FMADD/FMSUB/FNMADD/FNMSUB/FABS/FNEG/SCVTF/UCVTF/FCVTZS/FCVTZU/FCSEL`
 - 标量 FP 访存：`STR/LDR S/D` 及 `post-index` / `pre-index` 子集
 
 ## 当前局限与下一步

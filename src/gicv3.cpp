@@ -390,6 +390,7 @@ void GicV3::set_pending_bit(std::uint32_t intid, bool value) {
   }
   const bool was_best = best_pending_valid_ && best_pending_intid_ == intid;
   pending_[intid] = value;
+  ++state_epoch_;
   refresh_word(word_index(intid));
   if (value) {
     consider_best_pending(intid);
@@ -404,6 +405,7 @@ void GicV3::set_enabled_bit(std::uint32_t intid, bool value) {
   }
   const bool was_best = best_pending_valid_ && best_pending_intid_ == intid;
   enabled_[intid] = value;
+  ++state_epoch_;
   refresh_word(word_index(intid));
   if (value) {
     consider_best_pending(intid);
@@ -418,6 +420,7 @@ void GicV3::set_active_bit(std::uint32_t intid, bool value) {
   }
   const bool was_best = best_pending_valid_ && best_pending_intid_ == intid;
   active_[intid] = value;
+  ++state_epoch_;
   refresh_word(word_index(intid));
   if (!value) {
     consider_best_pending(intid);
@@ -533,6 +536,7 @@ void GicV3::set_priority_range(std::uint32_t first_intid,
       continue;
     }
     priorities_[intid] = new_prio;
+    ++state_epoch_;
     if (best_pending_valid_ && best_pending_intid_ == intid) {
       need_recompute = true;
     } else {
@@ -546,6 +550,9 @@ void GicV3::set_priority_range(std::uint32_t first_intid,
 
 void GicV3::set_pending(std::uint32_t intid) {
   set_pending_bit(intid, true);
+  if (!best_pending_valid_) {
+    ++state_epoch_;
+  }
 }
 
 void GicV3::set_level(std::uint32_t intid, bool asserted) {
@@ -554,6 +561,7 @@ void GicV3::set_level(std::uint32_t intid, bool asserted) {
     return;
   }
   line_level_[intid] = asserted;
+  ++state_epoch_;
   if (asserted && !active_[intid]) {
     set_pending_bit(intid, true);
   }

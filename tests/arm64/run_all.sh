@@ -80,6 +80,7 @@ run fp_scalar_convert.bin 200000
 run fp_fcvtzu_scalar.bin 200000
 run fp_fcvt_flags.bin 200000
 run fp_scalar_fcsel.bin 200000
+run fp_scalar_fma.bin 200000
 run fpsimd_ins_xtl.bin 300000
 run fpsimd_misc_more.bin 300000
 run fpsimd_arith_shift_perm.bin 300000

@@ -10,8 +10,7 @@ set(CMAKE_BUILD_TYPE debug)
 add_executable(aarchvm
   src/main.cpp
   src/bus.cpp
-  src/bus_fast_path.cpp
-  src/ram.cpp
+    src/ram.cpp
   src/uart_pl011.cpp
   src/gicv3.cpp
   src/generic_timer.cpp

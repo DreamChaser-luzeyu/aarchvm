@@ -234,6 +234,9 @@ private:
   std::optional<TranslationFault> last_translation_fault_;
   std::uint64_t pc_ = 0;
   std::uint64_t steps_ = 0;
+  std::uint64_t irq_query_epoch_ = 0;
+  std::uint16_t irq_query_threshold_ = 0;
+  bool irq_query_negative_valid_ = false;
   bool halted_ = false;
 };
 

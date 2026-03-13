@@ -421,6 +421,9 @@ void Cpu::reset(std::uint64_t pc) {
   trace_lower_sync_count_ = 0;
   waiting_for_interrupt_ = false;
   waiting_for_event_ = false;
+  irq_query_epoch_ = 0;
+  irq_query_threshold_ = 0;
+  irq_query_negative_valid_ = false;
   event_register_ = false;
   icc_pmr_el1_ = 0xFF;
   running_priority_ = 0x100;
@@ -454,12 +457,14 @@ bool Cpu::step() {
   }
 
   if (waiting_for_interrupt_) {
-    if (icc_igrpen1_el1_ != 0 && gic_.has_pending(static_cast<std::uint8_t>(icc_pmr_el1_ & 0xFFu))) {
+    if (gic_.has_pending()) {
       waiting_for_interrupt_ = false;
       if (try_take_irq()) {
         ++steps_;
         return true;
       }
+      ++steps_;
+      return true;
     }
     ++steps_;
     return true;
@@ -469,12 +474,10 @@ bool Cpu::step() {
     if (event_register_) {
       event_register_ = false;
       waiting_for_event_ = false;
-    } else if (icc_igrpen1_el1_ != 0 && gic_.has_pending(static_cast<std::uint8_t>(icc_pmr_el1_ & 0xFFu))) {
+    } else if (try_take_irq()) {
       waiting_for_event_ = false;
-      if (try_take_irq()) {
-        ++steps_;
-        return true;
-      }
+      ++steps_;
+      return true;
     }
     ++steps_;
     return true;
@@ -648,10 +651,18 @@ bool Cpu::try_take_irq() {
     return false;
   }
   const std::uint16_t irq_threshold = std::min<std::uint16_t>(static_cast<std::uint16_t>(icc_pmr_el1_ & 0xFFu), running_priority_);
-  const auto intid = gic_.acknowledge(static_cast<std::uint8_t>(irq_threshold & 0xFFu));
-  if (!intid.has_value()) {
+  const std::uint64_t irq_epoch = gic_.state_epoch();
+  if (irq_query_negative_valid_ && irq_query_epoch_ == irq_epoch && irq_query_threshold_ == irq_threshold) {
     return false;
   }
+  const auto intid = gic_.acknowledge(static_cast<std::uint8_t>(irq_threshold & 0xFFu));
+  if (!intid.has_value()) {
+    irq_query_epoch_ = irq_epoch;
+    irq_query_threshold_ = irq_threshold;
+    irq_query_negative_valid_ = true;
+    return false;
+  }
+  irq_query_negative_valid_ = false;
 
   const bool from_lower_el = sysregs_.in_el0();
   const bool from_spx = sysregs_.use_sp_elx();
@@ -2571,6 +2582,30 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     }
     if (ftype == 1u) {
       write_fp64(rd, read_fp64(rn) - read_fp64(rm));
+      return true;
+    }
+    return false;
+  }
+
+  if ((insn & 0xFF208000u) == 0x1F000000u ||
+      (insn & 0xFF208000u) == 0x1F008000u ||
+      (insn & 0xFF208000u) == 0x1F200000u ||
+      (insn & 0xFF208000u) == 0x1F208000u) { // FMADD/FMSUB/FNMADD/FNMSUB (scalar)
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t ra = (insn >> 10) & 0x1Fu;
+    const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    const bool negate_addend = (insn & 0x00200000u) != 0u;
+    const bool negate_product = negate_addend ^ ((insn & 0x00008000u) != 0u);
+    if (ftype == 0u) {
+      const float lhs = negate_product ? -read_fp32(rn) : read_fp32(rn);
+      const float addend = negate_addend ? -read_fp32(ra) : read_fp32(ra);
+      write_fp32(rd, std::fma(lhs, read_fp32(rm), addend));
+      return true;
+    }
+    if (ftype == 1u) {
+      const double lhs = negate_product ? -read_fp64(rn) : read_fp64(rn);
+      const double addend = negate_addend ? -read_fp64(ra) : read_fp64(ra);
+      write_fp64(rd, std::fma(lhs, read_fp64(rm), addend));
       return true;
     }
     return false;
@@ -5506,6 +5541,9 @@ bool Cpu::load_state(std::istream& in, std::uint32_t version) {
       return false;
     }
   }
+  irq_query_epoch_ = 0;
+  irq_query_threshold_ = 0;
+  irq_query_negative_valid_ = false;
   if (!sysregs_.load_state(in) ||
       !snapshot_io::read(in, exception_depth_) ||
       exception_depth_ > exception_is_irq_stack_.size() ||

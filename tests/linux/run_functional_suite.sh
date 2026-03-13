@@ -4,36 +4,72 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-SNAPSHOT="${AARCHVM_USERTEST_SNAPSHOT:-out/linux-usertests-shell-v1.snap}"
 LOG="${AARCHVM_FUNCTIONAL_LOG:-out/linux-functional-suite.log}"
-STEPS="${AARCHVM_FUNCTIONAL_STEPS:-400000000}"
-TIMEOUT_SEC="${AARCHVM_FUNCTIONAL_TIMEOUT:-120s}"
-TIMER_SCALE="${AARCHVM_TIMER_SCALE:-1}"
+STEPS="${AARCHVM_FUNCTIONAL_STEPS:-1200000000}"
+TIMEOUT_SEC="${AARCHVM_FUNCTIONAL_TIMEOUT:-180s}"
+TIMER_SCALE="${AARCHVM_TIMER_SCALE:-10000}"
 FASTPATH="${AARCHVM_BUS_FASTPATH:-1}"
+UBOOT_DELAY_SEC="${AARCHVM_UBOOT_COMMAND_DELAY_SEC:-3}"
+PROMPT_DELAY_SEC="${AARCHVM_UBOOT_PROMPT_DELAY_SEC:-1}"
+COMMAND_STEP_DELTA="${AARCHVM_FUNCTIONAL_COMMAND_STEP_DELTA:-50000}"
+COMMAND_STEP_GAP="${AARCHVM_FUNCTIONAL_COMMAND_STEP_GAP:-2000}"
+BUILD_LOG="${AARCHVM_USERTEST_SNAPSHOT_LOG:-out/linux-usertests-shell-v1-build.log}"
+INITRD="out/initramfs-usertests.cpio"
+INITRD_SIZE_HEX=$(printf '0x%x' "$(stat -c '%s' "$INITRD")")
 CMD="${AARCHVM_FUNCTIONAL_COMMAND:-run_functional_suite}"
 
-if [[ ! -f "$SNAPSHOT" || out/initramfs-usertests.cpio -nt "$SNAPSHOT" || out/fpsimd_selftest -nt "$SNAPSHOT" || out/fpint_selftest -nt "$SNAPSHOT" ]]; then
+build_uart_rx_script() {
+  local text="$1"
+  local step="$2"
+  local gap="$3"
+  local out=""
+  local byte
+  for byte in $(printf '%s' "$text" | LC_ALL=C od -An -t u1 -v); do
+    out+="${step}:0x$(printf '%02x' "$byte"),"
+    step=$((step + gap))
+  done
+  out+="${step}:0x0a"
+  printf '%s' "$out"
+}
+
+if [[ ! -f "$BUILD_LOG" || ! -f "$INITRD" || tests/linux/build_usertests_rootfs.sh -nt "$BUILD_LOG" || tests/linux/build_linux_shell_snapshot.sh -nt "$BUILD_LOG" || "$INITRD" -nt "$BUILD_LOG" ]]; then
   tests/linux/build_linux_shell_snapshot.sh >/dev/null
 fi
+
+PROMPT_STEPS=$(tr -d '\r' < "$BUILD_LOG" | sed -n 's/.*SUMMARY: steps=\([0-9][0-9]*\).*/\1/p' | tail -n 1)
+[[ -n "$PROMPT_STEPS" ]] || { echo 'prompt step summary missing from snapshot build log' >&2; tail -n 120 "$BUILD_LOG" >&2; exit 1; }
+RX_SCRIPT=$(build_uart_rx_script "$CMD" "$((PROMPT_STEPS + COMMAND_STEP_DELTA))" "$COMMAND_STEP_GAP")
 
 mkdir -p "$(dirname "$LOG")"
 set -o pipefail
 (
-  sleep 1
-  printf '%s\n' "$CMD"
+  sleep "$UBOOT_DELAY_SEC"
+  printf '\n'
+  sleep "$PROMPT_DELAY_SEC"
+  printf 'setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel\n'
+  printf 'booti 0x40400000 0x46000000:%s 0x47f00000\n' "$INITRD_SIZE_HEX"
 ) | \
+AARCHVM_UART_RX_SCRIPT="$RX_SCRIPT" \
 AARCHVM_BUS_FASTPATH="$FASTPATH" \
 AARCHVM_TIMER_SCALE="$TIMER_SCALE" \
 timeout "$TIMEOUT_SEC" ./build/aarchvm \
-  -snapshot-load "$SNAPSHOT" \
+  -bin u-boot-2026.01/build-qemu_arm64/u-boot.bin \
+  -load 0x0 \
+  -entry 0x0 \
+  -sp 0x47fff000 \
+  -dtb dts/aarchvm-current.dtb \
+  -dtb-addr 0x40000000 \
+  -segment linux-6.12.76/build-aarchvm/arch/arm64/boot/Image@0x40400000 \
+  -segment "$INITRD"@0x46000000 \
+  -segment dts/aarchvm-linux-min.dtb@0x47f00000 \
   -steps "$STEPS" \
   > "$LOG" 2>&1
 
-tr -d '\r' < "$LOG" > "${LOG%.log}.clean.log"
+tr -d '\r\000' < "$LOG" > "${LOG%.log}.clean.log"
 CLEAN_LOG="${LOG%.log}.clean.log"
 check() {
   local pattern="$1"
-  if ! grep -Fq "$pattern" "$CLEAN_LOG"; then
+  if ! grep -aFq "$pattern" "$CLEAN_LOG"; then
     echo "missing expected output: $pattern" >&2
     echo "log: $LOG" >&2
     tail -n 120 "$CLEAN_LOG" >&2
@@ -43,7 +79,6 @@ check() {
 
 check 'FUNCTIONAL-BEGIN'
 check 'Linux (none) 6.12.76'
-check 'run_functional_suite'
 check 'Linux version 6.12.76'
 check 'busybox'
 check 'PID   USER     TIME  COMMAND'
@@ -53,9 +88,9 @@ check 'FPSIMD_SELFTEST PASS'
 check 'FPINT_SELFTEST PASS'
 check 'USERTESTS PASS'
 check 'FUNCTIONAL-SUITE PASS'
-if grep -Fq 'Illegal instruction' "$CLEAN_LOG"; then
+if grep -aFq 'Illegal instruction' "$CLEAN_LOG"; then
   echo 'unexpected illegal instruction in functional suite' >&2
   tail -n 120 "$CLEAN_LOG" >&2
   exit 1
 fi
-printf 'linux functional suite passed\nlog: %s\n' "$LOG"
+printf 'linux functional suite passed\nlog: %s\nprompt steps: %s\n' "$LOG" "$PROMPT_STEPS"

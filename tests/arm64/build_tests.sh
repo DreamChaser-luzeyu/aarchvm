@@ -48,6 +48,7 @@ build_asm_prog fp_scalar_convert
 build_asm_prog fp_fcvtzu_scalar
 build_asm_prog fp_fcvt_flags
 build_asm_prog fp_scalar_fcsel
+build_asm_prog fp_scalar_fma
 build_asm_prog fpsimd_ins_xtl
 build_asm_prog fpsimd_misc_more
 build_asm_prog fpsimd_arith_shift_perm
