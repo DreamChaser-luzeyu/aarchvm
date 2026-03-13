@@ -3,11 +3,14 @@
 Vibe-coded aarch64 system emulator, written in C++.
 Designed to stay compact and readable, making it suitable for learning, debugging, and experimentation.
 Now capable of booting Linux into an interactive BusyBox shell.
+This project is still in a very early stage of development. It currently only guarantees the correctness of the instructions used by Linux BusyBox. At this stage, it cannot yet ensure a complete and correct implementation of all mandatory ARM64 extensions, but it is iterating rapidly.
 
 ## Features
 - [x] Full-system AArch64 emulation
 - [x] Boots Linux to an interactive BusyBox shell
 - [x] Snapshot save and restore
+- [x] Minimal aarch64 implementation sufficient for Linux and Busybox
+- [ ] Full aarch64 mandatory extensions implementation
 - [ ] Basic GDB Command Support
 - [ ] GDB Stub
 
