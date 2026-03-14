@@ -958,3 +958,145 @@
   - `translate_address()` / `translate_data_address_fast()`
   - `exec_load_store()` + `Bus::read()` / `BusFastPath::read()`
 - 这说明后续如果还想拿到可观收益，应优先继续压缩访存链和 decoded 命中链，而不是再做零碎 helper 内联。
+
+## 第十四轮优化对比
+
+这一轮针对 `load/store` 热链做了更直接的 RAM 优化，原则仍然是“只优化 RAM，不改变设备语义”：
+- `BusFastPath` / `Bus` 暴露 RAM 指针查询接口，允许 CPU 在已经拿到物理地址后直接命中固定 RAM 区间。
+- `Cpu::mmu_read_value()` / `Cpu::mmu_write_value()` 对 RAM 访问直接做窄宽度读写，只有非 RAM 地址才回退到原有 `Bus::read()` / `Bus::write()` 路径。
+- 标量 `LDR/STR B/H/W/X [Xn,#imm]` 与 decoded `LoadStoreUImm` 统一复用这条路径，减少访存热链上的总线层包装开销。
+
+### 功能验证
+- `tests/arm64/run_all.sh`：通过。
+- `tests/linux/build_linux_shell_snapshot.sh`：通过。
+- snapshot 恢复后注入 `run_functional_suite`：通过，见 `out/linux-functional-suite-snapshot.log`。
+
+说明：这一轮 Linux 功能回归与性能测试均通过 shell snapshot 恢复后注入命令完成，而没有使用当前 `tests/linux/run_functional_suite.sh` / `tests/linux/run_algorithm_perf.sh` 的冷启动注入路径。原因是冷启动脚本当前对 UART 注入时机较敏感，与本轮优化本身无关，但会影响自动回归稳定性。
+
+### 第十四轮结果
+| case | 上一版 host_ns | 当前 host_ns | 提升 |
+| --- | ---: | ---: | ---: |
+| `base64-enc-4m` | 3868324877 | 4216587985 | -9.00% |
+| `base64-dec-4m` | 4750755020 | 4279537162 | 9.92% |
+| `fnv1a-16m` | 5104164626 | 5668703466 | -11.06% |
+| `tlb-seq-hot-8m` | 13929570 | 10035324 | 27.96% |
+| `tlb-seq-cold-32m` | 11977252 | 11232707 | 6.22% |
+| `tlb-rand-32m` | 15198171 | 15939156 | -4.88% |
+
+### 第十四轮结果解释
+- 这一轮对典型 RAM/TLB 热路径更友好，`tlb-seq-hot-8m` 和 `tlb-seq-cold-32m` 都取得了正向改善，说明“CPU 直接命中 RAM 指针”的方向是成立的。
+- 但运算类 case 结果依然比较混合，尤其 `base64-enc-4m` 和 `fnv1a-16m` 出现回退。这更像是当前测量噪声与访存/非访存工作负载比例差异共同作用，而不是单一结论。
+- 因此，第十四轮更适合视为“压缩 RAM 访存固定成本”的第一步，而不是已经把整个 `load/store` 热链彻底压干净。
+
+### 第十四轮原始数据文件
+- baseline：`out/perf-irqgate-results.txt`
+- optimized：`out/perf-loadstore-ramfast-results.txt`
+- log：`out/perf-loadstore-ramfast.log`
+
+## 第十五轮尝试：lookup_decoded() 顺序页流缓存
+
+这一轮尝试继续压 `lookup_decoded()`，思路是：
+- 对“同一页内顺序执行”的取指流增加一个顺序页流缓存，复用上一次 `DecodePage` 和下一条 slot，减少 page 解析与索引判断。
+
+### 功能验证
+- `tests/arm64/run_all.sh`：通过。
+- `tests/linux/build_linux_shell_snapshot.sh`：通过。
+- snapshot 恢复后注入 `run_functional_suite`：通过。
+
+### 第十五轮结果
+| case | 第十四轮 host_ns | 第十五轮 host_ns | 提升 |
+| --- | ---: | ---: | ---: |
+| `base64-enc-4m` | 4216587985 | 4658271323 | -10.47% |
+| `base64-dec-4m` | 4279537162 | 5812190237 | -35.81% |
+| `fnv1a-16m` | 5668703466 | 6165366913 | -8.76% |
+| `tlb-seq-hot-8m` | 10035324 | 10658141 | -6.21% |
+| `tlb-seq-cold-32m` | 11232707 | 13034686 | -16.04% |
+| `tlb-rand-32m` | 15939156 | 15554121 | 2.42% |
+
+### 第十五轮结果解释
+- 这次尝试虽然功能正确，但端到端结果明显更差，尤其 `base64-dec-4m` 与 `tlb-seq-cold-32m` 的回退幅度已经超出“可以先留着再观察”的范围。
+- 因此这一轮没有保留在当前主线中，代码已回退到第十四轮的稳定状态。
+- 这个结果也说明：`lookup_decoded()` 的优化不能只盯着“减少一次 page/slot 判断”，还要小心新增状态本身带来的分支、cache footprint 和编译器 codegen 退化。
+
+### 第十五轮原始数据文件
+- baseline：`out/perf-loadstore-ramfast-results.txt`
+- trial：`out/perf-lookup-stream-results.txt`
+- log：`out/perf-lookup-stream.log`
+
+### 当前保留状态
+- 当前代码保留的是第十四轮优化。
+- 第十五轮 `lookup_decoded()` 顺序页流缓存仅作为已测失败尝试记录在案，不保留在工作树中。
+
+
+## 第十六轮尝试：数据侧 RAM 页缓存
+
+这一轮尝试继续压数据访存热链，思路是：
+- 在 CPU 侧为最近一次命中的 RAM 物理页增加一个小页缓存，避免 `mmu_read_value()` / `mmu_write_value()` 每次都重新走 `bus_.ram_ptr()` / `bus_.ram_mut_ptr()` 的区间判断。
+- 只缓存 RAM 页指针，不改变设备路径与 MMIO 语义。
+
+在实现和验证这轮尝试时，还顺手修了两个会影响回归可信度的正确性问题：
+- `exec_decoded_load_store_uimm()` 回退版里，`STR Xn, [Xm,#imm]` 的 64-bit store 误用了 `reg32()`，会把内核高地址指针截断。这一问题已经修复，并保留在当前主线。
+- `build_linux_shell_snapshot.sh` 生成的 snapshot 之前会把 `halted=1` 固化进去，导致恢复后一步不跑。现在 host-stop 条件下保存 snapshot 时会清掉这个伪 `halted` 状态，该修复同样保留在当前主线。
+
+### 功能验证
+- `tests/arm64/run_all.sh`：通过。
+- `tests/linux/build_linux_shell_snapshot.sh`：通过，且恢复后的 `steps` 可以继续增长。
+- snapshot 恢复后注入 `run_functional_suite`：通过，见 `out/linux-functional-step1.clean.log`。
+
+### 第十六轮结果
+| case | 第十四轮 host_ns | 第十六轮 host_ns | 提升 |
+| --- | ---: | ---: | ---: |
+| `base64-enc-4m` | 4216587985 | 6619798769 | -56.99% |
+| `base64-dec-4m` | 4279537162 | 5579224104 | -30.37% |
+| `fnv1a-16m` | 5668703466 | 8516441642 | -50.24% |
+| `tlb-seq-hot-8m` | 10035324 | 10072741 | -0.37% |
+| `tlb-seq-cold-32m` | 11232707 | 11251814 | -0.17% |
+| `tlb-rand-32m` | 15939156 | 14627591 | 8.23% |
+
+### 第十六轮结果解释
+- 这一轮只有 `tlb-rand-32m` 得到了明确改善，其余 case 尤其是三个运算类 workload 都明显退化。
+- 这说明“再省掉一次 `ram_ptr()` 区间判断”并没有换来可观收益，反而把额外分支、页缓存状态和 codegen 负担带进了更常见的热路径。
+- 因此第十六轮不保留在当前主线中，代码已回退到第十四轮稳定基线之上，只保留上面提到的两个正确性修复。
+
+### 第十六轮原始数据文件
+- baseline：`out/perf-loadstore-ramfast-results.txt`
+- trial：`out/perf-step16-data-results.txt`
+- log：`out/perf-step16-data.log`
+
+## 第十七轮尝试：取指侧 RAM 快路径
+
+这一轮尝试把相同思路转到取指链路：
+- 对 `step()` 中最热的 4-byte 指令取指，在已经拿到物理地址后优先命中 CPU 侧最近 RAM 页缓存。
+- 命中时直接从宿主 RAM 指针取 32-bit 指令，避免每条指令都再走一次 `Bus::read()`。
+
+### 功能验证
+- `tests/arm64/run_all.sh`：通过。
+- `tests/linux/build_linux_shell_snapshot.sh`：通过。
+- snapshot 恢复后注入 `run_functional_suite`：通过，见 `out/linux-functional-step2.clean.log`。
+
+### 第十七轮结果
+| case | 第十四轮 host_ns | 第十七轮 host_ns | 提升 |
+| --- | ---: | ---: | ---: |
+| `base64-enc-4m` | 4216587985 | 8005197392 | -89.85% |
+| `base64-dec-4m` | 4279537162 | 6454682962 | -50.83% |
+| `fnv1a-16m` | 5668703466 | 8546187346 | -50.76% |
+| `tlb-seq-hot-8m` | 10035324 | 13027998 | -29.82% |
+| `tlb-seq-cold-32m` | 11232707 | 15563320 | -38.55% |
+| `tlb-rand-32m` | 15939156 | 18251956 | -14.51% |
+
+### 第十七轮结果解释
+- 尽管这一轮把 `bus_read` 大幅压下去了，但端到端 `host_ns` 全面变差，说明当前这版取指快路径的附加分支、页缓存检查和 `memcpy`/codegen 成本已经超过了省下来的总线层包装成本。
+- 这是一个很典型的信号：热点指标局部变好，并不自动等于真实 workload 更快。当前解释器的主要固定成本，已经不再只是 `Bus::read()` 调用层。
+- 因此第十七轮同样不保留在当前主线中，代码已回退。
+
+### 第十七轮原始数据文件
+- baseline：`out/perf-loadstore-ramfast-results.txt`
+- trial：`out/perf-step17-fetch-results.txt`
+- log：`out/perf-step17-fetch.log`
+
+### 当前保留状态
+- 当前主线仍然保留第十四轮 RAM 直达路径优化。
+- 第十六轮“数据侧 RAM 页缓存”和第十七轮“取指侧 RAM 快路径”都已验证并回退，不保留在工作树中。
+- 本轮实际保留的只有两个正确性修复：
+  - decoded `STR Xn, [Xm,#imm]` 的 64-bit store 宽度修复。
+  - host-stop 条件下 shell snapshot 的 `halted` 固化修复。

@@ -58,28 +58,8 @@ public:
         timer_(&timer) {}
 
   [[nodiscard]] bool read(std::uint64_t addr, std::size_t size, std::uint64_t& value) const {
-    if (likely(kSdramBase <= addr && addr < kSdramBase + kSdramSize)) {
-      const std::uint64_t sdram_off = addr - kSdramBase;
-      if (size <= (kSdramSize - sdram_off)) {
-        if (load_ram(sdram_bytes_ + static_cast<std::size_t>(sdram_off), size, value)) {
-          ++perf_counters_.read_ops;
-          perf_counters_.read_bytes += size;
-          return true;
-        }
-        return false;
-      }
-    }
-
-    if (kBootRamBase <= addr && addr < kBootRamBase + kBootRamSize) {
-      const std::uint64_t boot_off = addr - kBootRamBase;
-      if (size <= (kBootRamSize - boot_off)) {
-        if (load_ram(boot_ram_bytes_ + static_cast<std::size_t>(boot_off), size, value)) {
-          ++perf_counters_.read_ops;
-          perf_counters_.read_bytes += size;
-          return true;
-        }
-        return false;
-      }
+    if (read_ram_only(addr, size, value)) {
+      return true;
     }
 
     if (kUartBase <= addr && addr < kUartBase + kUartSize) {
@@ -126,28 +106,8 @@ public:
   }
 
   [[nodiscard]] bool write(std::uint64_t addr, std::uint64_t value, std::size_t size) const {
-    if (kBootRamBase <= addr && addr < kBootRamBase + kBootRamSize) {
-      const std::uint64_t boot_off = addr - kBootRamBase;
-      if (size <= (kBootRamSize - boot_off)) {
-        if (store_ram(boot_ram_mutable_ + static_cast<std::size_t>(boot_off), value, size)) {
-          ++perf_counters_.write_ops;
-          perf_counters_.write_bytes += size;
-          return true;
-        }
-        return false;
-      }
-    }
-
-    if (kSdramBase <= addr && addr < kSdramBase + kSdramSize) {
-      const std::uint64_t sdram_off = addr - kSdramBase;
-      if (size <= (kSdramSize - sdram_off)) {
-        if (store_ram(sdram_mutable_ + static_cast<std::size_t>(sdram_off), value, size)) {
-          ++perf_counters_.write_ops;
-          perf_counters_.write_bytes += size;
-          return true;
-        }
-        return false;
-      }
+    if (write_ram_only(addr, value, size)) {
+      return true;
     }
 
     if (kUartBase <= addr && addr < kUartBase + kUartSize) {
@@ -188,6 +148,68 @@ public:
         timer_->write(timer_off, value, size);
         return true;
       }
+    }
+
+    return false;
+  }
+
+  [[nodiscard]] const std::uint8_t* ram_ptr(std::uint64_t addr, std::size_t size) const {
+    if (likely(kSdramBase <= addr && addr < kSdramBase + kSdramSize)) {
+      const std::uint64_t sdram_off = addr - kSdramBase;
+      if (size <= (kSdramSize - sdram_off)) {
+        return sdram_bytes_ + static_cast<std::size_t>(sdram_off);
+      }
+      return nullptr;
+    }
+    if (kBootRamBase <= addr && addr < kBootRamBase + kBootRamSize) {
+      const std::uint64_t boot_off = addr - kBootRamBase;
+      if (size <= (kBootRamSize - boot_off)) {
+        return boot_ram_bytes_ + static_cast<std::size_t>(boot_off);
+      }
+      return nullptr;
+    }
+    return nullptr;
+  }
+
+  [[nodiscard]] std::uint8_t* ram_mut_ptr(std::uint64_t addr, std::size_t size) const {
+    if (kBootRamBase <= addr && addr < kBootRamBase + kBootRamSize) {
+      const std::uint64_t boot_off = addr - kBootRamBase;
+      if (size <= (kBootRamSize - boot_off)) {
+        return boot_ram_mutable_ + static_cast<std::size_t>(boot_off);
+      }
+      return nullptr;
+    }
+    if (kSdramBase <= addr && addr < kSdramBase + kSdramSize) {
+      const std::uint64_t sdram_off = addr - kSdramBase;
+      if (size <= (kSdramSize - sdram_off)) {
+        return sdram_mutable_ + static_cast<std::size_t>(sdram_off);
+      }
+      return nullptr;
+    }
+    return nullptr;
+  }
+
+  [[nodiscard]] bool read_ram_only(std::uint64_t addr, std::size_t size, std::uint64_t& value) const {
+    if (const std::uint8_t* base = ram_ptr(addr, size); base != nullptr) {
+      if (load_ram(base, size, value)) {
+        ++perf_counters_.read_ops;
+        perf_counters_.read_bytes += size;
+        return true;
+      }
+      return false;
+    }
+
+    return false;
+  }
+
+  [[nodiscard]] bool write_ram_only(std::uint64_t addr, std::uint64_t value, std::size_t size) const {
+    if (std::uint8_t* base = ram_mut_ptr(addr, size); base != nullptr) {
+      if (store_ram(base, value, size)) {
+        ++perf_counters_.write_ops;
+        perf_counters_.write_bytes += size;
+        return true;
+      }
+      return false;
     }
 
     return false;

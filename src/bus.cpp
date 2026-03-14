@@ -54,6 +54,32 @@ bool Bus::write(std::uint64_t addr, std::uint64_t value, std::size_t size) const
   return true;
 }
 
+bool Bus::read_ram_fast(std::uint64_t addr, std::size_t size, std::uint64_t& value) const {
+  if (fast_path_raw_ == nullptr || !fast_path_raw_->read_ram_only(addr, size, value)) {
+    return false;
+  }
+  ++perf_counters_.read_ops;
+  perf_counters_.read_bytes += size;
+  return true;
+}
+
+bool Bus::write_ram_fast(std::uint64_t addr, std::uint64_t value, std::size_t size) const {
+  if (fast_path_raw_ == nullptr || !fast_path_raw_->write_ram_only(addr, value, size)) {
+    return false;
+  }
+  ++perf_counters_.write_ops;
+  perf_counters_.write_bytes += size;
+  return true;
+}
+
+const std::uint8_t* Bus::ram_ptr(std::uint64_t addr, std::size_t size) const {
+  return (fast_path_raw_ == nullptr) ? nullptr : fast_path_raw_->ram_ptr(addr, size);
+}
+
+std::uint8_t* Bus::ram_mut_ptr(std::uint64_t addr, std::size_t size) const {
+  return (fast_path_raw_ == nullptr) ? nullptr : fast_path_raw_->ram_mut_ptr(addr, size);
+}
+
 const Bus::Mapping* Bus::find(std::uint64_t addr, std::size_t size) const {
   ++perf_counters_.find_calls;
   for (const Mapping& m : mappings_) {

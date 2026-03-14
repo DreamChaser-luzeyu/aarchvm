@@ -30,6 +30,10 @@ public:
   bool read(std::uint64_t addr, std::size_t size, std::uint64_t& value) const;
   std::optional<std::uint64_t> read(std::uint64_t addr, std::size_t size) const;
   bool write(std::uint64_t addr, std::uint64_t value, std::size_t size) const;
+  bool read_ram_fast(std::uint64_t addr, std::size_t size, std::uint64_t& value) const;
+  bool write_ram_fast(std::uint64_t addr, std::uint64_t value, std::size_t size) const;
+  [[nodiscard]] const std::uint8_t* ram_ptr(std::uint64_t addr, std::size_t size) const;
+  [[nodiscard]] std::uint8_t* ram_mut_ptr(std::uint64_t addr, std::size_t size) const;
 
   [[nodiscard]] const PerfCounters& perf_counters() const { return perf_counters_; }
   void reset_perf_counters() const { perf_counters_ = {}; }

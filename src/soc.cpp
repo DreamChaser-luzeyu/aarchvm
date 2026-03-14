@@ -503,6 +503,9 @@ std::uint64_t SoC::timer_cntp_tval() const {
 
 bool SoC::save_snapshot(const std::string& path) const {
   const_cast<GenericTimer&>(*timer_).sync_to_steps(cpu_.steps());
+  if (stop_requested_) {
+    const_cast<Cpu&>(cpu_).clear_halt();
+  }
 
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   if (!out) {
@@ -563,6 +566,9 @@ bool SoC::load_snapshot(const std::string& path) {
     fast_path_ = std::make_shared<BusFastPath>(*boot_ram_, *sdram_, *uart_, *perf_mailbox_, *gic_, *timer_);
     bus_.set_fast_path(fast_path_);
   }
+  stop_requested_ = false;
+  stop_on_uart_window_.clear();
+  device_sync_valid_ = false;
   if (const auto scale = env_timer_scale(); scale.has_value()) {
     timer_tick_scale_ = *scale;
   }

@@ -35,6 +35,7 @@ public:
     }
   }
   [[nodiscard]] bool halted() const { return halted_; }
+  void clear_halt() { halted_ = false; }
   [[nodiscard]] std::uint64_t pc() const { return pc_; }
   [[nodiscard]] std::uint64_t steps() const { return steps_; }
   [[nodiscard]] std::uint64_t x(std::uint32_t idx) const { return reg(idx); }
@@ -235,6 +236,7 @@ private:
   void tlb_invalidate_page(std::uint64_t va_page);
   void data_abort(std::uint64_t va);
   [[nodiscard]] bool translate_data_address_fast(std::uint64_t va, bool write, std::uint64_t* out_pa);
+  void invalidate_ram_page_caches();
   [[nodiscard]] bool mmu_read_value(std::uint64_t va, std::size_t size, std::uint64_t* out);
   [[nodiscard]] bool mmu_write_value(std::uint64_t va, std::uint64_t value, std::size_t size);
   [[nodiscard]] DecodedInsn decode_insn(std::uint32_t insn) const;
