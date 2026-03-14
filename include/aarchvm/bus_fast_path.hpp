@@ -1,5 +1,7 @@
 #pragma once
 
+#include "aarchvm/block_mmio.hpp"
+#include "aarchvm/framebuffer_dirty_tracker.hpp"
 #include "aarchvm/generic_timer.hpp"
 #include "aarchvm/gicv3.hpp"
 #include "aarchvm/perf_mailbox.hpp"
@@ -31,31 +33,42 @@ public:
 
   static constexpr std::uint64_t kBootRamBase = 0x00000000ull;
   static constexpr std::uint64_t kBootRamSize = 128ull * 1024ull * 1024ull;
+  static constexpr std::uint64_t kFramebufferBase = 0x10000000ull;
+  static constexpr std::uint64_t kFramebufferSize = 0x00400000ull;
   static constexpr std::uint64_t kSdramBase = 0x40000000ull;
   static constexpr std::uint64_t kSdramSize = 128ull * 1024ull * 1024ull;
   static constexpr std::uint64_t kUartBase = 0x09000000ull;
   static constexpr std::uint64_t kUartSize = 0x1000ull;
   static constexpr std::uint64_t kPerfBase = 0x09020000ull;
   static constexpr std::uint64_t kPerfSize = 0x1000ull;
+  static constexpr std::uint64_t kBlockBase = 0x09040000ull;
+  static constexpr std::uint64_t kBlockSize = 0x1000ull;
   static constexpr std::uint64_t kGicBase = 0x08000000ull;
   static constexpr std::uint64_t kGicSize = 0x100000ull;
   static constexpr std::uint64_t kTimerBase = 0x0A000000ull;
   static constexpr std::uint64_t kTimerSize = 0x1000ull;
 
   BusFastPath(Ram& boot_ram,
+              Ram& framebuffer_ram,
               Ram& sdram,
               UartPl011& uart,
               PerfMailbox& perf_mailbox,
+              BlockMmio& block_mmio,
               GicV3& gic,
-              GenericTimer& timer)
+              GenericTimer& timer,
+              FramebufferDirtyTracker* framebuffer_dirty_tracker)
       : boot_ram_bytes_(boot_ram.bytes().data()),
         boot_ram_mutable_(const_cast<std::uint8_t*>(boot_ram.bytes().data())),
+        framebuffer_bytes_(framebuffer_ram.bytes().data()),
+        framebuffer_mutable_(const_cast<std::uint8_t*>(framebuffer_ram.bytes().data())),
         sdram_bytes_(sdram.bytes().data()),
         sdram_mutable_(const_cast<std::uint8_t*>(sdram.bytes().data())),
         uart_(&uart),
         perf_mailbox_(&perf_mailbox),
+        block_mmio_(&block_mmio),
         gic_(&gic),
-        timer_(&timer) {}
+        timer_(&timer),
+        framebuffer_dirty_tracker_(framebuffer_dirty_tracker) {}
 
   [[nodiscard]] bool read(std::uint64_t addr, std::size_t size, std::uint64_t& value) const {
     if (read_ram_only(addr, size, value)) {
@@ -78,6 +91,16 @@ public:
         ++perf_counters_.read_ops;
         perf_counters_.read_bytes += size;
         value = perf_mailbox_->read(perf_off, size);
+        return true;
+      }
+    }
+
+    if (kBlockBase <= addr && addr < kBlockBase + kBlockSize) {
+      const std::uint64_t block_off = addr - kBlockBase;
+      if (size <= (kBlockSize - block_off)) {
+        ++perf_counters_.read_ops;
+        perf_counters_.read_bytes += size;
+        value = block_mmio_->read(block_off, size);
         return true;
       }
     }
@@ -130,6 +153,16 @@ public:
       }
     }
 
+    if (kBlockBase <= addr && addr < kBlockBase + kBlockSize) {
+      const std::uint64_t block_off = addr - kBlockBase;
+      if (size <= (kBlockSize - block_off)) {
+        ++perf_counters_.write_ops;
+        perf_counters_.write_bytes += size;
+        block_mmio_->write(block_off, value, size);
+        return true;
+      }
+    }
+
     if (kGicBase <= addr && addr < kGicBase + kGicSize) {
       const std::uint64_t gic_off = addr - kGicBase;
       if (size <= (kGicSize - gic_off)) {
@@ -168,6 +201,13 @@ public:
       }
       return nullptr;
     }
+    if (kFramebufferBase <= addr && addr < kFramebufferBase + kFramebufferSize) {
+      const std::uint64_t fb_off = addr - kFramebufferBase;
+      if (size <= (kFramebufferSize - fb_off)) {
+        return framebuffer_bytes_ + static_cast<std::size_t>(fb_off);
+      }
+      return nullptr;
+    }
     return nullptr;
   }
 
@@ -183,6 +223,13 @@ public:
       const std::uint64_t sdram_off = addr - kSdramBase;
       if (size <= (kSdramSize - sdram_off)) {
         return sdram_mutable_ + static_cast<std::size_t>(sdram_off);
+      }
+      return nullptr;
+    }
+    if (kFramebufferBase <= addr && addr < kFramebufferBase + kFramebufferSize) {
+      const std::uint64_t fb_off = addr - kFramebufferBase;
+      if (size <= (kFramebufferSize - fb_off)) {
+        return framebuffer_mutable_ + static_cast<std::size_t>(fb_off);
       }
       return nullptr;
     }
@@ -203,6 +250,21 @@ public:
   }
 
   [[nodiscard]] bool write_ram_only(std::uint64_t addr, std::uint64_t value, std::size_t size) const {
+    if (kFramebufferBase <= addr && addr < kFramebufferBase + kFramebufferSize) {
+      const std::uint64_t fb_off = addr - kFramebufferBase;
+      if (size <= (kFramebufferSize - fb_off)) {
+        if (store_ram(framebuffer_mutable_ + static_cast<std::size_t>(fb_off), value, size)) {
+          if (framebuffer_dirty_tracker_ != nullptr) {
+            framebuffer_dirty_tracker_->on_ram_write(fb_off, size);
+          }
+          ++perf_counters_.write_ops;
+          perf_counters_.write_bytes += size;
+          return true;
+        }
+        return false;
+      }
+    }
+
     if (std::uint8_t* base = ram_mut_ptr(addr, size); base != nullptr) {
       if (store_ram(base, value, size)) {
         ++perf_counters_.write_ops;
@@ -270,12 +332,16 @@ private:
 
   const std::uint8_t* boot_ram_bytes_ = nullptr;
   std::uint8_t* boot_ram_mutable_ = nullptr;
+  const std::uint8_t* framebuffer_bytes_ = nullptr;
+  std::uint8_t* framebuffer_mutable_ = nullptr;
   const std::uint8_t* sdram_bytes_ = nullptr;
   std::uint8_t* sdram_mutable_ = nullptr;
   UartPl011* uart_ = nullptr;
   PerfMailbox* perf_mailbox_ = nullptr;
+  BlockMmio* block_mmio_ = nullptr;
   GicV3* gic_ = nullptr;
   GenericTimer* timer_ = nullptr;
+  FramebufferDirtyTracker* framebuffer_dirty_tracker_ = nullptr;
   mutable PerfCounters perf_counters_{};
 };
 

@@ -1,6 +1,7 @@
 #include "aarchvm/bus.hpp"
 
 #include "aarchvm/bus_fast_path.hpp"
+#include "aarchvm/ram.hpp"
 
 namespace aarchvm {
 
@@ -73,11 +74,49 @@ bool Bus::write_ram_fast(std::uint64_t addr, std::uint64_t value, std::size_t si
 }
 
 const std::uint8_t* Bus::ram_ptr(std::uint64_t addr, std::size_t size) const {
-  return (fast_path_raw_ == nullptr) ? nullptr : fast_path_raw_->ram_ptr(addr, size);
+  if (fast_path_raw_ != nullptr) {
+    if (const std::uint8_t* ptr = fast_path_raw_->ram_ptr(addr, size); ptr != nullptr) {
+      return ptr;
+    }
+  }
+
+  const Mapping* mapping = find(addr, size);
+  if (mapping == nullptr) {
+    return nullptr;
+  }
+  const auto* ram = dynamic_cast<const Ram*>(mapping->device.get());
+  if (ram == nullptr) {
+    return nullptr;
+  }
+  const std::uint64_t offset = addr - mapping->base;
+  const auto bytes = ram->bytes();
+  if (offset + size > bytes.size()) {
+    return nullptr;
+  }
+  return bytes.data() + static_cast<std::size_t>(offset);
 }
 
 std::uint8_t* Bus::ram_mut_ptr(std::uint64_t addr, std::size_t size) const {
-  return (fast_path_raw_ == nullptr) ? nullptr : fast_path_raw_->ram_mut_ptr(addr, size);
+  if (fast_path_raw_ != nullptr) {
+    if (std::uint8_t* ptr = fast_path_raw_->ram_mut_ptr(addr, size); ptr != nullptr) {
+      return ptr;
+    }
+  }
+
+  const Mapping* mapping = find(addr, size);
+  if (mapping == nullptr) {
+    return nullptr;
+  }
+  auto* ram = dynamic_cast<Ram*>(mapping->device.get());
+  if (ram == nullptr) {
+    return nullptr;
+  }
+  const std::uint64_t offset = addr - mapping->base;
+  const auto bytes = ram->bytes();
+  if (offset + size > bytes.size()) {
+    return nullptr;
+  }
+  return const_cast<std::uint8_t*>(bytes.data()) + static_cast<std::size_t>(offset);
 }
 
 const Bus::Mapping* Bus::find(std::uint64_t addr, std::size_t size) const {

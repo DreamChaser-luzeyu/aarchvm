@@ -1,8 +1,11 @@
 #pragma once
 
+#include "aarchvm/block_mmio.hpp"
 #include "aarchvm/bus.hpp"
 #include "aarchvm/bus_fast_path.hpp"
 #include "aarchvm/cpu.hpp"
+#include "aarchvm/framebuffer_dirty_tracker.hpp"
+#include "aarchvm/framebuffer_sdl.hpp"
 #include "aarchvm/generic_timer.hpp"
 #include "aarchvm/gicv3.hpp"
 #include "aarchvm/perf_mailbox.hpp"
@@ -25,6 +28,8 @@ public:
 
   bool load_image(std::uint64_t addr, const std::vector<std::uint32_t>& words);
   bool load_binary(std::uint64_t addr, const std::vector<std::uint8_t>& bytes);
+  bool load_block_image(const std::vector<std::uint8_t>& bytes);
+  void set_framebuffer_sdl_enabled(bool enabled);
   void reset(std::uint64_t entry_pc);
   void set_predecode_enabled(bool enabled);
   void set_sp(std::uint64_t sp);
@@ -71,12 +76,19 @@ public:
 private:
   static constexpr std::uint64_t kBootRamBase = 0x00000000;
   static constexpr std::uint64_t kBootRamSize = 128ull * 1024ull * 1024ull;
+  static constexpr std::uint64_t kFramebufferBase = 0x10000000;
+  static constexpr std::uint64_t kFramebufferSize = 0x00400000;
+  static constexpr std::uint32_t kFramebufferWidth = 800;
+  static constexpr std::uint32_t kFramebufferHeight = 600;
+  static constexpr std::uint32_t kFramebufferStride = kFramebufferWidth * 4u;
   static constexpr std::uint64_t kSdramBase = 0x40000000;
   static constexpr std::uint64_t kSdramSize = 128ull * 1024ull * 1024ull;
   static constexpr std::uint64_t kUartBase = 0x09000000;
   static constexpr std::uint64_t kUartSize = 0x1000;
   static constexpr std::uint64_t kPerfBase = 0x09020000;
   static constexpr std::uint64_t kPerfSize = 0x1000;
+  static constexpr std::uint64_t kBlockBase = 0x09040000;
+  static constexpr std::uint64_t kBlockSize = 0x1000;
   static constexpr std::uint64_t kGicBase = 0x08000000;
   static constexpr std::uint64_t kGicSize = 0x100000;
   static constexpr std::uint64_t kTimerBase = 0x0A000000;
@@ -92,6 +104,7 @@ private:
   void perf_flush_tlb();
   [[nodiscard]] PerfCounters collect_perf_counters() const;
   void reset_perf_measurement_state();
+  void rebuild_fast_path();
 
   struct PerfSession {
     bool active = false;
@@ -109,12 +122,17 @@ private:
 
   Bus bus_;
   std::shared_ptr<Ram> boot_ram_;
+  std::shared_ptr<Ram> framebuffer_ram_;
   std::shared_ptr<Ram> sdram_;
   std::shared_ptr<UartPl011> uart_;
   std::shared_ptr<PerfMailbox> perf_mailbox_;
+  std::shared_ptr<BlockMmio> block_mmio_;
   std::shared_ptr<GicV3> gic_;
   std::shared_ptr<GenericTimer> timer_;
   std::shared_ptr<BusFastPath> fast_path_;
+  std::shared_ptr<FramebufferDirtyTracker> framebuffer_dirty_tracker_;
+  std::unique_ptr<FramebufferSdl> framebuffer_sdl_;
+  bool framebuffer_sdl_enabled_ = true;
   Cpu cpu_;
   std::uint64_t timer_tick_scale_ = 1;
   bool stop_requested_ = false;

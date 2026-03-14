@@ -77,6 +77,7 @@ PerfCounters perf_delta(const PerfCounters& end, const PerfCounters& start) {
 
 SoC::SoC()
     : boot_ram_(std::make_shared<Ram>(kBootRamSize)),
+      framebuffer_ram_(std::make_shared<Ram>(kFramebufferSize)),
       sdram_(std::make_shared<Ram>(kSdramSize)),
       uart_(std::make_shared<UartPl011>()),
       perf_mailbox_(std::make_shared<PerfMailbox>(PerfMailbox::Callbacks{
@@ -89,30 +90,53 @@ SoC::SoC()
           .request_exit = [this]() { request_stop(); },
           .flush_tlb = [this]() { perf_flush_tlb(); },
       })),
+      block_mmio_(std::make_shared<BlockMmio>(bus_)),
       gic_(std::make_shared<GicV3>()),
       timer_(std::make_shared<GenericTimer>()),
       cpu_(bus_, *gic_, *timer_) {
+  framebuffer_dirty_tracker_ = std::make_shared<FramebufferDirtyTracker>(kFramebufferWidth,
+                                                                         kFramebufferHeight,
+                                                                         kFramebufferStride,
+                                                                         kFramebufferSize);
+  framebuffer_ram_->set_write_observer(framebuffer_dirty_tracker_.get());
+
   bus_.map(kBootRamBase, kBootRamSize, boot_ram_);
+  bus_.map(kFramebufferBase, kFramebufferSize, framebuffer_ram_);
   bus_.map(kSdramBase, kSdramSize, sdram_);
   bus_.map(kUartBase, kUartSize, uart_);
   bus_.map(kPerfBase, kPerfSize, perf_mailbox_);
+  bus_.map(kBlockBase, kBlockSize, block_mmio_);
   bus_.map(kGicBase, kGicSize, gic_);
   bus_.map(kTimerBase, kTimerSize, timer_);
 
   if (env_enabled("AARCHVM_BUS_FASTPATH") || env_enabled("AARCHVM_RAM_FASTPATH")) {
-    fast_path_ = std::make_shared<BusFastPath>(*boot_ram_, *sdram_, *uart_, *perf_mailbox_, *gic_, *timer_);
-    bus_.set_fast_path(fast_path_);
+    rebuild_fast_path();
   }
 
   if (const auto scale = env_timer_scale(); scale.has_value()) {
     timer_tick_scale_ = *scale;
   }
 
+  const char* fb_env = std::getenv("AARCHVM_FB_SDL");
+  framebuffer_sdl_enabled_ = (fb_env == nullptr) ? true : env_enabled("AARCHVM_FB_SDL");
   uart_->set_tx_observer([this](std::uint8_t byte) { on_uart_tx(byte); });
   timer_->set_cycles_per_step(timer_tick_scale_);
   cpu_.reset(kBootRamBase);
   timer_->rebase_to_steps(cpu_.steps());
   reset_perf_measurement_state();
+}
+
+void SoC::rebuild_fast_path() {
+  fast_path_ = std::make_shared<BusFastPath>(*boot_ram_,
+                                             *framebuffer_ram_,
+                                             *sdram_,
+                                             *uart_,
+                                             *perf_mailbox_,
+                                             *block_mmio_,
+                                             *gic_,
+                                             *timer_,
+                                             framebuffer_dirty_tracker_.get());
+  bus_.set_fast_path(fast_path_);
 }
 
 bool SoC::load_image(std::uint64_t addr, const std::vector<std::uint32_t>& words) {
@@ -134,6 +158,8 @@ bool SoC::load_binary(std::uint64_t addr, const std::vector<std::uint8_t>& bytes
   bool ok = false;
   if (in_range(addr, kBootRamBase, kBootRamSize, offset)) {
     ok = boot_ram_->load_bytes(offset, bytes);
+  } else if (in_range(addr, kFramebufferBase, kFramebufferSize, offset)) {
+    ok = framebuffer_ram_->load_bytes(offset, bytes);
   } else if (in_range(addr, kSdramBase, kSdramSize, offset)) {
     ok = sdram_->load_bytes(offset, bytes);
   }
@@ -141,6 +167,27 @@ bool SoC::load_binary(std::uint64_t addr, const std::vector<std::uint8_t>& bytes
     cpu_.invalidate_decode_all();
   }
   return ok;
+}
+
+bool SoC::load_block_image(const std::vector<std::uint8_t>& bytes) {
+  block_mmio_->set_image(bytes);
+  return true;
+}
+
+void SoC::set_framebuffer_sdl_enabled(bool enabled) {
+  framebuffer_sdl_enabled_ = enabled;
+  if (!enabled) {
+    framebuffer_sdl_.reset();
+    return;
+  }
+  framebuffer_sdl_ = std::make_unique<FramebufferSdl>(framebuffer_ram_->bytes(),
+                                                      kFramebufferWidth,
+                                                      kFramebufferHeight,
+                                                      kFramebufferStride,
+                                                      framebuffer_dirty_tracker_);
+  if (!framebuffer_sdl_->available()) {
+    framebuffer_sdl_.reset();
+  }
 }
 
 void SoC::reset(std::uint64_t entry_pc) {
@@ -333,6 +380,10 @@ bool SoC::run(std::size_t max_steps) {
       last_uart_level_ = uart_level;
     }
 
+    if (framebuffer_sdl_ != nullptr) {
+      framebuffer_sdl_->present(steps);
+    }
+
     device_sync_valid_ = true;
   };
 
@@ -512,7 +563,7 @@ bool SoC::save_snapshot(const std::string& path) const {
     return false;
   }
   static constexpr char kMagic[8] = {'A', 'A', 'R', 'C', 'H', 'S', 'N', 'P'};
-  static constexpr std::uint32_t kVersion = 4;
+  static constexpr std::uint32_t kVersion = 5;
   out.write(kMagic, sizeof(kMagic));
   if (!out ||
       !snapshot_io::write(out, kVersion) ||
@@ -526,7 +577,9 @@ bool SoC::save_snapshot(const std::string& path) const {
       !uart_->save_state(out) ||
       !gic_->save_state(out) ||
       !timer_->save_state(out) ||
-      !cpu_.save_state(out)) {
+      !cpu_.save_state(out) ||
+      !framebuffer_ram_->save_state(out) ||
+      !block_mmio_->save_state(out)) {
     return false;
   }
   return static_cast<bool>(out);
@@ -551,7 +604,7 @@ bool SoC::load_snapshot(const std::string& path) {
       !snapshot_io::read(in, sdram_size) ||
       magic[0] != 'A' || magic[1] != 'A' || magic[2] != 'R' || magic[3] != 'C' ||
       magic[4] != 'H' || magic[5] != 'S' || magic[6] != 'N' || magic[7] != 'P' ||
-      (version != 1 && version != 2 && version != 3 && version != 4) || boot_ram_base != kBootRamBase || boot_ram_size != kBootRamSize ||
+      (version != 1 && version != 2 && version != 3 && version != 4 && version != 5) || boot_ram_base != kBootRamBase || boot_ram_size != kBootRamSize ||
       sdram_base != kSdramBase || sdram_size != kSdramSize ||
       !snapshot_io::read(in, timer_tick_scale_) ||
       !boot_ram_->load_state(in) ||
@@ -562,9 +615,19 @@ bool SoC::load_snapshot(const std::string& path) {
       !cpu_.load_state(in, version)) {
     return false;
   }
+  if (version >= 5) {
+    if (!framebuffer_ram_->load_state(in) || !block_mmio_->load_state(in)) {
+      return false;
+    }
+  } else {
+    framebuffer_ram_->load_bytes(0, std::vector<std::uint8_t>(kFramebufferSize, 0));
+    block_mmio_->set_image({});
+  }
   if (fast_path_ != nullptr) {
-    fast_path_ = std::make_shared<BusFastPath>(*boot_ram_, *sdram_, *uart_, *perf_mailbox_, *gic_, *timer_);
-    bus_.set_fast_path(fast_path_);
+    rebuild_fast_path();
+  }
+  if (framebuffer_sdl_enabled_) {
+    set_framebuffer_sdl_enabled(true);
   }
   stop_requested_ = false;
   stop_on_uart_window_.clear();

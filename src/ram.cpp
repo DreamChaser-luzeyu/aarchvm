@@ -3,6 +3,7 @@
 #include "aarchvm/snapshot_io.hpp"
 
 #include <cstring>
+#include <utility>
 
 namespace aarchvm {
 
@@ -36,6 +37,7 @@ bool Ram::write_fast(std::uint64_t offset, std::uint64_t value, std::size_t size
   }
 
   std::memcpy(data_.data() + static_cast<std::size_t>(offset), &value, size);
+  notify_write(offset, size);
   return true;
 }
 
@@ -47,6 +49,7 @@ bool Ram::load(std::uint64_t offset, const std::vector<std::uint32_t>& words) {
 
   if (!words.empty()) {
     std::memcpy(data_.data() + static_cast<std::size_t>(offset), words.data(), bytes);
+    notify_write(offset, bytes);
   }
   return true;
 }
@@ -57,6 +60,7 @@ bool Ram::load_bytes(std::uint64_t offset, const std::vector<std::uint8_t>& byte
   }
   if (!bytes.empty()) {
     std::memcpy(data_.data() + static_cast<std::size_t>(offset), bytes.data(), bytes.size());
+    notify_write(offset, bytes.size());
   }
   return true;
 }
@@ -74,7 +78,14 @@ bool Ram::load_state(std::istream& in) {
     return false;
   }
   data_ = std::move(data);
+  notify_write(0, data_.size());
   return true;
+}
+
+void Ram::notify_write(std::uint64_t offset, std::size_t size) {
+  if (write_observer_ != nullptr && size != 0) {
+    write_observer_->on_ram_write(offset, size);
+  }
 }
 
 } // namespace aarchvm

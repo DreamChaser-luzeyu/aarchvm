@@ -37,9 +37,12 @@ struct Options {
   std::uint64_t dtb_addr = 0x40000000ull;
   std::optional<std::string> snapshot_load_path;
   std::optional<std::string> snapshot_save_path;
+  std::optional<std::string> drive_path;
   std::vector<BinaryLoad> extra_bins;
   std::optional<std::string> stop_on_uart_pattern;
   bool predecode_enabled = true;
+  bool framebuffer_sdl = true;
+  bool framebuffer_sdl_specified = false;
 };
 
 std::uint64_t parse_u64(const std::string& text) {
@@ -132,8 +135,8 @@ void print_usage(const char* argv0) {
       << "Usage: " << argv0 << " -bin <program.bin> "
       << "[-load <addr>] [-entry <pc>] [-steps <n>] [-sp <addr>] "
       << "[-dtb <file>] [-dtb-addr <addr>] [-segment <file@addr>]... "
-      << "[-snapshot-load <file>] [-snapshot-save <file>] \n"
-      << "[-stop-on-uart <text>] [-decode <fast|slow>]\n";
+      << "[-snapshot-load <file>] [-snapshot-save <file>] [-drive <image.bin>] \n"
+      << "[-stop-on-uart <text>] [-decode <fast|slow>] [-fb-sdl <on|off>]\n";
 }
 
 std::optional<Options> parse_args(int argc, char** argv) {
@@ -178,6 +181,8 @@ std::optional<Options> parse_args(int argc, char** argv) {
       opt.snapshot_load_path = val;
     } else if (key == "-snapshot-save") {
       opt.snapshot_save_path = val;
+    } else if (key == "-drive") {
+      opt.drive_path = val;
     } else if (key == "-stop-on-uart") {
       opt.stop_on_uart_pattern = val;
     } else if (key == "-decode") {
@@ -187,6 +192,16 @@ std::optional<Options> parse_args(int argc, char** argv) {
         opt.predecode_enabled = false;
       } else {
         std::cerr << "Invalid -decode value (expected fast or slow): " << val << '\n';
+        return std::nullopt;
+      }
+    } else if (key == "-fb-sdl") {
+      opt.framebuffer_sdl_specified = true;
+      if (val == "on") {
+        opt.framebuffer_sdl = true;
+      } else if (val == "off") {
+        opt.framebuffer_sdl = false;
+      } else {
+        std::cerr << "Invalid -fb-sdl value (expected on or off): " << val << '\n';
         return std::nullopt;
       }
     } else if (key == "-segment") {
@@ -304,6 +319,9 @@ int main(int argc, char** argv) {
   const Options& opt = *parsed;
 
   aarchvm::SoC soc;
+  if (opt.framebuffer_sdl_specified) {
+    soc.set_framebuffer_sdl_enabled(opt.framebuffer_sdl);
+  }
   soc.set_predecode_enabled(opt.predecode_enabled);
   if (opt.stop_on_uart_pattern.has_value()) {
     soc.set_stop_on_uart_pattern(*opt.stop_on_uart_pattern);
@@ -383,6 +401,18 @@ int main(int argc, char** argv) {
                      ? parse_u64(std::string(std::getenv("AARCHVM_DTB_ADDR")))
                      : 0x40000000ull);
       soc.set_x(0, dtb_addr);
+    }
+  }
+
+  if (opt.drive_path.has_value()) {
+    std::vector<std::uint8_t> drive;
+    if (!read_binary_file(*opt.drive_path, drive)) {
+      std::cerr << "Failed to read drive image: " << *opt.drive_path << '\n';
+      return 1;
+    }
+    if (!soc.load_block_image(drive)) {
+      std::cerr << "Failed to attach drive image: " << *opt.drive_path << '\n';
+      return 1;
     }
   }
 

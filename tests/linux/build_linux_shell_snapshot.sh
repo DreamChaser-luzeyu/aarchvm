@@ -34,8 +34,10 @@ set -o pipefail
 (
   sleep "$UBOOT_DELAY_SEC"
   printf '\n'
+  printf '\n'
+  printf '\n'
   sleep "$PROMPT_DELAY_SEC"
-  printf 'setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel\n'
+  printf 'setenv bootargs console=tty0 console=ttyAMA0,115200 earlycon=pl011,0x09000000\n'
   printf 'booti 0x40400000 0x46000000:%s 0x47f00000\n' "$INITRD_SIZE_HEX"
 ) | \
 AARCHVM_PRINT_SUMMARY=1 \

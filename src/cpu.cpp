@@ -499,28 +499,7 @@ bool load_fast_value(const std::uint8_t* base, std::size_t size, std::uint64_t* 
   return true;
 }
 
-bool store_fast_value(std::uint8_t* base, std::uint64_t value, std::size_t size) {
-  switch (size) {
-    case 1u:
-      base[0] = static_cast<std::uint8_t>(value);
-      return true;
-    case 2u: {
-      const std::uint16_t v = static_cast<std::uint16_t>(value);
-      std::memcpy(base, &v, sizeof(v));
-      return true;
-    }
-    case 4u: {
-      const std::uint32_t v = static_cast<std::uint32_t>(value);
-      std::memcpy(base, &v, sizeof(v));
-      return true;
-    }
-    case 8u:
-      std::memcpy(base, &value, sizeof(value));
-      return true;
-    default:
-      return false;
-  }
-}
+
 
 } // namespace
 
@@ -631,10 +610,8 @@ bool Cpu::mmu_write_value(std::uint64_t va, std::uint64_t value, std::size_t siz
     }
     std::cerr << '\n';
   }
-  bool ok = false;
-  if (std::uint8_t* base = bus_.ram_mut_ptr(pa, size); base != nullptr) {
-    ok = store_fast_value(base, value, size);
-  } else {
+  bool ok = bus_.write_ram_fast(pa, value, size);
+  if (!ok) {
     ok = bus_.write(pa, value, size);
   }
   if (ok) {

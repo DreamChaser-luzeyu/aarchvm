@@ -8,7 +8,7 @@
 
 	chosen {
 		stdout-path = "serial0:115200n8";
-		bootargs = "console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel";
+		bootargs = "console=tty0 console=ttyAMA0,115200 earlycon=pl011,0x09000000";
 	};
 
 	aliases {
@@ -41,6 +41,22 @@
 	memory@40000000 {
 		device_type = "memory";
 		reg = <0x0 0x40000000 0x0 0x08000000>;
+	};
+
+	framebuffer@10000000 {
+		compatible = "simple-framebuffer";
+		reg = <0x0 0x10000000 0x0 0x00400000>;
+		width = <800>;
+		height = <600>;
+		stride = <3200>;
+		format = "x8r8g8b8";
+		status = "okay";
+	};
+
+	blk@9040000 {
+		compatible = "aarchvm,mmio-blk";
+		reg = <0x0 0x09040000 0x0 0x00001000>;
+		status = "okay";
 	};
 
 	intc: interrupt-controller@8000000 {
