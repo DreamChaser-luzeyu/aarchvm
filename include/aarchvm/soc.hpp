@@ -9,6 +9,7 @@
 #include "aarchvm/generic_timer.hpp"
 #include "aarchvm/gicv3.hpp"
 #include "aarchvm/perf_mailbox.hpp"
+#include "aarchvm/pl050_kmi.hpp"
 #include "aarchvm/perf_types.hpp"
 #include "aarchvm/ram.hpp"
 #include "aarchvm/uart_pl011.hpp"
@@ -35,6 +36,7 @@ public:
   void set_sp(std::uint64_t sp);
   void set_x(std::uint32_t idx, std::uint64_t value);
   void inject_uart_rx(std::uint8_t byte);
+  void inject_ps2_rx(std::uint8_t byte);
   void set_stop_on_uart_pattern(std::string pattern);
   bool run(std::size_t max_steps);
   [[nodiscard]] bool stop_requested() const { return stop_requested_; }
@@ -85,6 +87,8 @@ private:
   static constexpr std::uint64_t kSdramSize = 128ull * 1024ull * 1024ull;
   static constexpr std::uint64_t kUartBase = 0x09000000;
   static constexpr std::uint64_t kUartSize = 0x1000;
+  static constexpr std::uint64_t kKmiBase = 0x09010000;
+  static constexpr std::uint64_t kKmiSize = 0x1000;
   static constexpr std::uint64_t kPerfBase = 0x09020000;
   static constexpr std::uint64_t kPerfSize = 0x1000;
   static constexpr std::uint64_t kBlockBase = 0x09040000;
@@ -96,6 +100,7 @@ private:
   static constexpr std::uint32_t kTimerVirtIntId = 27; // PPI 11 => INTID 27
   static constexpr std::uint32_t kTimerPhysIntId = 30; // PPI 14 => INTID 30
   static constexpr std::uint32_t kUartIntId = 33;
+  static constexpr std::uint32_t kKmiIntId = 34;
 
   void request_stop();
   void on_uart_tx(std::uint8_t byte);
@@ -125,6 +130,7 @@ private:
   std::shared_ptr<Ram> framebuffer_ram_;
   std::shared_ptr<Ram> sdram_;
   std::shared_ptr<UartPl011> uart_;
+  std::shared_ptr<Pl050Kmi> kmi_;
   std::shared_ptr<PerfMailbox> perf_mailbox_;
   std::shared_ptr<BlockMmio> block_mmio_;
   std::shared_ptr<GicV3> gic_;
@@ -145,6 +151,7 @@ private:
   bool last_timer_virt_level_ = false;
   bool last_timer_phys_level_ = false;
   bool last_uart_level_ = false;
+  bool last_kmi_level_ = false;
 };
 
 } // namespace aarchvm

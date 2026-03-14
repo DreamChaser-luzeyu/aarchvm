@@ -7,7 +7,7 @@ cd "$ROOT_DIR"
 LOG="${AARCHVM_FUNCTIONAL_LOG:-out/linux-functional-suite.log}"
 STEPS="${AARCHVM_FUNCTIONAL_STEPS:-1200000000}"
 TIMEOUT_SEC="${AARCHVM_FUNCTIONAL_TIMEOUT:-180s}"
-TIMER_SCALE="${AARCHVM_TIMER_SCALE:-10000}"
+TIMER_SCALE="${AARCHVM_TIMER_SCALE:-100}"
 FASTPATH="${AARCHVM_BUS_FASTPATH:-1}"
 UBOOT_DELAY_SEC="${AARCHVM_UBOOT_COMMAND_DELAY_SEC:-3}"
 PROMPT_DELAY_SEC="${AARCHVM_UBOOT_PROMPT_DELAY_SEC:-1}"
@@ -51,7 +51,7 @@ set -o pipefail
   sleep "$UBOOT_DELAY_SEC"
   printf '\n'
   sleep "$PROMPT_DELAY_SEC"
-  printf 'setenv bootargs console=tty0 console=ttyAMA0,115200 earlycon=pl011,0x09000000\n'
+  printf 'setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 rdinit=/init initramfs_async=0\n'
   printf 'booti 0x40400000 0x46000000:%s 0x47f00000\n' "$INITRD_SIZE_HEX"
 ) | \
 AARCHVM_UART_RX_SCRIPT="$RX_SCRIPT" \
@@ -68,6 +68,7 @@ timeout "$TIMEOUT_SEC" ./build/aarchvm "${AARCHVM_EXTRA_ARGS[@]}" \
   -segment "$INITRD"@0x46000000 \
   -segment dts/aarchvm-linux-min.dtb@0x47f00000 \
   -steps "$STEPS" \
+  -fb-sdl off \
   > "$LOG" 2>&1
 
 tr -d '\r\000' < "$LOG" > "${LOG%.log}.clean.log"

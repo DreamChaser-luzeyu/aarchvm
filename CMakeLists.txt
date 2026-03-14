@@ -25,6 +25,7 @@ add_executable(aarchvm
   src/cpu.cpp
   src/soc.cpp
   src/perf_mailbox.cpp
+  src/pl050_kmi.cpp
 )
 
 target_include_directories(aarchvm PRIVATE include ${SDL2_INCLUDE_DIRS})

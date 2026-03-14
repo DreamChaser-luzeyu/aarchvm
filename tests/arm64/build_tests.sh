@@ -107,6 +107,8 @@ build_asm_prog predecode_dyn_codegen
 build_asm_prog predecode_va_exec_switch
 build_asm_prog predecode_load_store_min
 build_asm_prog predecode_logic_min
+build_asm_prog pl050_basic
+build_asm_prog ps2_rx_spaced
 
 if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
   aarch64-linux-gnu-gcc -nostdlib -static -ffreestanding -fomit-frame-pointer -fno-stack-protector \

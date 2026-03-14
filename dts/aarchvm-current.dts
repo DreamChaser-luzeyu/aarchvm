@@ -78,6 +78,16 @@
 		always-on;
 	};
 
+	kmi0: serio@9010000 {
+		compatible = "arm,pl050", "arm,primecell";
+		reg = <0x0 0x09010000 0x0 0x00001000>;
+		interrupt-parent = <&intc>;
+		interrupts = <0 2 4>;
+		clocks = <&uartclk>, <&apb_pclk>;
+		clock-names = "KMIREFCLK", "apb_pclk";
+		status = "okay";
+	};
+
 	uart0: serial@9000000 {
 		compatible = "arm,pl011", "arm,primecell";
 		reg = <0x0 0x09000000 0x0 0x00001000>;

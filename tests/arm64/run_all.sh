@@ -121,7 +121,15 @@ run predecode_dyn_codegen.bin 400000
 run predecode_va_exec_switch.bin 5000000
 run predecode_load_store_min.bin 400000
 run predecode_logic_min.bin 400000
+run pl050_basic.bin 400000
+AARCHVM_PS2_RX_SCRIPT='100:0x41,1000:0x42,5000:0x43' ./build/aarchvm -bin tests/arm64/out/ps2_rx_spaced.bin -load 0x0 -entry 0x0 -steps 200000 | grep -qx 'ABCP'
 
+PS2_SNAP=tests/arm64/out/ps2_rx_spaced.snap
+rm -f "$PS2_SNAP"
+AARCHVM_PS2_RX_SCRIPT='100:0x41,1000:0x42' ./build/aarchvm -bin tests/arm64/out/ps2_rx_spaced.bin -load 0x0 -entry 0x0 -steps 2000 -snapshot-save "$PS2_SNAP" > tests/arm64/out/ps2_snapshot_pre.log
+AARCHVM_PS2_RX_SCRIPT='5000:0x43' ./build/aarchvm -snapshot-load "$PS2_SNAP" -steps 10000 > tests/arm64/out/ps2_snapshot_post.log
+test "$(tr -d '\r\n' < tests/arm64/out/ps2_snapshot_pre.log)" = 'AB'
+test "$(tr -d '\r\n' < tests/arm64/out/ps2_snapshot_post.log)" = 'CP'
 PRE_FAST=tests/arm64/out/predecode_fast.log
 PRE_SLOW=tests/arm64/out/predecode_slow.log
 ./build/aarchvm -bin tests/arm64/out/predecode_dyn_codegen.bin -load 0x0 -entry 0x0 -steps 400000 > "$PRE_FAST"

@@ -80,6 +80,7 @@ SoC::SoC()
       framebuffer_ram_(std::make_shared<Ram>(kFramebufferSize)),
       sdram_(std::make_shared<Ram>(kSdramSize)),
       uart_(std::make_shared<UartPl011>()),
+      kmi_(std::make_shared<Pl050Kmi>()),
       perf_mailbox_(std::make_shared<PerfMailbox>(PerfMailbox::Callbacks{
           .begin = [this](std::uint64_t case_id, std::uint64_t arg0, std::uint64_t arg1) {
             perf_begin(case_id, arg0, arg1);
@@ -104,6 +105,7 @@ SoC::SoC()
   bus_.map(kFramebufferBase, kFramebufferSize, framebuffer_ram_);
   bus_.map(kSdramBase, kSdramSize, sdram_);
   bus_.map(kUartBase, kUartSize, uart_);
+  bus_.map(kKmiBase, kKmiSize, kmi_);
   bus_.map(kPerfBase, kPerfSize, perf_mailbox_);
   bus_.map(kBlockBase, kBlockSize, block_mmio_);
   bus_.map(kGicBase, kGicSize, gic_);
@@ -184,7 +186,8 @@ void SoC::set_framebuffer_sdl_enabled(bool enabled) {
                                                       kFramebufferWidth,
                                                       kFramebufferHeight,
                                                       kFramebufferStride,
-                                                      framebuffer_dirty_tracker_);
+                                                      framebuffer_dirty_tracker_,
+                                                      [this](std::uint8_t byte) { inject_ps2_rx(byte); });
   if (!framebuffer_sdl_->available()) {
     framebuffer_sdl_.reset();
   }
@@ -214,6 +217,10 @@ void SoC::inject_uart_rx(std::uint8_t byte) {
   if (uart_->irq_pending()) {
     gic_->set_pending(kUartIntId);
   }
+}
+
+void SoC::inject_ps2_rx(std::uint8_t byte) {
+  kmi_->inject_rx(byte);
 }
 
 void SoC::set_stop_on_uart_pattern(std::string pattern) {
@@ -345,6 +352,7 @@ void SoC::reset_perf_measurement_state() {
   last_timer_virt_level_ = false;
   last_timer_phys_level_ = false;
   last_uart_level_ = false;
+  last_kmi_level_ = false;
   bus_.reset_perf_counters();
   if (fast_path_ != nullptr) {
     fast_path_->reset_perf_counters();
@@ -378,6 +386,12 @@ bool SoC::run(std::size_t max_steps) {
     if (!device_sync_valid_ || uart_level != last_uart_level_) {
       gic_->set_level(kUartIntId, uart_level);
       last_uart_level_ = uart_level;
+    }
+
+    const bool kmi_level = kmi_->irq_pending();
+    if (!device_sync_valid_ || kmi_level != last_kmi_level_) {
+      gic_->set_level(kKmiIntId, kmi_level);
+      last_kmi_level_ = kmi_level;
     }
 
     if (framebuffer_sdl_ != nullptr) {
@@ -563,7 +577,7 @@ bool SoC::save_snapshot(const std::string& path) const {
     return false;
   }
   static constexpr char kMagic[8] = {'A', 'A', 'R', 'C', 'H', 'S', 'N', 'P'};
-  static constexpr std::uint32_t kVersion = 5;
+  static constexpr std::uint32_t kVersion = 6;
   out.write(kMagic, sizeof(kMagic));
   if (!out ||
       !snapshot_io::write(out, kVersion) ||
@@ -575,6 +589,7 @@ bool SoC::save_snapshot(const std::string& path) const {
       !boot_ram_->save_state(out) ||
       !sdram_->save_state(out) ||
       !uart_->save_state(out) ||
+      !kmi_->save_state(out) ||
       !gic_->save_state(out) ||
       !timer_->save_state(out) ||
       !cpu_.save_state(out) ||
@@ -604,16 +619,20 @@ bool SoC::load_snapshot(const std::string& path) {
       !snapshot_io::read(in, sdram_size) ||
       magic[0] != 'A' || magic[1] != 'A' || magic[2] != 'R' || magic[3] != 'C' ||
       magic[4] != 'H' || magic[5] != 'S' || magic[6] != 'N' || magic[7] != 'P' ||
-      (version != 1 && version != 2 && version != 3 && version != 4 && version != 5) || boot_ram_base != kBootRamBase || boot_ram_size != kBootRamSize ||
+      (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6) || boot_ram_base != kBootRamBase || boot_ram_size != kBootRamSize ||
       sdram_base != kSdramBase || sdram_size != kSdramSize ||
       !snapshot_io::read(in, timer_tick_scale_) ||
       !boot_ram_->load_state(in) ||
       !sdram_->load_state(in) ||
       !uart_->load_state(in) ||
+      (version >= 6 && !kmi_->load_state(in)) ||
       !gic_->load_state(in, version) ||
       !timer_->load_state(in, version) ||
       !cpu_.load_state(in, version)) {
     return false;
+  }
+  if (version < 6) {
+    kmi_->reset();
   }
   if (version >= 5) {
     if (!framebuffer_ram_->load_state(in) || !block_mmio_->load_state(in)) {

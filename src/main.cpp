@@ -22,7 +22,7 @@ struct BinaryLoad {
   std::uint64_t addr = 0;
 };
 
-struct UartRxEvent {
+struct ByteEvent {
   std::uint64_t step = 0;
   std::uint8_t byte = 0;
 };
@@ -68,9 +68,9 @@ bool read_binary_file(const std::string& path, std::vector<std::uint8_t>& out) {
   return static_cast<std::size_t>(in.gcount()) == out.size();
 }
 
-std::vector<UartRxEvent> parse_uart_rx_script_env() {
-  std::vector<UartRxEvent> events;
-  const char* script = std::getenv("AARCHVM_UART_RX_SCRIPT");
+std::vector<ByteEvent> parse_byte_script_env(const char* env_name) {
+  std::vector<ByteEvent> events;
+  const char* script = std::getenv(env_name);
   if (script == nullptr || *script == '\0') {
     return events;
   }
@@ -83,26 +83,35 @@ std::vector<UartRxEvent> parse_uart_rx_script_env() {
     }
     const std::size_t colon = item.find(':');
     if (colon == std::string::npos || colon == 0 || colon + 1 >= item.size()) {
-      std::cerr << "Invalid AARCHVM_UART_RX_SCRIPT item: " << item << '\n';
+      std::cerr << "Invalid " << env_name << " item: " << item << '\n';
       continue;
     }
-    events.push_back(UartRxEvent{
+    events.push_back(ByteEvent{
         .step = parse_u64(item.substr(0, colon)),
         .byte = static_cast<std::uint8_t>(parse_u64(item.substr(colon + 1)) & 0xFFu),
     });
   }
 
-  std::sort(events.begin(), events.end(), [](const UartRxEvent& a, const UartRxEvent& b) {
+  std::sort(events.begin(), events.end(), [](const ByteEvent& a, const ByteEvent& b) {
     return a.step < b.step;
   });
   return events;
 }
 
-void inject_scheduled_uart_rx(const std::vector<UartRxEvent>& events,
+void inject_scheduled_uart_rx(const std::vector<ByteEvent>& events,
                               std::size_t& next_event,
                               aarchvm::SoC& soc) {
   while (next_event < events.size() && events[next_event].step <= soc.steps()) {
     soc.inject_uart_rx(events[next_event].byte);
+    ++next_event;
+  }
+}
+
+void inject_scheduled_ps2_rx(const std::vector<ByteEvent>& events,
+                             std::size_t& next_event,
+                             aarchvm::SoC& soc) {
+  while (next_event < events.size() && events[next_event].step <= soc.steps()) {
+    soc.inject_ps2_rx(events[next_event].byte);
     ++next_event;
   }
 }
@@ -420,17 +429,24 @@ int main(int argc, char** argv) {
   (void)interactive_stdin;
   
   RawStdinGuard stdin_guard;
-  const std::vector<UartRxEvent> uart_rx_events = parse_uart_rx_script_env();
+  const std::vector<ByteEvent> uart_rx_events = parse_byte_script_env("AARCHVM_UART_RX_SCRIPT");
+  const std::vector<ByteEvent> ps2_rx_events = parse_byte_script_env("AARCHVM_PS2_RX_SCRIPT");
   std::size_t next_uart_rx_event = 0;
+  std::size_t next_ps2_rx_event = 0;
   std::size_t remaining = opt.max_steps;
   while (remaining > 0) {
     pump_stdin_to_uart(soc);
     inject_scheduled_uart_rx(uart_rx_events, next_uart_rx_event, soc);
+    inject_scheduled_ps2_rx(ps2_rx_events, next_ps2_rx_event, soc);
 
     std::size_t run_chunk = 200000u;
 
     if (next_uart_rx_event < uart_rx_events.size() && uart_rx_events[next_uart_rx_event].step > soc.steps()) {
       const std::uint64_t until_inject = uart_rx_events[next_uart_rx_event].step - soc.steps();
+      run_chunk = std::min<std::size_t>(run_chunk, static_cast<std::size_t>(until_inject));
+    }
+    if (next_ps2_rx_event < ps2_rx_events.size() && ps2_rx_events[next_ps2_rx_event].step > soc.steps()) {
+      const std::uint64_t until_inject = ps2_rx_events[next_ps2_rx_event].step - soc.steps();
       run_chunk = std::min<std::size_t>(run_chunk, static_cast<std::size_t>(until_inject));
     }
     if (run_chunk == 0u) {

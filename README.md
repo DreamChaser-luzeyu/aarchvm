@@ -1,31 +1,31 @@
-![alt text](doc/logo.png)
+![logo](doc/logo.png)
 
-Vibe-coded aarch64 system emulator, written in C++.
-Designed to stay compact and readable, making it suitable for learning, debugging, and experimentation.
-Now capable of booting Linux into an interactive BusyBox shell.
-This project is still in a very early stage of development. It currently guarantees the paths exercised by the in-tree bare-metal regression suite and the Linux BusyBox bring-up / shell flow, not a full architectural implementation of every mandatory ARM64 extension.
+# aarchvm
+
+Compact AArch64 full-system emulator written in C++ with CMake.
+It currently boots U-Boot, hands off to Linux, reaches an interactive BusyBox shell, supports snapshots, and provides both serial and simple framebuffer bring-up paths.
 
 ## Features
-- [x] Full-system AArch64 emulation
-- [x] Boots Linux to an interactive BusyBox shell
-- [x] Snapshot save and restore
-- [x] Minimal aarch64 implementation sufficient for Linux and BusyBox
-- [x] EL0 architected timer access control via `CNTKCTL_EL1`
-- [x] Bare-metal + Linux regression suites in-tree
-- [ ] Full aarch64 mandatory extensions implementation
-- [ ] Basic GDB Command Support
-- [ ] GDB Stub
+- Interpreter-based single-core AArch64 full-system emulation
+- Linux boot path validated through U-Boot -> Linux `Image` -> BusyBox shell
+- Minimal MMU/TLB, Generic Timer, synchronous exception, and GICv3 paths sufficient for the current Linux bring-up
+- PL011 UART console
+- SDL-backed simple framebuffer path usable by U-Boot and Linux `simpledrm` / `fbcon`
+- PL050 PS/2 keyboard path usable by Linux `ambakmi` + `atkbd`
+- Full-machine snapshot save / restore
+- In-tree bare-metal, Linux functional, and Linux algorithm/perf regression suites
+- Optional faster execution paths for bus/decode hot paths
 
-## Docs
-- English documentation: [README.en.md](doc/README.en.md)
-- 中文文档： [README.zh.md](doc/README.zh.md)
+## Documentation
+- English: [doc/README.en.md](doc/README.en.md)
+- 中文: [doc/README.zh.md](doc/README.zh.md)
 
-## Milestone
-- commit `61d52a05a3cc98f8c415a65f6b85d2abcad2cea3`
-  - This commit combines simplicity with functional completeness. The codebase is small, making it relatively easy to read and learn from, while still being capable of booting Linux into a BusyBox shell.
+## Status
+The project is still intentionally small and incomplete architecturally. The guarantee is the behavior covered by the in-tree bare-metal regression suite plus the current Linux / BusyBox bring-up and user-space test flows, not a full implementation of every mandatory Armv8-A feature.
 
 ## Demo
-![alt text](doc/demo.gif)
+![demo](doc/demo.gif)
+![demo](doc/demo2.gif)
 
 ## Star History
 

@@ -1,45 +1,94 @@
 # aarchvm
 
-`aarchvm` is a C++ / CMake AArch64 full-system emulator prototype using an interpreter execution model.
-The current tree is already able to boot U-Boot, hand off to a Linux `Image`, start a BusyBox `initramfs`, and enter an interactive shell through the emulated PL011 UART.
+`aarchvm` is a C++ / CMake AArch64 full-system emulator using an interpreter execution model.
+The current tree has already been validated for the following end-to-end loop: cold-boot U-Boot, load a Linux `Image`, enter a BusyBox `initramfs`, interact through a serial shell, restore from full-machine snapshots, render through an SDL framebuffer, and inject keyboard input through a PL050 KMI PS/2 path.
 
-## Validated Status
+## Quick Start
 
-The current repository has been validated for the following paths:
+If you just want to get the current tree running quickly, use this order:
+
+1. Build the emulator
+
+```bash
+cmake -S . -B build
+cmake --build build -j
+```
+
+2. Prepare the base BusyBox rootfs, then build the unified user-test initramfs
+
+Note: `tests/linux/build_usertests_rootfs.sh` currently reuses an existing `out/initramfs-full-root`, so you need to prepare that BusyBox base rootfs once before the first run. The exact commands are listed in the Build section below. Once the base rootfs exists, run:
+
+```bash
+./tests/linux/build_usertests_rootfs.sh
+```
+
+3. Build the Linux shell snapshot
+
+```bash
+./tests/linux/build_linux_shell_snapshot.sh
+```
+
+4. Run the bare-metal regression suite
+
+```bash
+./tests/arm64/run_all.sh
+```
+
+5. Run the Linux functional suite
+
+```bash
+./tests/linux/run_functional_suite.sh
+```
+
+6. Run the Linux algorithm / perf suite
+
+```bash
+./tests/linux/run_algorithm_perf.sh
+```
+
+7. Manually validate the GUI path
+
+```bash
+./tests/linux/run_gui_tty1.sh
+```
+
+## Current Validated Status
+
+The following paths are currently implemented and exercised by in-tree regression flows:
 - Single-core AArch64 EL1 interpreter execution.
-- Minimal SoC model: RAM, PL011 UART, Generic Timer, and minimal GICv3.
-- Minimal IRQ loop: timer -> GIC -> EL1 vector -> `ERET`.
-- Minimal synchronous exception loop with `ESR_EL1/FAR_EL1/ELR_EL1/SPSR_EL1`.
-- Minimal MMU/TLB path needed by early Linux page-table bring-up.
-- U-Boot boot and serial output inside the emulator.
-- U-Boot `booti` hand-off to a Linux `Image`.
-- Linux serial output through both `earlycon=pl011,...` and the normal `ttyAMA0` path.
-- Interactive BusyBox `ash` shell input has been validated.
-- A richer static BusyBox userland has also been validated, including at least `ps`, `awk`, `find`, and `free`.
-- Full-machine snapshot save / restore is available for fast Linux repro loops.
+- Minimal SoC device set: RAM, PL011 UART, Generic Timer, and minimal GICv3.
+- Minimal synchronous exception loop with `ESR_EL1`, `FAR_EL1`, `ELR_EL1`, and `SPSR_EL1`.
+- Minimal MMU/TLB behavior required by early Linux page-table bring-up.
+- U-Boot serial boot and Linux hand-off via `booti`.
+- Linux serial output through both `earlycon=pl011,...` and normal `ttyAMA0`.
+- Interactive BusyBox shell over serial.
+- SDL framebuffer output visible to U-Boot and Linux `simpledrm` / `fbcon`.
+- PL050 KMI keyboard device recognized by Linux through `CONFIG_SERIO_AMBAKMI` + `CONFIG_KEYBOARD_ATKBD`.
+- Full-machine snapshot save / restore.
+- In-tree bare-metal regression, Linux functional regression, and Linux algorithm/perf regression suites.
 
-Linux / BusyBox output already observed and validated on the emulated serial port includes:
-- `Booting Linux on physical CPU ...`
-- `Linux version 6.12.76 ...`
-- `earlycon: pl11 at MMIO 0x0000000009000000`
-- `Serial: AMBA PL011 UART driver`
-- `Run /init as init process`
-- `BusyBox v1.37.0 ... built-in shell (ash)`
-- the `#` prompt, along with interactive commands such as `echo X` being echoed and executed
+Automatic Linux regression runs intentionally use the serial-only path and explicitly disable SDL output for reproducibility and speed. GUI and PS/2 keyboard validation are kept as a separate manual path.
 
-This means the project has moved beyond the earlier "kernel entered but no visible output" stage and into an interactive Linux user-space shell state.
+## Current Device Model
 
-## Layout and Artifacts
+The current repository includes and uses the following device / platform pieces:
+- RAM
+- PL011 UART
+- ARM Generic Timer system-register path
+- Minimal GICv3 distributor / redistributor / CPU-interface path
+- framebuffer RAM region described as `simple-framebuffer`
+- SDL window backend for presenting framebuffer contents
+- PL050 KMI keyboard controller
+- basic block-device path and related state save/restore
+- full-machine snapshot support
 
-The repository currently uses the following artifacts:
-- Emulator sources: `src/`, `include/`
-- Emulator build directory: `build/`
-- U-Boot sources: `u-boot-2026.01/`
-- U-Boot build directory: `u-boot-2026.01/build-qemu_arm64/`
-- Linux sources: `linux-6.12.76/`
-- Linux build directory: `linux-6.12.76/build-aarchvm/`
-- U-Boot control DTB: `dts/aarchvm-current.dtb`
-- Linux boot DTB: `dts/aarchvm-linux-min.dtb`
+The Linux-facing DTs already contain the relevant nodes in:
+- `dts/aarchvm-current.dts`
+- `dts/aarchvm-linux-min.dts`
+
+That includes:
+- `simple-framebuffer`
+- `arm,pl050` / `arm,primecell`
 
 ## Toolchain Version
 
@@ -51,7 +100,7 @@ GNU ld (GNU Binutils for Debian) 2.44
 GNU as (GNU Binutils for Debian) 2.44
 ```
 
-You can verify this on the host with:
+You can confirm it with:
 
 ```bash
 aarch64-linux-gnu-gcc --version | head -n 1
@@ -59,9 +108,22 @@ aarch64-linux-gnu-ld --version | head -n 1
 aarch64-linux-gnu-as --version | head -n 1
 ```
 
+## Layout and Key Artifacts
+
+- Emulator sources: `src/`, `include/`
+- Emulator build dir: `build/`
+- U-Boot sources: `u-boot-2026.01/`
+- U-Boot build dir: `u-boot-2026.01/build-qemu_arm64/`
+- Linux sources: `linux-6.12.76/`
+- Linux build dir: `linux-6.12.76/build-aarchvm/`
+- Control DTB: `dts/aarchvm-current.dtb`
+- Linux boot DTB: `dts/aarchvm-linux-min.dtb`
+- Unified user-test initramfs: `out/initramfs-usertests.cpio`
+- Linux shell snapshot: `out/linux-usertests-shell-v1.snap`
+
 ## Build
 
-### 1. Build the Emulator
+### 1. Build the emulator
 
 ```bash
 cmake -S . -B build
@@ -70,7 +132,7 @@ cmake --build build -j
 
 ### 2. Build U-Boot
 
-The current tree uses the `qemu_arm64` U-Boot configuration and loads the generated `u-boot.bin` in the emulator:
+The validated setup currently uses `qemu_arm64_defconfig`:
 
 ```bash
 make -C u-boot-2026.01 \
@@ -84,12 +146,13 @@ make -C u-boot-2026.01 \
   -j"$(nproc)"
 ```
 
-Build artifact:
+Key artifact:
 - `u-boot-2026.01/build-qemu_arm64/u-boot.bin`
 
 ### 3. Build Linux
 
-A reproducible flow is to start from `defconfig` and then override the options needed by the current emulator path:
+A good baseline is `defconfig`, followed by the minimum options required by the current emulator path.
+In the current flow, kernel boot arguments are injected by U-Boot at runtime, so the setup no longer depends on `CONFIG_CMDLINE_FORCE=y`.
 
 ```bash
 make -C linux-6.12.76 \
@@ -99,27 +162,29 @@ make -C linux-6.12.76 \
   defconfig
 ```
 
-Then apply the key options used by the current repository:
+Suggested key options:
 
 ```bash
 linux-6.12.76/scripts/config --file linux-6.12.76/build-aarchvm/.config \
-  --set-str CMDLINE "console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel" \
-  --enable CMDLINE_FORCE \
   --enable PRINTK \
   --enable ARM_AMBA \
-  --enable SERIAL_AMBA_PL011 \
-  --enable SERIAL_AMBA_PL011_CONSOLE \
   --enable ARM_GIC_V3 \
   --enable ARM_ARCH_TIMER \
+  --enable SERIAL_AMBA_PL011 \
+  --enable SERIAL_AMBA_PL011_CONSOLE \
   --enable DEVTMPFS \
   --enable DEVTMPFS_MOUNT \
-  --enable VIRTIO \
-  --enable VIRTIO_BLK \
   --enable BLK_DEV_INITRD \
   --enable RD_GZIP \
-  --enable EXT4_FS \
-  --enable TMPFS \
-  --enable TMPFS_POSIX_ACL
+  --enable INPUT_EVDEV \
+  --enable SERIO \
+  --enable SERIO_AMBAKMI \
+  --enable KEYBOARD_ATKBD \
+  --enable VT \
+  --enable VT_CONSOLE \
+  --enable FB \
+  --enable DRM_SIMPLEDRM \
+  --enable FRAMEBUFFER_CONSOLE
 
 make -C linux-6.12.76 \
   O=build-aarchvm \
@@ -134,38 +199,36 @@ make -C linux-6.12.76 \
   Image -j"$(nproc)"
 ```
 
-Build artifacts:
+Key artifacts:
 - `linux-6.12.76/build-aarchvm/arch/arm64/boot/Image`
 - `linux-6.12.76/build-aarchvm/vmlinux`
 
 ### 4. Generate DTBs
 
-If `dtc` is not installed globally, you can directly use the one built inside the Linux tree:
+If `dtc` is not installed globally, use the one built inside the Linux tree:
 
 ```bash
 linux-6.12.76/build-aarchvm/scripts/dtc/dtc \
   -I dts -O dtb \
   -o dts/aarchvm-linux-min.dtb \
   dts/aarchvm-linux-min.dts
-```
 
-Likewise, regenerate the U-Boot-facing DTB if needed:
-
-```bash
 linux-6.12.76/build-aarchvm/scripts/dtc/dtc \
   -I dts -O dtb \
   -o dts/aarchvm-current.dtb \
   dts/aarchvm-current.dts
 ```
 
-### 5. Build BusyBox and the initramfs
+### 5. Prepare the base BusyBox rootfs
 
-The current tree uses a `defconfig`-derived static BusyBox build, with a few options disabled because they fail in the current host toolchain environment and are not needed by the current guest boot path.
+`tests/linux/build_usertests_rootfs.sh` currently reuses an existing `out/initramfs-full-root` tree as its base rootfs, so you need to prepare that once before the first run.
+
+One straightforward way is:
 
 ```bash
 make -C busybox-1.37.0 distclean
 make -C busybox-1.37.0 defconfig
-perl -0pi -e 's/^# CONFIG_STATIC is not set$/CONFIG_STATIC=y/m; s/^CONFIG_CROSS_COMPILER_PREFIX=.*$/CONFIG_CROSS_COMPILER_PREFIX="aarch64-linux-gnu-"/m; s/^CONFIG_TC=y$/# CONFIG_TC is not set/m; s/^CONFIG_FEATURE_TC_INGRESS=y$/# CONFIG_FEATURE_TC_INGRESS is not set/m; s/^CONFIG_SHA1_HWACCEL=y$/# CONFIG_SHA1_HWACCEL is not set/m; s/^CONFIG_SHA256_HWACCEL=y$/# CONFIG_SHA256_HWACCEL is not set/m' busybox-1.37.0/.config
+perl -0pi -e 's/^# CONFIG_STATIC is not set$/CONFIG_STATIC=y/m' busybox-1.37.0/.config
 make -C busybox-1.37.0 oldconfig </dev/null
 make -C busybox-1.37.0 -j"$(nproc)"
 make -C busybox-1.37.0 install
@@ -174,95 +237,32 @@ rm -rf out/initramfs-full-root
 mkdir -p out/initramfs-full-root
 cp -a busybox-1.37.0/_install/. out/initramfs-full-root/
 mkdir -p out/initramfs-full-root/{dev,proc,sys,tmp,run,root,mnt,etc}
-cp out/initramfs-root/init out/initramfs-full-root/init
-cp out/initramfs-root/bin/guest_diag out/initramfs-full-root/bin/guest_diag
-chmod 0755 out/initramfs-full-root/init out/initramfs-full-root/bin/guest_diag
-( cd out/initramfs-full-root && find . -print0 | cpio --null -o -H newc > ../initramfs-full.cpio )
-gzip -n -f -c out/initramfs-full.cpio > out/initramfs-full.cpio.gz
 ```
 
-The regenerated `initramfs` sizes are currently:
-- `out/initramfs-full.cpio`: `0x2cd000`
-- `out/initramfs-full.cpio.gz`: `0x1662f8`
+### 6. Build the unified user-test initramfs
 
-## Key Configuration Options in Use
+Once the base BusyBox rootfs exists, run:
 
-### U-Boot Key Options
-
-These options come from the currently used
-`u-boot-2026.01/build-qemu_arm64/.config`:
-
-```text
-CONFIG_ARM=y
-CONFIG_ARM64=y
-CONFIG_DEFAULT_DEVICE_TREE="qemu-arm64"
-CONFIG_SYS_LOAD_ADDR=0x40200000
-CONFIG_NR_DRAM_BANKS=4
-CONFIG_BOOTDELAY=2
-CONFIG_CMD_BOOTI=y
-CONFIG_CMD_FDT=y
-CONFIG_FIT=y
-CONFIG_LEGACY_IMAGE_FORMAT=y
-CONFIG_OF_CONTROL=y
-CONFIG_OF_BOARD=y
-CONFIG_DM_SERIAL=y
-CONFIG_BAUDRATE=115200
-CONFIG_DM_KEYBOARD=y
-CONFIG_USB_KEYBOARD=y
+```bash
+./tests/linux/build_usertests_rootfs.sh
 ```
 
-Why these matter in the current setup:
-- `CONFIG_CMD_BOOTI=y` allows direct boot of an AArch64 Linux `Image`.
-- `CONFIG_OF_CONTROL=y` and `CONFIG_OF_BOARD=y` let U-Boot consume the board DTB provided by the emulator.
-- `CONFIG_DM_SERIAL=y` and `CONFIG_BAUDRATE=115200` match the current PL011 UART model.
-- `CONFIG_DEFAULT_DEVICE_TREE="qemu-arm64"` is the current U-Boot base configuration.
-
-### Linux Key Options
-
-These options come from the currently used
-`linux-6.12.76/build-aarchvm/.config`:
-
-```text
-CONFIG_64BIT=y
-CONFIG_MMU=y
-CONFIG_SMP=y
-CONFIG_PRINTK=y
-CONFIG_CMDLINE="console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel"
-CONFIG_CMDLINE_FORCE=y
-CONFIG_OF=y
-CONFIG_ARM_AMBA=y
-CONFIG_ARM_GIC_V3=y
-CONFIG_ARM_ARCH_TIMER=y
-CONFIG_SERIAL_AMBA_PL011=y
-CONFIG_SERIAL_AMBA_PL011_CONSOLE=y
-CONFIG_DEVTMPFS=y
-CONFIG_DEVTMPFS_MOUNT=y
-CONFIG_PCI=y
-CONFIG_VIRTIO=y
-CONFIG_VIRTIO_BLK=y
-CONFIG_BLK_DEV_INITRD=y
-CONFIG_RD_GZIP=y
-CONFIG_EXT4_FS=y
-CONFIG_TMPFS=y
-CONFIG_TMPFS_POSIX_ACL=y
-```
-
-Why these matter here:
-- `CONFIG_CMDLINE` and `CONFIG_CMDLINE_FORCE` ensure the kernel uses the serial command line matching the emulator.
-- `CONFIG_SERIAL_AMBA_PL011` and `CONFIG_SERIAL_AMBA_PL011_CONSOLE` enable the PL011 driver and console.
-- `CONFIG_ARM_GIC_V3` and `CONFIG_ARM_ARCH_TIMER` match the current minimal GIC/timer bring-up path.
-- `CONFIG_DEVTMPFS*`, `CONFIG_EXT4_FS`, `CONFIG_TMPFS`, `CONFIG_BLK_DEV_INITRD` are useful for later rootfs-oriented boot flows.
-- `CONFIG_VIRTIO` and `CONFIG_VIRTIO_BLK` keep the configuration aligned with later block-device work.
+This script will:
+- build the statically linked BusyBox-side test binaries
+- reuse `out/initramfs-full-root` to create `out/initramfs-usertests-root`
+- generate `out/initramfs-usertests.cpio`
+- generate `out/initramfs-usertests.cpio.gz`
+- install an `/init` script that selects shell, functional suite, or perf suite based on the kernel command line
 
 ## Run
 
-### 1. Built-in Demo
+### 1. Minimal built-in demo
 
 ```bash
 ./build/aarchvm
 ```
 
-### 2. External Raw Binary
+### 2. External raw binary
 
 ```bash
 ./build/aarchvm \
@@ -272,13 +272,16 @@ Why these matter here:
   -steps <max_steps>
 ```
 
-Common optional arguments:
-- `-sp <addr>`: initialize the startup stack pointer
+Common options:
+- `-sp <addr>`: set the startup stack pointer
 - `-dtb <file>`: load a DTB
-- `-dtb-addr <addr>`: load the DTB at a given address and pass it to the guest in `x0`
-- `-segment <file@addr>`: load an extra raw segment at a specific address
+- `-dtb-addr <addr>`: place the DTB at a given address and pass it in `x0`
+- `-segment <file@addr>`: load an extra image segment
 - `-snapshot-save <file>`: save a full-machine snapshot at the end of the run
-- `-snapshot-load <file>`: resume directly from a full-machine snapshot instead of cold booting
+- `-snapshot-load <file>`: resume from a snapshot
+- `-stop-on-uart <text>`: stop immediately when UART output matches a string
+- `-decode <fast|slow>`: switch decode execution path, default is the fast path
+- `-fb-sdl <on|off>`: explicitly enable or disable the SDL framebuffer window
 
 ### 3. Run U-Boot
 
@@ -293,211 +296,110 @@ Common optional arguments:
   -steps 50000000
 ```
 
-### 4. Boot Linux / BusyBox via U-Boot
-
-If you only want to validate the U-Boot -> Linux hand-off, you can feed the `booti` command through a one-shot pipe:
+### 4. Build the Linux shell snapshot automatically
 
 ```bash
-printf 'setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel rdinit=/init\nbooti 0x40400000 0x46000000:0x1662f8 0x47f00000\n' | \
-AARCHVM_TIMER_SCALE=100000 \
-./build/aarchvm \
-  -bin u-boot-2026.01/build-qemu_arm64/u-boot.bin \
-  -load 0x0 \
-  -entry 0x0 \
-  -sp 0x47fff000 \
-  -dtb dts/aarchvm-current.dtb \
-  -dtb-addr 0x40000000 \
-  -segment linux-6.12.76/build-aarchvm/arch/arm64/boot/Image@0x40400000 \
-  -segment out/initramfs-full.cpio.gz@0x46000000 \
-  -segment dts/aarchvm-linux-min.dtb@0x47f00000 \
-  -steps 1200000000
-```
-
-If you want a truly interactive BusyBox shell, do not consume stdin with `printf | ...`. Start the emulator directly and type the U-Boot commands manually at the prompt:
-
-```bash
-AARCHVM_TIMER_SCALE=100000 \
-./build/aarchvm \
-  -bin u-boot-2026.01/build-qemu_arm64/u-boot.bin \
-  -load 0x0 \
-  -entry 0x0 \
-  -sp 0x47fff000 \
-  -dtb dts/aarchvm-current.dtb \
-  -dtb-addr 0x40000000 \
-  -segment linux-6.12.76/build-aarchvm/arch/arm64/boot/Image@0x40400000 \
-  -segment out/initramfs-full.cpio.gz@0x46000000 \
-  -segment dts/aarchvm-linux-min.dtb@0x47f00000 \
-  -steps 5000000000
-```
-
-Type in U-Boot:
-
-```bash
-setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel rdinit=/init
-booti 0x40400000 0x46000000:0x1662f8 0x47f00000
-```
-
-Artifacts and addresses used by this boot chain:
-- Main DTB: `dts/aarchvm-current.dtb`, used so that U-Boot recognizes the current emulated board layout.
-- Linux DTB: `dts/aarchvm-linux-min.dtb`, passed as the third `booti` argument.
-- Kernel `Image`: loaded at `0x40400000`.
-- BusyBox `initramfs`: loaded at `0x46000000`, current size `0x1662f8`.
-- Linux DTB: loaded at `0x47f00000`.
-- Initial U-Boot `sp`: `0x47fff000`.
-- `AARCHVM_TIMER_SCALE=100000`: used to accelerate Linux progress under the interpreter model.
-
-### 5. Use Snapshots to Speed Up Linux Repro Loops
-
-The emulator now supports full-machine snapshots. A typical workflow is to run up to the BusyBox shell and save a snapshot there:
-
-```bash
-printf 'setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel rdinit=/init\nbooti 0x40400000 0x46000000:0x1662f8 0x47f00000\n' | \
-AARCHVM_TIMER_SCALE=100000 \
-./build/aarchvm \
-  -bin u-boot-2026.01/build-qemu_arm64/u-boot.bin \
-  -load 0x0 \
-  -entry 0x0 \
-  -sp 0x47fff000 \
-  -dtb dts/aarchvm-current.dtb \
-  -dtb-addr 0x40000000 \
-  -segment linux-6.12.76/build-aarchvm/arch/arm64/boot/Image@0x40400000 \
-  -segment out/initramfs-full.cpio.gz@0x46000000 \
-  -segment dts/aarchvm-linux-min.dtb@0x47f00000 \
-  -steps 1200000000 \
-  -snapshot-save out/linux-shell-v2.snap
-```
-
-Then resume directly near the shell with:
-
-```bash
-./build/aarchvm -snapshot-load out/linux-shell-v2.snap -steps 500000000
-```
-
-This is especially useful when debugging serial input, GIC, timer, syscall, or user-space shell issues.
-
-## Current DT Conventions
-
-### Linux DTB: `dts/aarchvm-linux-min.dts`
-
-The current Linux boot DTB uses:
-- RAM at `0x40000000`, size `128 MiB`
-- GICv3 at `0x08000000`
-- PL011 UART at `0x09000000`
-- architected timer DT node with PPIs `<13, 14, 11, 10>`
-- serial command line `console=ttyAMA0,115200 earlycon=pl011,0x09000000 ignore_loglevel`
-
-### U-Boot DTB: `dts/aarchvm-current.dts`
-
-This DTB is currently used to:
-- let U-Boot understand the RAM / UART / GIC layout of the emulator
-- keep U-Boot serial output aligned with the PL011 model
-- preserve a consistent physical-address layout across the U-Boot -> Linux chain
-
-## MMU / Interrupt / Serial Summary
-
-The current implementation already covers and validates:
-- `TTBR0_EL1/TTBR1_EL1` Stage-1 translation
-- 4KB-granule page-table walks
-- table-attribute inheritance
-- software TLB behavior and `TLBI`
-- synchronous exception handling via `ESR_EL1/FAR_EL1/ELR_EL1/SPSR_EL1`
-- minimal GICv3 system-register CPU interface
-- minimal Generic Timer sysreg path
-- `CNTKCTL_EL1` gating and trap behavior for EL0 `CNTVCT/CNTPCT/CNTV_*/CNTP_*` accesses
-- PL011 earlycon, normal console output, and BusyBox shell input
-- `WFI` wakeup semantics plus nested IRQ delivery while already in EL1 exception context
-- a growing set of atomics, sysregs, cache-maintenance instructions, and load/store forms encountered during Linux bring-up
-- full-machine snapshot save / restore
-
-The shell-input fix depended on two concrete behavioral corrections in the CPU model:
-- `WFI/WFE` now leave the wait state as soon as an interrupt becomes pending, even if `PSTATE.I` still delays immediate delivery.
-- IRQ entry is now permitted while Linux is already running inside EL1 exception context, which is required by the kernel idle/console path.
-
-The `busybox ps` illegal-instruction failure was traced to a small cluster of AdvSIMD semantic gaps:
-- `BIC (vector, immediate)` previously fell through a generic logic-immediate path; it now implements the correct `operand AND NOT(imm)` behavior.
-- `DUP (element)` was missing and is now implemented.
-- The vector-logic decoder was too broad, so `EOR` could be misrouted into the `BIT/BIF/BSL` path; that decode has been tightened.
-
-With these fixes in place, BusyBox `ps` now prints the process list correctly in the guest and returns `0`.
-
-## Tests
-
-Build all test binaries:
-
-```bash
-tests/arm64/build_tests.sh
-```
-
-Run the full regression suite:
-
-```bash
-tests/arm64/run_all.sh
-```
-
-The current regression suite covers:
-- per-instruction bring-up tests for previously implemented ISA subsets
-- MMU/TLB/cache-maintenance tests
-- synchronous exception register tests
-- `cntkctl_el0_timer_access` for EL0 timer-sysreg trap / allow behavior under `CNTKCTL_EL1`
-- GICv3 + timer sysreg IRQ tests
-- `irq_nested_el1_wfi` for `WFI` wakeup plus nested EL1 IRQ delivery
-- `snapshot_resume` for full-machine snapshot save / restore
-- atomic / exclusive-access tests
-- additional instruction samples added during Linux bring-up
-- `fpsimd_bic_imm` for `BIC (vector, immediate)`
-- `fpsimd_dup_elem` for `DUP (element)`
-- expanded `fpsimd_logic_more` coverage for `EOR/BIT/BIF/BSL` separation
-- `fpsimd_arith_shift_perm` for `ADD/SUB/MUL (vector)`, `USHR/SSHR`, `ZIP1/UZP1/TRN1`, and the `MOV (vector)` alias path
-- `fp_scalar_ls` now covers scalar FP `S/D` load/store plus `post-index` / `pre-index` forms
-- `predecode_logic_min` cross-checks the integer decoded fast path against `-decode slow`
-
-Linux shell snapshot build and prompt-step capture:
-
-```bash
-tests/linux/build_linux_shell_snapshot.sh
+./tests/linux/build_linux_shell_snapshot.sh
 ```
 
 This script will:
-- build the unified `initramfs-usertests` rootfs
-- cold-boot Linux through U-Boot
-- stop immediately when UART output matches the selected sequence, using `-stop-on-uart`
-- save the unified shell snapshot
-- verify that the snapshot can be restored and resumed
-- record the BusyBox prompt step count in `out/linux-usertests-shell-v1-build.log` via `SUMMARY: steps=...`
+- build the unified initramfs if needed
+- cold-boot U-Boot -> Linux -> BusyBox
+- stop immediately when the serial prompt `~ # ` is observed via `-stop-on-uart`
+- save the snapshot to `out/linux-usertests-shell-v1.snap`
+- immediately run a snapshot-restore sanity check
 
-Linux functional and ISA-integrity regression:
+Automatic regression uses:
+- `-fb-sdl off`
+- `console=ttyAMA0,115200 earlycon=pl011,0x09000000 rdinit=/init initramfs_async=0`
 
-```bash
-tests/linux/run_functional_suite.sh
-```
+This is the recommended reproducible path for regression and performance runs.
 
-This script cold-boots Linux, reuses the prompt-step measured by `build_linux_shell_snapshot.sh`, and injects `run_functional_suite` through `AARCHVM_UART_RX_SCRIPT` at a deterministic guest-step offset.
-
-Linux algorithm performance suite:
+### 5. Restore directly into the interactive serial shell
 
 ```bash
-tests/linux/run_algorithm_perf.sh
+./tests/linux/run_interactive.sh
 ```
 
-This script uses the same prompt-step driven UART injection path to start `bench_runner` from a cold boot and then extracts `PERF-RESULT` lines into `out/perf-suite-results.txt`.
+This restores `out/linux-usertests-shell-v1.snap` and is the fastest way to get back into the BusyBox serial shell once the snapshot has already been created.
 
-The current Linux userspace self-test validates these key groups:
-- vector logic: `AND/EOR/BIT/BIF/BSL/ORR(MOV alias)`
-- vector permutation: `EXT/ZIP1/UZP1/TRN1`
-- vector integer arithmetic: `ADD/SUB/MUL`
-- vector shift/extend: `USHR/SSHR/SHRN/UXTL/SXTL`
-- scalar FP: `FADD/FSUB/FMUL/FDIV/FMADD/FMSUB/FNMADD/FNMSUB/FABS/FNEG/SCVTF/UCVTF/FCVTZS/FCVTZU/FCSEL`
-- scalar FP memory ops: `STR/LDR S/D` plus the `post-index` / `pre-index` subset
+### 6. Linux functional regression
 
-## Current Limitations and Next Steps
+```bash
+./tests/linux/run_functional_suite.sh
+```
 
-Even though the current tree can already enter a BusyBox shell and handle basic interactive input, several platform-level pieces still matter for a more complete Linux system:
-- more complete GICv3 distributor / redistributor MMIO behavior
-- more complete architected timer and power-management behavior
-- storage / block-device models required by rootfs mounting
-- more complete PSCI / SMCCC / power-management flows
-- continued ISA and sysreg expansion for deeper Linux init paths
+This script automatically:
+- ensures the shell snapshot / build log exists
+- derives the shell prompt step count from the build log
+- injects `run_functional_suite` through scripted UART input
+- validates outputs from `uname`, `ps`, `ping -c 1 127.0.0.1`, mounts, FPSIMD tests, and FP/integer tests
 
-## Reference
+### 7. Linux algorithm / perf regression
 
-- `DDI0487_M.a.a_a-profile_architecture_reference_manual.pdf`
+```bash
+./tests/linux/run_algorithm_perf.sh
+```
+
+This script automatically:
+- cold-boots into the shell
+- injects `bench_runner` based on the recorded prompt step
+- collects `PERF-RESULT` lines
+- writes them to `out/perf-suite-results.txt`
+
+### 8. GUI path: framebuffer + PS/2 keyboard + `tty1`
+
+```bash
+./tests/linux/run_gui_tty1.sh
+```
+
+This path boots with a command line of the form:
+
+```text
+console=tty0 console=ttyAMA0,115200 earlycon=pl011,0x09000000 rdinit=/init initramfs_async=0 aarchvm_shell=tty1
+```
+
+Meaning:
+- keep serial logging for debugging
+- also bind the Linux console to `tty0`
+- let `/init` switch the BusyBox shell to `/dev/tty1` when `aarchvm_shell=tty1` is present
+- deliver SDL window keyboard input through the PL050 PS/2 keyboard device
+
+## Test Entry Points
+
+### Bare-metal regression
+
+```bash
+./tests/arm64/build_tests.sh
+./tests/arm64/run_all.sh
+```
+
+This suite covers and validates multiple integer, sysreg, interrupt, and newly added KMI / PS2-related paths.
+
+### Linux regression
+
+The current recommended Linux-side scripts are:
+- `tests/linux/build_usertests_rootfs.sh`
+- `tests/linux/build_linux_shell_snapshot.sh`
+- `tests/linux/run_functional_suite.sh`
+- `tests/linux/run_algorithm_perf.sh`
+- `tests/linux/run_gui_tty1.sh`
+
+Where:
+- the first four are automation-oriented and intentionally serial-only
+- `run_gui_tty1.sh` is the manual GUI validation path
+
+## Injection and Debugging Notes
+
+The current implementation supports these commonly used mechanisms:
+- `AARCHVM_UART_RX_SCRIPT`: inject bytes into UART at selected step counts for automated serial tests.
+- `AARCHVM_PS2_RX_SCRIPT`: inject bytes into the PS/2 keyboard device at selected step counts for KMI / keyboard testing.
+- `AARCHVM_BUS_FASTPATH=1`: enable the bus fast path.
+- `AARCHVM_TIMER_SCALE=<n>`: scale virtual timer progression to accelerate Linux boot and regression runs.
+
+## Important Notes
+
+- The current automated boot flow does not rely on `CONFIG_CMDLINE_FORCE=y`. Boot arguments are injected by the U-Boot-side scripts at runtime.
+- The GUI path is intentionally separate from the automated regression path. Automation disables SDL to minimize timing perturbation and improve reproducibility.
+- Framebuffer and PS/2 keyboard support are now modeled as Linux / U-Boot-compatible devices rather than by forwarding keyboard input into UART.
+- The project is still not a full architectural implementation of AArch64. What is guaranteed today is the behavior covered by the in-tree regression suites.
