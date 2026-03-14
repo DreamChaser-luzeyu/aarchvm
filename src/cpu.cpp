@@ -37,6 +37,7 @@ constexpr std::uint16_t kDecodedFlagLink = 1u << 4;
 constexpr std::uint16_t kDecodedFlagLoad = 1u << 5;
 constexpr std::uint16_t kDecodedFlagSigned = 1u << 6;
 constexpr std::uint16_t kDecodedFlagResult64 = 1u << 7;
+constexpr std::uint16_t kDecodedFlagInvert = 1u << 8;
 
 std::uint64_t ones(std::uint32_t bits) {
   if (bits == 0) {
@@ -622,6 +623,62 @@ Cpu::DecodedInsn Cpu::decode_insn(std::uint32_t insn) const {
     }
     return decoded;
   }
+  if ((insn & 0x1F000000u) == 0x0A000000u) {
+    const bool sf = (insn >> 31) != 0u;
+    const std::uint32_t imm6 = (insn >> 10) & 0x3Fu;
+    if (!sf && (imm6 & 0x20u)) {
+      return decoded;
+    }
+    decoded.kind = DecodedKind::LogicalShifted;
+    decoded.rd = static_cast<std::uint8_t>(insn & 0x1Fu);
+    decoded.rn = static_cast<std::uint8_t>((insn >> 5) & 0x1Fu);
+    decoded.rm = static_cast<std::uint8_t>((insn >> 16) & 0x1Fu);
+    decoded.aux = static_cast<std::uint8_t>((insn >> 22) & 0x3u);
+    decoded.aux2 = static_cast<std::uint8_t>((insn >> 29) & 0x3u);
+    decoded.imm = imm6;
+    if (sf) {
+      decoded.flags |= kDecodedFlagSf;
+    }
+    if ((insn & 0x00200000u) != 0u) {
+      decoded.flags |= kDecodedFlagInvert;
+    }
+    return decoded;
+  }
+  if ((insn & 0x1F000000u) == 0x12000000u) {
+    const bool sf = (insn >> 31) != 0u;
+    const std::uint32_t n = (insn >> 22) & 0x1u;
+    if (!sf && n != 0u) {
+      return decoded;
+    }
+    decoded.kind = DecodedKind::LogicalImm;
+    decoded.rd = static_cast<std::uint8_t>(insn & 0x1Fu);
+    decoded.rn = static_cast<std::uint8_t>((insn >> 5) & 0x1Fu);
+    decoded.aux = static_cast<std::uint8_t>((insn >> 29) & 0x3u);
+    decoded.aux2 = static_cast<std::uint8_t>(n);
+    decoded.imm = static_cast<std::uint32_t>(((insn >> 16) & 0x3Fu) | (((insn >> 10) & 0x3Fu) << 6u));
+    if (sf) {
+      decoded.flags |= kDecodedFlagSf;
+    }
+    return decoded;
+  }
+  if ((insn & 0x1F800000u) == 0x13000000u) {
+    const bool sf = (insn >> 31) != 0u;
+    const std::uint32_t n = (insn >> 22) & 0x1u;
+    if ((sf && n != 1u) || (!sf && n != 0u)) {
+      return decoded;
+    }
+    decoded.kind = DecodedKind::Bitfield;
+    decoded.rd = static_cast<std::uint8_t>(insn & 0x1Fu);
+    decoded.rn = static_cast<std::uint8_t>((insn >> 5) & 0x1Fu);
+    decoded.aux = static_cast<std::uint8_t>((insn >> 29) & 0x3u);
+    decoded.aux2 = static_cast<std::uint8_t>(n);
+    decoded.imm = static_cast<std::uint32_t>(((insn >> 16) & 0x3Fu) | (((insn >> 10) & 0x3Fu) << 6u));
+    if (sf) {
+      decoded.flags |= kDecodedFlagSf;
+    }
+    return decoded;
+  }
+
   if ((insn & 0x7F200000u) == 0x2B000000u || (insn & 0x7F200000u) == 0x6B000000u ||
       (insn & 0x7F200000u) == 0x4B000000u) {
     const std::uint32_t shift_type = (insn >> 22) & 0x3u;
@@ -799,6 +856,246 @@ Cpu::DecodedInsn Cpu::decode_insn(std::uint32_t insn) const {
   return decoded;
 }
 
+bool Cpu::exec_decoded_add_sub_imm(const DecodedInsn& decoded) {
+  const bool sf = (decoded.flags & kDecodedFlagSf) != 0u;
+  const bool set_flags = (decoded.flags & kDecodedFlagSetFlags) != 0u;
+  const bool is_sub = (decoded.flags & kDecodedFlagSub) != 0u;
+  const std::uint64_t lhs = sp_or_reg(decoded.rn);
+  const std::uint64_t rhs = static_cast<std::uint64_t>(decoded.imm) << decoded.aux;
+  const std::uint64_t value = is_sub
+      ? (sf ? (lhs - rhs) : static_cast<std::uint32_t>(lhs - rhs))
+      : (sf ? (lhs + rhs) : static_cast<std::uint32_t>(lhs + rhs));
+  if (set_flags) {
+    if (sf) {
+      set_reg(decoded.rd, value);
+      if (is_sub) {
+        set_flags_sub(lhs, rhs, value, false);
+      } else {
+        set_flags_add(lhs, rhs, value, false);
+      }
+    } else {
+      set_reg32(decoded.rd, static_cast<std::uint32_t>(value));
+      if (is_sub) {
+        set_flags_sub(static_cast<std::uint32_t>(lhs), static_cast<std::uint32_t>(rhs), static_cast<std::uint32_t>(value), true);
+      } else {
+        set_flags_add(static_cast<std::uint32_t>(lhs), static_cast<std::uint32_t>(rhs), static_cast<std::uint32_t>(value), true);
+      }
+    }
+  } else {
+    set_sp_or_reg(decoded.rd, value, !sf);
+  }
+  return true;
+}
+
+bool Cpu::exec_decoded_add_sub_shifted(const DecodedInsn& decoded) {
+  const bool sf = (decoded.flags & kDecodedFlagSf) != 0u;
+  const bool set_flags = (decoded.flags & kDecodedFlagSetFlags) != 0u;
+  const bool is_sub = (decoded.flags & kDecodedFlagSub) != 0u;
+  std::uint64_t rhs = 0;
+  if (sf) {
+    const std::uint64_t v = reg(decoded.rm);
+    const std::uint32_t sh = decoded.aux2 & 63u;
+    if (decoded.aux == 0u) {
+      rhs = (sh >= 64u) ? 0u : (v << sh);
+    } else if (decoded.aux == 1u) {
+      rhs = (sh >= 64u) ? 0u : (v >> sh);
+    } else {
+      rhs = static_cast<std::uint64_t>(static_cast<std::int64_t>(v) >> sh);
+    }
+  } else {
+    const std::uint32_t v = reg32(decoded.rm);
+    const std::uint32_t sh = decoded.aux2 & 31u;
+    if (decoded.aux == 0u) {
+      rhs = static_cast<std::uint32_t>(v << sh);
+    } else if (decoded.aux == 1u) {
+      rhs = static_cast<std::uint32_t>(v >> sh);
+    } else {
+      rhs = static_cast<std::uint32_t>(static_cast<std::int32_t>(v) >> sh);
+    }
+  }
+  const std::uint64_t lhs = sf ? reg(decoded.rn) : reg32(decoded.rn);
+  const std::uint64_t value = is_sub
+      ? (sf ? (lhs - rhs) : static_cast<std::uint32_t>(lhs - rhs))
+      : (sf ? (lhs + rhs) : static_cast<std::uint32_t>(lhs + rhs));
+  if (set_flags) {
+    if (sf) {
+      set_reg(decoded.rd, value);
+      if (is_sub) {
+        set_flags_sub(lhs, rhs, value, false);
+      } else {
+        set_flags_add(lhs, rhs, value, false);
+      }
+    } else {
+      set_reg32(decoded.rd, static_cast<std::uint32_t>(value));
+      if (is_sub) {
+        set_flags_sub(static_cast<std::uint32_t>(lhs), static_cast<std::uint32_t>(rhs), static_cast<std::uint32_t>(value), true);
+      } else {
+        set_flags_add(static_cast<std::uint32_t>(lhs), static_cast<std::uint32_t>(rhs), static_cast<std::uint32_t>(value), true);
+      }
+    }
+  } else {
+    set_sp_or_reg(decoded.rd, value, !sf);
+  }
+  return true;
+}
+
+bool Cpu::exec_decoded_logical_shifted(const DecodedInsn& decoded) {
+  const bool sf = (decoded.flags & kDecodedFlagSf) != 0u;
+  const bool invert = (decoded.flags & kDecodedFlagInvert) != 0u;
+  const std::uint64_t width_mask = sf ? ~0ull : 0xFFFFFFFFull;
+  const std::uint32_t sh = sf ? (decoded.imm & 63u) : (decoded.imm & 31u);
+  const std::uint64_t rhs_src = sf ? reg(decoded.rm) : static_cast<std::uint64_t>(reg32(decoded.rm));
+  std::uint64_t rhs = 0;
+  if (decoded.aux == 0u) {
+    rhs = (rhs_src << sh);
+  } else if (decoded.aux == 1u) {
+    rhs = (rhs_src & width_mask) >> sh;
+  } else if (decoded.aux == 2u) {
+    rhs = sf ? static_cast<std::uint64_t>(static_cast<std::int64_t>(rhs_src) >> sh)
+             : static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::uint32_t>(rhs_src)) >> sh);
+  } else {
+    rhs = ror(rhs_src, sh, sf ? 64u : 32u);
+  }
+  rhs &= width_mask;
+  if (invert) {
+    rhs = (~rhs) & width_mask;
+  }
+  const std::uint64_t lhs = sf ? reg(decoded.rn) : static_cast<std::uint64_t>(reg32(decoded.rn));
+  std::uint64_t value = 0;
+  if (decoded.aux2 == 0u) {
+    value = lhs & rhs;
+  } else if (decoded.aux2 == 1u) {
+    value = lhs | rhs;
+  } else if (decoded.aux2 == 2u) {
+    value = lhs ^ rhs;
+  } else {
+    value = lhs & rhs;
+  }
+  if (decoded.aux2 == 3u) {
+    set_flags_logic(value, !sf);
+    if (decoded.rd != 31u) {
+      if (sf) {
+        set_reg(decoded.rd, value);
+      } else {
+        set_reg32(decoded.rd, static_cast<std::uint32_t>(value));
+      }
+    }
+  } else if (sf) {
+    set_reg(decoded.rd, value);
+  } else {
+    set_reg32(decoded.rd, static_cast<std::uint32_t>(value));
+  }
+  return true;
+}
+
+bool Cpu::exec_decoded_logical_imm(const DecodedInsn& decoded) {
+  const bool sf = (decoded.flags & kDecodedFlagSf) != 0u;
+  const std::uint32_t n = decoded.aux2 & 1u;
+  const std::uint32_t immr = decoded.imm & 0x3Fu;
+  const std::uint32_t imms = (decoded.imm >> 6) & 0x3Fu;
+  const std::uint32_t datasize = sf ? 64u : 32u;
+  std::uint64_t wmask = 0;
+  std::uint64_t tmask = 0;
+  if (!decode_bit_masks(n, imms, immr, datasize, wmask, tmask)) {
+    return false;
+  }
+  (void)tmask;
+  const std::uint64_t lhs = sf ? reg(decoded.rn) : static_cast<std::uint64_t>(reg32(decoded.rn));
+  std::uint64_t value = 0;
+  if (decoded.aux == 0u) {
+    value = lhs & wmask;
+  } else if (decoded.aux == 1u) {
+    value = lhs | wmask;
+  } else if (decoded.aux == 2u) {
+    value = lhs ^ wmask;
+  } else {
+    value = lhs & wmask;
+    set_flags_logic(value, !sf);
+    if (decoded.rd == 31u) {
+      return true;
+    }
+  }
+  if (sf) {
+    set_reg(decoded.rd, value);
+  } else {
+    set_reg32(decoded.rd, static_cast<std::uint32_t>(value));
+  }
+  return true;
+}
+
+bool Cpu::exec_decoded_bitfield(const DecodedInsn& decoded) {
+  const bool sf = (decoded.flags & kDecodedFlagSf) != 0u;
+  const std::uint32_t n = decoded.aux2 & 1u;
+  const std::uint32_t immr = decoded.imm & 0x3Fu;
+  const std::uint32_t imms = (decoded.imm >> 6) & 0x3Fu;
+  const std::uint32_t datasize = sf ? 64u : 32u;
+  std::uint64_t wmask = 0;
+  std::uint64_t tmask = 0;
+  if (!decode_bit_masks(n, imms, immr, datasize, wmask, tmask)) {
+    return false;
+  }
+  const std::uint64_t src = sf ? reg(decoded.rn) : static_cast<std::uint64_t>(reg32(decoded.rn));
+  const std::uint64_t dst = sf ? reg(decoded.rd) : static_cast<std::uint64_t>(reg32(decoded.rd));
+  const std::uint64_t bot = ror(src, immr, datasize) & wmask;
+  std::uint64_t result = 0;
+  if (decoded.aux == 0u) {
+    const bool sign = ((src >> (imms & (datasize - 1u))) & 1u) != 0;
+    const std::uint64_t top = sign ? ones(datasize) : 0;
+    result = (top & ~tmask) | (bot & tmask);
+  } else if (decoded.aux == 1u) {
+    const std::uint64_t merged = (dst & ~wmask) | bot;
+    result = (dst & ~tmask) | (merged & tmask);
+  } else if (decoded.aux == 2u) {
+    result = bot & tmask;
+  } else {
+    return false;
+  }
+  if (sf) {
+    set_reg(decoded.rd, result);
+  } else {
+    set_reg32(decoded.rd, static_cast<std::uint32_t>(result));
+  }
+  return true;
+}
+
+bool Cpu::exec_decoded_load_store_uimm(const DecodedInsn& decoded) {
+  const bool is_load = (decoded.flags & kDecodedFlagLoad) != 0u;
+  const bool result64 = (decoded.flags & kDecodedFlagResult64) != 0u;
+  const std::uint64_t addr = sp_or_reg(decoded.rn) + static_cast<std::uint64_t>(decoded.imm);
+  std::uint64_t pa = 0;
+  if (!translate_data_address_fast(addr, !is_load, &pa)) {
+    data_abort(addr);
+    return true;
+  }
+  if (is_load) {
+    std::uint64_t value = 0;
+    if (!bus_.read(pa, decoded.aux, value)) {
+      data_abort(addr);
+      return true;
+    }
+    if (result64) {
+      set_reg(decoded.rd, value);
+    } else {
+      set_reg32(decoded.rd, static_cast<std::uint32_t>(value));
+    }
+  } else {
+    const std::uint64_t value =
+        (decoded.aux == 8u) ? reg(decoded.rd)
+        : (decoded.aux == 4u) ? static_cast<std::uint64_t>(reg32(decoded.rd))
+        : (decoded.aux == 2u) ? static_cast<std::uint64_t>(reg32(decoded.rd) & 0xFFFFu)
+                             : static_cast<std::uint64_t>(reg32(decoded.rd) & 0xFFu);
+    if (!bus_.write(pa, value, decoded.aux)) {
+      data_abort(addr);
+      return true;
+    }
+    on_code_write(addr, pa, decoded.aux);
+    exclusive_valid_ = false;
+    exclusive_addr_ = 0;
+    exclusive_size_ = 0;
+  }
+  return true;
+}
+
 const Cpu::DecodedInsn* Cpu::lookup_decoded(std::uint64_t va, std::uint64_t pa, std::uint32_t insn) {
   if (!predecode_enabled_) {
     return nullptr;
@@ -899,124 +1196,19 @@ bool Cpu::exec_decoded(const DecodedInsn& decoded) {
       }
       return true;
     }
-    case DecodedKind::AddSubImm: {
-      const bool sf = (decoded.flags & kDecodedFlagSf) != 0u;
-      const bool set_flags = (decoded.flags & kDecodedFlagSetFlags) != 0u;
-      const bool is_sub = (decoded.flags & kDecodedFlagSub) != 0u;
-      const std::uint64_t lhs = sp_or_reg(decoded.rn);
-      const std::uint64_t rhs = static_cast<std::uint64_t>(decoded.imm) << decoded.aux;
-      const std::uint64_t value = is_sub
-          ? (sf ? (lhs - rhs) : static_cast<std::uint32_t>(lhs - rhs))
-          : (sf ? (lhs + rhs) : static_cast<std::uint32_t>(lhs + rhs));
-      if (set_flags) {
-        if (sf) {
-          set_reg(decoded.rd, value);
-          if (is_sub) {
-            set_flags_sub(lhs, rhs, value, false);
-          } else {
-            set_flags_add(lhs, rhs, value, false);
-          }
-        } else {
-          set_reg32(decoded.rd, static_cast<std::uint32_t>(value));
-          if (is_sub) {
-            set_flags_sub(static_cast<std::uint32_t>(lhs), static_cast<std::uint32_t>(rhs), static_cast<std::uint32_t>(value), true);
-          } else {
-            set_flags_add(static_cast<std::uint32_t>(lhs), static_cast<std::uint32_t>(rhs), static_cast<std::uint32_t>(value), true);
-          }
-        }
-      } else {
-        set_sp_or_reg(decoded.rd, value, !sf);
-      }
-      return true;
-    }
-    case DecodedKind::AddSubShifted: {
-      const bool sf = (decoded.flags & kDecodedFlagSf) != 0u;
-      const bool set_flags = (decoded.flags & kDecodedFlagSetFlags) != 0u;
-      const bool is_sub = (decoded.flags & kDecodedFlagSub) != 0u;
-      std::uint64_t rhs = 0;
-      if (sf) {
-        const std::uint64_t v = reg(decoded.rm);
-        const std::uint32_t sh = decoded.aux2 & 63u;
-        if (decoded.aux == 0u) {
-          rhs = (sh >= 64u) ? 0u : (v << sh);
-        } else if (decoded.aux == 1u) {
-          rhs = (sh >= 64u) ? 0u : (v >> sh);
-        } else {
-          rhs = static_cast<std::uint64_t>(static_cast<std::int64_t>(v) >> sh);
-        }
-      } else {
-        const std::uint32_t v = reg32(decoded.rm);
-        const std::uint32_t sh = decoded.aux2 & 31u;
-        if (decoded.aux == 0u) {
-          rhs = static_cast<std::uint32_t>(v << sh);
-        } else if (decoded.aux == 1u) {
-          rhs = static_cast<std::uint32_t>(v >> sh);
-        } else {
-          rhs = static_cast<std::uint32_t>(static_cast<std::int32_t>(v) >> sh);
-        }
-      }
-      const std::uint64_t lhs = sf ? reg(decoded.rn) : reg32(decoded.rn);
-      const std::uint64_t value = is_sub
-          ? (sf ? (lhs - rhs) : static_cast<std::uint32_t>(lhs - rhs))
-          : (sf ? (lhs + rhs) : static_cast<std::uint32_t>(lhs + rhs));
-      if (set_flags) {
-        if (sf) {
-          set_reg(decoded.rd, value);
-          if (is_sub) {
-            set_flags_sub(lhs, rhs, value, false);
-          } else {
-            set_flags_add(lhs, rhs, value, false);
-          }
-        } else {
-          set_reg32(decoded.rd, static_cast<std::uint32_t>(value));
-          if (is_sub) {
-            set_flags_sub(static_cast<std::uint32_t>(lhs), static_cast<std::uint32_t>(rhs), static_cast<std::uint32_t>(value), true);
-          } else {
-            set_flags_add(static_cast<std::uint32_t>(lhs), static_cast<std::uint32_t>(rhs), static_cast<std::uint32_t>(value), true);
-          }
-        }
-      } else {
-        set_sp_or_reg(decoded.rd, value, !sf);
-      }
-      return true;
-    }
-    case DecodedKind::LoadStoreUImm: {
-      const bool is_load = (decoded.flags & kDecodedFlagLoad) != 0u;
-      const bool result64 = (decoded.flags & kDecodedFlagResult64) != 0u;
-      const std::uint64_t addr = sp_or_reg(decoded.rn) + static_cast<std::uint64_t>(decoded.imm);
-      std::uint64_t pa = 0;
-      if (!translate_data_address_fast(addr, !is_load, &pa)) {
-        data_abort(addr);
-        return true;
-      }
-      if (is_load) {
-        std::uint64_t value = 0;
-        if (!bus_.read(pa, decoded.aux, value)) {
-          data_abort(addr);
-          return true;
-        }
-        if (result64) {
-          set_reg(decoded.rd, value);
-        } else {
-          set_reg32(decoded.rd, static_cast<std::uint32_t>(value));
-        }
-      } else {
-        const std::uint64_t value =
-            (decoded.aux == 8u) ? reg(decoded.rd)
-            : (decoded.aux == 4u) ? static_cast<std::uint64_t>(reg32(decoded.rd))
-            : (decoded.aux == 2u) ? static_cast<std::uint64_t>(reg32(decoded.rd) & 0xFFFFu)
-                                 : static_cast<std::uint64_t>(reg32(decoded.rd) & 0xFFu);
-        if (!bus_.write(pa, value, decoded.aux)) {
-          data_abort(addr);
-          return true;
-        }
-        on_code_write(addr, pa, decoded.aux);
-        exclusive_valid_ = false;
-        exclusive_addr_ = 0;
-        exclusive_size_ = 0;
-      }
-      return true;
-    }
+    case DecodedKind::AddSubImm:
+      return exec_decoded_add_sub_imm(decoded);
+    case DecodedKind::AddSubShifted:
+      return exec_decoded_add_sub_shifted(decoded);
+    case DecodedKind::LogicalShifted:
+      return exec_decoded_logical_shifted(decoded);
+    case DecodedKind::LogicalImm:
+      return exec_decoded_logical_imm(decoded);
+    case DecodedKind::Bitfield:
+      return exec_decoded_bitfield(decoded);
+
+    case DecodedKind::LoadStoreUImm:
+      return exec_decoded_load_store_uimm(decoded);
     case DecodedKind::LoadStore: {
       const bool is_load = (decoded.flags & kDecodedFlagLoad) != 0u;
       const bool is_signed = (decoded.flags & kDecodedFlagSigned) != 0u;
@@ -1382,8 +1574,44 @@ bool Cpu::step() {
   }
 
   if (predecode_enabled_) {
-    if (const DecodedInsn* decoded = lookup_decoded(this_pc, fetch_result.pa, insn); decoded != nullptr && exec_decoded(*decoded)) {
-      return true;
+    if (const DecodedInsn* decoded = lookup_decoded(this_pc, fetch_result.pa, insn); decoded != nullptr) {
+      switch (decoded->kind) {
+        case DecodedKind::AddSubImm:
+          if (exec_decoded_add_sub_imm(*decoded)) {
+            return true;
+          }
+          break;
+        case DecodedKind::AddSubShifted:
+          if (exec_decoded_add_sub_shifted(*decoded)) {
+            return true;
+          }
+          break;
+        case DecodedKind::LogicalShifted:
+          if (exec_decoded_logical_shifted(*decoded)) {
+            return true;
+          }
+          break;
+        case DecodedKind::LogicalImm:
+          if (exec_decoded_logical_imm(*decoded)) {
+            return true;
+          }
+          break;
+        case DecodedKind::Bitfield:
+          if (exec_decoded_bitfield(*decoded)) {
+            return true;
+          }
+          break;
+        case DecodedKind::LoadStoreUImm:
+          if (exec_decoded_load_store_uimm(*decoded)) {
+            return true;
+          }
+          break;
+        default:
+          break;
+      }
+      if (exec_decoded(*decoded)) {
+        return true;
+      }
     }
   }
   if (exec_branch(insn)) {

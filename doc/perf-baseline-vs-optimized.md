@@ -689,3 +689,159 @@
   - “窄而专”的 decoded fast path 是有效的。
   - “宽而泛”的 generic decoded fast path 在当前结构下反而容易变慢。
 - 未来如果继续沿 predecode 方向推进，最优先的不应该是盲目增加更多指令覆盖，而应继续挑最热、最单纯、最容易压平的子集逐个专门化。
+
+## 第十轮：专门化整数 `decoded` 快路径
+
+这一轮把上一轮已经验证有效的 predecode 机制，继续扩到一批高频整数族，但仍坚持两个原则：
+- 只接入已经在慢路径里实现并被裸机/Linux 实际使用到的家族。
+- 每补一类，都保留原慢路径，不改变 decode cache 失效和自修改代码语义。
+
+### 这一轮实现内容
+- 新增 `DecodedKind` 快路径覆盖：
+  - `LogicalShifted`
+  - `LogicalImm`
+  - `Bitfield`
+- 这些家族对应的执行逻辑继续复用现有语义实现，只是从 `exec_data_processing()` 的大分派前移到 predecode 路径。
+- 新增裸机对照用例 `tests/arm64/predecode_logic_min.S`：
+  - 覆盖 `AND/ORN/BICS`
+  - 覆盖 `ORR/AND/EOR/ANDS (immediate)`
+  - 覆盖 `LSR/LSL/UBFX/SBFX/BFI`
+  - 同时验证 `fast` / `-decode slow` 输出一致
+
+### 功能验证
+- `tests/arm64/run_all.sh`：通过。
+- `tests/linux/build_linux_shell_snapshot.sh`：通过。
+- `AARCHVM_FUNCTIONAL_TIMEOUT=360s tests/linux/run_functional_suite.sh`：通过。
+- `predecode_logic_min.bin` 在 `fast` / `slow` 下均输出 `P`。
+
+### 结果文件
+- `fast`：`out/perf-predecode-int-fast-results.txt`
+- `slow`：`out/perf-predecode-int-slow-results.txt`
+- `slow rerun`：`out/perf-predecode-int-slow-rerun-results.txt`
+- `fast rerun`：`out/perf-predecode-int-fast-rerun-results.txt`
+
+### Fast vs Slow 中位数对比
+| case | slow median host_ns | fast median host_ns | 提升 |
+| --- | ---: | ---: | ---: |
+| `base64-enc-4m` | 4811152113.5 | 3793706553.0 | 21.15% |
+| `base64-dec-4m` | 5293861651.0 | 3823185935.5 | 27.78% |
+| `fnv1a-16m` | 5728386039.5 | 4658783794.5 | 18.67% |
+| `tlb-seq-hot-8m` | 12528673.5 | 10180963.5 | 18.74% |
+| `tlb-seq-cold-32m` | 13641224.0 | 11324408.0 | 16.98% |
+| `tlb-rand-32m` | 17556525.0 | 14995345.5 | 14.59% |
+
+### 这一轮结果解释
+- 这说明 predecode 不只对分支、访存有效，对常用整数位运算家族也确实有收益。
+- 与第九轮相比，这一轮的收益结构更偏向纯算法 workload：
+  - 三个算法 case 全部继续向前。
+  - 三个 TLB case 也维持正收益，但幅度小于第九轮对纯访存路径的改善。
+- 这符合预期，因为这轮主要压的是：
+  - `exec_data_processing()` 大分派成本
+  - `exec_decoded()` 中通用整数 case 的固定成本
+
+### 当前判断
+- 这轮之后，predecode 的收益已经不再只是“访存特化有效”，而是形成了一个更明确的模式：
+  - 最热整数族和最热访存族，都适合做窄而专的 decoded 执行路径。
+- 但热点也更加清楚地暴露出来：
+  - `lookup_decoded()`
+  - `exec_decoded()`
+  - `translate_address()`
+- 因此下一轮不再继续扩大 decoded 覆盖率，而是转去压缩 predecode 自身的固定成本。
+
+## 第十一轮：压缩 predecode 固定成本
+
+这一轮尝试的重点不是“再多支持几类指令”，而是减少已支持 decoded 指令每次执行都要付出的固定开销。
+
+### 这一轮实现内容
+- 把第十轮和第九轮已经专门化过的 hot family 提取为独立 helper：
+  - `AddSubImm`
+  - `AddSubShifted`
+  - `LogicalShifted`
+  - `LogicalImm`
+  - `Bitfield`
+  - `LoadStoreUImm`
+- `step()` 在拿到 decoded 指令后，先对这几个 hot family 直接分发到 helper，尽量绕开 `exec_decoded()` 里更大的通用 `switch`。
+- 这一轮中途还试过“先做 cached lookup 旁路，再回落普通 lookup”的版本。它能明显压低热点里的 `exec_decoded()`，但端到端收益不够稳定，因此最终保留的是更简单的“单次 `lookup_decoded()` + hot helper dispatch”版本。
+
+### 功能验证
+- `tests/arm64/run_all.sh`：通过。
+- `tests/linux/build_linux_shell_snapshot.sh`：通过。
+- `AARCHVM_FUNCTIONAL_TIMEOUT=360s tests/linux/run_functional_suite.sh`：通过。
+- 自修改代码、VA 切换、`predecode_load_store_min.bin`、`predecode_logic_min.bin` 继续通过。
+
+### 结果文件
+- `fast`：`out/perf-predecode-dispatch-fast-results.txt`
+- `fast rerun`：`out/perf-predecode-dispatch-fast-rerun-results.txt`
+- `fast rerun2`：`out/perf-predecode-dispatch-fast-rerun2-results.txt`
+- `slow`：`out/perf-predecode-dispatch-slow-results.txt`
+- `slow rerun`：`out/perf-predecode-dispatch-slow-rerun-results.txt`
+- 热点：`out/perf-predecode-dispatch-fast.report`
+- 试验版 cached 旁路对比：
+  - `out/perf-predecode-cache-fast-results.txt`
+  - `out/perf-predecode-cache-fast-rerun-results.txt`
+  - `out/perf-predecode-cache-slow-results.txt`
+  - `out/perf-predecode-cache-slow-rerun-results.txt`
+
+### 测量说明
+- 这一轮其中一条 `fast rerun` 出现了明显宿主机异常值，主要体现在 TLB 三项突然整体拉高。
+- 为避免被异常值污染，这一轮最终采用：
+  - `slow` 两次取中位数（两次值本身已很接近）
+  - `fast` 三次取中位数
+- 下表因此使用的是“`slow median(2)` vs `fast median(3)`”。
+
+### Fast vs Slow 中位数对比
+| case | slow median host_ns | fast median host_ns | 提升 |
+| --- | ---: | ---: | ---: |
+| `base64-enc-4m` | 4763778028.0 | 3991770309.0 | 16.21% |
+| `base64-dec-4m` | 5296070549.5 | 4041578695.0 | 23.69% |
+| `fnv1a-16m` | 5825577992.5 | 4950618209.0 | 15.02% |
+| `tlb-seq-hot-8m` | 13940317.0 | 11778594.0 | 15.51% |
+| `tlb-seq-cold-32m` | 13474735.5 | 11904380.0 | 11.65% |
+| `tlb-rand-32m` | 17457177.5 | 15571087.0 | 10.80% |
+
+### 与第十轮最优 fast 中位数对比
+| case | 第十轮 fast median | 第十一轮 fast median | 变化 |
+| --- | ---: | ---: | ---: |
+| `base64-enc-4m` | 3793706553.0 | 3991770309.0 | -5.22% |
+| `base64-dec-4m` | 3823185935.5 | 4041578695.0 | -5.71% |
+| `fnv1a-16m` | 4658783794.5 | 4950618209.0 | -6.26% |
+| `tlb-seq-hot-8m` | 10180963.5 | 11778594.0 | -15.69% |
+| `tlb-seq-cold-32m` | 11324408.0 | 11904380.0 | -5.12% |
+| `tlb-rand-32m` | 14995345.5 | 15571087.0 | -3.84% |
+
+### 这一轮结果解释
+- 第十一轮相对于 `slow` 路径依然是稳定正收益。
+- 但如果把比较对象换成第十轮已经达到的最优 `fast` 状态，这一轮并没有继续向前，反而普遍小幅回退。
+- 这说明：
+  - 单纯把 hot family 从 `exec_decoded()` 大 `switch` 里再搬出来，并不自动等于更快。
+  - 在当前编译器 codegen 下，额外 helper 分发、指令 cache 局部性、以及 `lookup_decoded()` 自身成本，可能抵消了这部分收益。
+- 因此，第十一轮的价值更多在于“把热点拆明白”，而不是拿到新的最优性能点。
+
+### 最终热点追踪
+基于 `out/perf-predecode-dispatch-fast.report`，当前版本最值得关注的热点大致如下：
+- `Cpu::step()`：约 22.45%
+- `Cpu::translate_address()`：约 11.19%
+- `Cpu::lookup_decoded()`：约 10.59%
+- `Cpu::exec_data_processing()`：约 7.71%
+- `Cpu::exec_load_store()`：约 6.35%
+- `Bus::read()`：约 6.15%
+- `Cpu::try_take_irq()`：约 5.08%
+- `Cpu::exec_decoded()`：约 3.53%
+- `Cpu::decode_insn()`：约 3.28%
+- `Cpu::exec_system()`：约 2.71%
+
+### 热点解读
+- `exec_decoded()` 本身已经不像前几轮那么突出，但 `lookup_decoded()` 仍然很重，说明瓶颈更偏向：
+  - decode cache 命中路径本身
+  - page/slot 查找与 raw compare
+  - fallback 指令仍需反复经过 predecode 框架
+- `translate_address()`、`exec_load_store()`、`Bus::read()` 仍然排在前列，说明访存主路径依旧是解释器性能核心。
+- `try_take_irq()` 仍有 5% 左右，表明“每条指令都做一次 IRQ 判定”这件事在当前模型下仍然不便宜。
+
+### 当前结论
+- 第十轮是明确有效的正优化，建议保留。
+- 第十一轮主要提供了热点拆解价值，但没有形成新的最优端到端性能点。
+- 如果下一步继续追性能，优先级应是：
+  1. 压 `lookup_decoded()` 命中路径，而不是继续把更多 case 往 helper 里搬。
+  2. 缩减 `translate_address()` / `exec_load_store()` / `Bus::read()` 之间的接口层固定成本。
+  3. 引入更粗粒度的执行缓存，例如块级预解码，而不是继续做单条指令级的小分派优化。

@@ -238,6 +238,12 @@ private:
   [[nodiscard]] bool mmu_write_value(std::uint64_t va, std::uint64_t value, std::size_t size);
   [[nodiscard]] DecodedInsn decode_insn(std::uint32_t insn) const;
   [[nodiscard]] const DecodedInsn* lookup_decoded(std::uint64_t va, std::uint64_t pa, std::uint32_t insn);
+  bool exec_decoded_add_sub_imm(const DecodedInsn& decoded);
+  bool exec_decoded_add_sub_shifted(const DecodedInsn& decoded);
+  bool exec_decoded_logical_shifted(const DecodedInsn& decoded);
+  bool exec_decoded_logical_imm(const DecodedInsn& decoded);
+  bool exec_decoded_bitfield(const DecodedInsn& decoded);
+  bool exec_decoded_load_store_uimm(const DecodedInsn& decoded);
   bool exec_decoded(const DecodedInsn& decoded);
   void invalidate_decode_va(std::uint64_t va, std::size_t size);
   void invalidate_decode_pa(std::uint64_t pa, std::size_t size);

@@ -119,6 +119,7 @@ test "$(tr -d '\r\n' < tests/arm64/out/snapshot_post.log)" = 'B'
 run predecode_dyn_codegen.bin 400000
 run predecode_va_exec_switch.bin 5000000
 run predecode_load_store_min.bin 400000
+run predecode_logic_min.bin 400000
 
 PRE_FAST=tests/arm64/out/predecode_fast.log
 PRE_SLOW=tests/arm64/out/predecode_slow.log
@@ -140,3 +141,10 @@ LS_SLOW=tests/arm64/out/predecode_ls_slow.log
 ./build/aarchvm -decode slow -bin tests/arm64/out/predecode_load_store_min.bin -load 0x0 -entry 0x0 -steps 400000 > "$LS_SLOW"
 test "$(tr -d '\r\n' < "$LS_FAST")" = 'L'
 test "$(tr -d '\r\n' < "$LS_SLOW")" = 'L'
+
+LOGIC_FAST=tests/arm64/out/predecode_logic_fast.log
+LOGIC_SLOW=tests/arm64/out/predecode_logic_slow.log
+./build/aarchvm -bin tests/arm64/out/predecode_logic_min.bin -load 0x0 -entry 0x0 -steps 400000 > "$LOGIC_FAST"
+./build/aarchvm -decode slow -bin tests/arm64/out/predecode_logic_min.bin -load 0x0 -entry 0x0 -steps 400000 > "$LOGIC_SLOW"
+test "$(tr -d '\r\n' < "$LOGIC_FAST")" = 'P'
+test "$(tr -d '\r\n' < "$LOGIC_SLOW")" = 'P'
