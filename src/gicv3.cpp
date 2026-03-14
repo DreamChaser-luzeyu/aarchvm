@@ -576,12 +576,7 @@ void GicV3::set_level(std::uint32_t intid, bool asserted) {
 
 bool GicV3::has_pending() const {
   ++perf_counters_.has_pending_calls;
-  for (std::uint64_t word : pending_enabled_bits_) {
-    if (word != 0u) {
-      return true;
-    }
-  }
-  return false;
+  return best_pending_valid_;
 }
 
 bool GicV3::has_pending(std::uint8_t pmr) const {

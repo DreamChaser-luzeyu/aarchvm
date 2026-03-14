@@ -39,6 +39,30 @@ constexpr std::uint16_t kDecodedFlagSigned = 1u << 6;
 constexpr std::uint16_t kDecodedFlagResult64 = 1u << 7;
 constexpr std::uint16_t kDecodedFlagInvert = 1u << 8;
 
+constexpr std::uint32_t sysreg_key(std::uint32_t op0,
+                                   std::uint32_t op1,
+                                   std::uint32_t crn,
+                                   std::uint32_t crm,
+                                   std::uint32_t op2) {
+  return (op0 << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2;
+}
+
+constexpr std::uint32_t sysreg_trap_iss(bool is_read,
+                                        std::uint32_t op0,
+                                        std::uint32_t op1,
+                                        std::uint32_t crn,
+                                        std::uint32_t crm,
+                                        std::uint32_t op2,
+                                        std::uint32_t rt) {
+  return (rt & 0x1Fu) |
+         ((op2 & 0x7u) << 5u) |
+         ((crm & 0xFu) << 8u) |
+         ((crn & 0xFu) << 12u) |
+         ((op1 & 0x7u) << 16u) |
+         ((op0 & 0x3u) << 19u) |
+         ((is_read ? 1u : 0u) << 21u);
+}
+
 std::uint64_t ones(std::uint32_t bits) {
   if (bits == 0) {
     return 0;
@@ -555,7 +579,6 @@ bool Cpu::mmu_write_value(std::uint64_t va, std::uint64_t value, std::size_t siz
 
 Cpu::DecodedInsn Cpu::decode_insn(std::uint32_t insn) const {
   DecodedInsn decoded{};
-  decoded.raw = insn;
 
   if ((insn & 0x7C000000u) == 0x14000000u) {
     decoded.kind = DecodedKind::BImm;
@@ -1113,14 +1136,17 @@ const Cpu::DecodedInsn* Cpu::lookup_decoded(std::uint64_t va, std::uint64_t pa, 
       page->context_epoch = decode_context_epoch_;
       page->va_page = va_page;
       page->pa_page = pa_page;
-      page->decoded.fill(0);
+      page->valid_words.fill(0);
     }
     decode_last_page_ = page;
   }
 
-  if (!page->decoded[slot] || page->insns[slot].raw != insn) {
+  const std::size_t valid_idx = slot >> 6;
+  const std::uint64_t valid_bit = 1ull << (slot & 63u);
+  if ((page->valid_words[valid_idx] & valid_bit) == 0u || page->raws[slot] != insn) {
     page->insns[slot] = decode_insn(insn);
-    page->decoded[slot] = 1;
+    page->raws[slot] = insn;
+    page->valid_words[valid_idx] |= valid_bit;
   }
   return &page->insns[slot];
 }
@@ -1409,7 +1435,7 @@ bool Cpu::step() {
   if (waiting_for_interrupt_) {
     if (gic_.has_pending()) {
       waiting_for_interrupt_ = false;
-      if (try_take_irq()) {
+      if (should_try_irq() && try_take_irq()) {
         ++steps_;
         return true;
       }
@@ -1424,7 +1450,7 @@ bool Cpu::step() {
     if (event_register_) {
       event_register_ = false;
       waiting_for_event_ = false;
-    } else if (try_take_irq()) {
+    } else if (should_try_irq() && try_take_irq()) {
       waiting_for_event_ = false;
       ++steps_;
       return true;
@@ -1433,7 +1459,7 @@ bool Cpu::step() {
     return true;
   }
 
-  if (try_take_irq()) {
+  if (should_try_irq() && try_take_irq()) {
     ++steps_;
     return true;
   }
@@ -1639,14 +1665,8 @@ bool Cpu::step() {
 }
 
 bool Cpu::try_take_irq() {
-  if (sysregs_.irq_masked() || icc_igrpen1_el1_ == 0) {
-    return false;
-  }
   const std::uint16_t irq_threshold = irq_delivery_threshold_;
   const std::uint64_t irq_epoch = gic_.state_epoch();
-  if (irq_query_negative_valid_ && irq_query_epoch_ == irq_epoch && irq_query_threshold_ == irq_threshold) {
-    return false;
-  }
   std::uint32_t intid = 1023u;
   if (!gic_.acknowledge(static_cast<std::uint8_t>(irq_threshold & 0xFFu), intid)) {
     irq_query_epoch_ = irq_epoch;
@@ -2553,7 +2573,35 @@ bool Cpu::exec_system(std::uint32_t insn) {
     const std::uint32_t crn = (insn >> 12) & 0xFu;
     const std::uint32_t crm = (insn >> 8) & 0xFu;
     const std::uint32_t op2 = (insn >> 5) & 0x7u;
-    const std::uint32_t key = (op0 << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2;
+    const std::uint32_t key = sysreg_key(op0, op1, crn, crm, op2);
+    auto timer_sysreg_el0_allowed = [&]() -> bool {
+      if (!sysregs_.in_el0()) {
+        return true;
+      }
+      std::uint64_t cntkctl = 0;
+      (void)sysregs_.read(3u, 0u, 14u, 1u, 0u, cntkctl);
+      switch (key) {
+        case sysreg_key(3u, 3u, 14u, 0u, 2u):
+          return (cntkctl & (1ull << 1u)) != 0u; // CNTVCT_EL0: EL0VCTEN
+        case sysreg_key(3u, 3u, 14u, 0u, 1u):
+          return (cntkctl & (1ull << 0u)) != 0u; // CNTPCT_EL0: EL0PCTEN
+        case sysreg_key(3u, 3u, 14u, 3u, 0u):
+        case sysreg_key(3u, 3u, 14u, 3u, 1u):
+        case sysreg_key(3u, 3u, 14u, 3u, 2u):
+          return (cntkctl & (1ull << 8u)) != 0u; // CNTV_*_EL0: EL0VTEN
+        case sysreg_key(3u, 3u, 14u, 2u, 0u):
+        case sysreg_key(3u, 3u, 14u, 2u, 1u):
+        case sysreg_key(3u, 3u, 14u, 2u, 2u):
+          return (cntkctl & (1ull << 9u)) != 0u; // CNTP_*_EL0: EL0PTEN
+        default:
+          return true;
+      }
+    };
+
+    if (!timer_sysreg_el0_allowed()) {
+      enter_sync_exception(pc_ - 4, 0x18u, sysreg_trap_iss(true, op0, op1, crn, crm, op2, rt), false, 0);
+      return true;
+    }
 
     if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (12u << 3) | 0u)) { // ICC_IAR1_EL1
       set_reg(rt, (exception_depth_ != 0 && exception_is_irq_stack_[exception_depth_ - 1]) ? exception_intid_stack_[exception_depth_ - 1] : 1023u);
@@ -2592,7 +2640,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
       return true;
     }
     if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (0u << 3) | 1u) ||
-        key == ((3u << 14) | (3u << 11) | (14u << 7) | (0u << 3) | 2u)) { // CNTVCT_EL0/CNTPCT_EL0 minimal alias
+        key == ((3u << 14) | (3u << 11) | (14u << 7) | (0u << 3) | 2u)) { // CNTVCT_EL0 / CNTPCT_EL0 share the same global counter in this model
       set_reg(rt, timer_.counter_at_steps(steps_));
       return true;
     }
@@ -2649,7 +2697,35 @@ bool Cpu::exec_system(std::uint32_t insn) {
     const std::uint32_t crn = (insn >> 12) & 0xFu;
     const std::uint32_t crm = (insn >> 8) & 0xFu;
     const std::uint32_t op2 = (insn >> 5) & 0x7u;
-    const std::uint32_t key = (op0 << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2;
+    const std::uint32_t key = sysreg_key(op0, op1, crn, crm, op2);
+    auto timer_sysreg_el0_allowed = [&]() -> bool {
+      if (!sysregs_.in_el0()) {
+        return true;
+      }
+      std::uint64_t cntkctl = 0;
+      (void)sysregs_.read(3u, 0u, 14u, 1u, 0u, cntkctl);
+      switch (key) {
+        case sysreg_key(3u, 3u, 14u, 0u, 2u):
+          return (cntkctl & (1ull << 1u)) != 0u;
+        case sysreg_key(3u, 3u, 14u, 0u, 1u):
+          return (cntkctl & (1ull << 0u)) != 0u;
+        case sysreg_key(3u, 3u, 14u, 3u, 0u):
+        case sysreg_key(3u, 3u, 14u, 3u, 1u):
+        case sysreg_key(3u, 3u, 14u, 3u, 2u):
+          return (cntkctl & (1ull << 8u)) != 0u;
+        case sysreg_key(3u, 3u, 14u, 2u, 0u):
+        case sysreg_key(3u, 3u, 14u, 2u, 1u):
+        case sysreg_key(3u, 3u, 14u, 2u, 2u):
+          return (cntkctl & (1ull << 9u)) != 0u;
+        default:
+          return true;
+      }
+    };
+
+    if (!timer_sysreg_el0_allowed()) {
+      enter_sync_exception(pc_ - 4, 0x18u, sysreg_trap_iss(false, op0, op1, crn, crm, op2, rt), false, 0);
+      return true;
+    }
 
     if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (12u << 3) | 1u)) { // ICC_EOIR1_EL1
       if (exception_depth_ != 0) {

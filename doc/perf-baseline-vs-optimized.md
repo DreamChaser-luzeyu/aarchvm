@@ -845,3 +845,116 @@
   1. 压 `lookup_decoded()` 命中路径，而不是继续把更多 case 往 helper 里搬。
   2. 缩减 `translate_address()` / `exec_load_store()` / `Bus::read()` 之间的接口层固定成本。
   3. 引入更粗粒度的执行缓存，例如块级预解码，而不是继续做单条指令级的小分派优化。
+
+## 第十二轮优化对比
+
+这一轮目标是压缩 predecode 快路径里 `lookup_decoded()` 的命中固定成本，而不改变 decode cache 的失效语义：
+- 将 `DecodedInsn::raw` 从结构体里拆出，改为 `DecodePage::raws[slot]`。
+- 增加 `DecodePage::valid_words`，先用位图快速判定 slot 是否有效，再比较 `raws[slot]`，最后才触碰 `DecodedInsn` 本体。
+- 这样可以让“命中但无需访问完整 decoded payload”的路径更紧凑，减少 cache line 触碰与结构体访问。
+
+### 功能验证
+- `tests/arm64/run_all.sh`：通过。
+- `tests/linux/build_linux_shell_snapshot.sh`：通过。
+- `AARCHVM_FUNCTIONAL_TIMEOUT=360s tests/linux/run_functional_suite.sh`：通过。
+
+### 第十二轮结果
+| case | 上一版 host_ns | 当前 host_ns | 提升 |
+| --- | ---: | ---: | ---: |
+| `base64-enc-4m` | 4704116100 | 4576972507 | 2.70% |
+| `base64-dec-4m` | 5003840082 | 4535721134 | 9.36% |
+| `fnv1a-16m` | 5526943925 | 5541376951 | -0.26% |
+| `tlb-seq-hot-8m` | 26329071 | 13996800 | 46.84% |
+| `tlb-seq-cold-32m` | 11553802 | 11552162 | 0.01% |
+| `tlb-rand-32m` | 15717239 | 15567772 | 0.95% |
+
+### 第十二轮结果解释
+- 这一轮对 decode cache 命中路径的收益是明确的，尤其是 `tlb-seq-hot-8m` 这类短路径 benchmark，固定 lookup 成本占比高，因此改善最明显。
+- `base64-dec-4m` 也取得了较明显提升，说明这类 workloads 对取指 / decode cache 命中固定成本同样敏感。
+- `fnv1a-16m` 基本持平，说明这一轮不是全局性改造，而是针对 `lookup_decoded()` 命中热路径的定向减负。
+- 这组数据来自单次 before/after，对长时间 case 仍应视为“方向确认”，不是严格统计显著性结论。
+
+### 第十二轮原始数据文件
+- baseline：`out/perf-current-results.txt`
+- optimized：`out/perf-decodecache-compact-results.txt`
+- log：`out/perf-decodecache-compact.log`
+
+## 第十三轮优化对比
+
+这一轮针对的是“无中断可取时仍高频进入 IRQ 查询路径”的固定成本：
+- 在 `Cpu` 中加入 `should_try_irq()`，先基于 `PSTATE.I`、负缓存状态和 GIC epoch 做轻量门控，再决定是否真正进入 `try_take_irq()`。
+- `step()` 在正常执行、`WFI`、`WFE` 路径上统一使用这一门控。
+- `GicV3::has_pending()` 改为直接返回 `best_pending_valid_`，不再扫描 bitmap。
+- 因为所有调用点已经在 `step()` 入口门控，`try_take_irq()` 自身去掉了重复的“无中断”固定检查。
+
+### 功能验证
+- `tests/arm64/run_all.sh`：通过。
+- `tests/linux/build_linux_shell_snapshot.sh`：通过。
+- `AARCHVM_FUNCTIONAL_TIMEOUT=360s tests/linux/run_functional_suite.sh`：通过。
+
+### 第十三轮结果
+| case | 上一版 host_ns | 当前 host_ns | 提升 |
+| --- | ---: | ---: | ---: |
+| `base64-enc-4m` | 4576972507 | 3868324877 | 15.48% |
+| `base64-dec-4m` | 4535721134 | 4750755020 | -4.74% |
+| `fnv1a-16m` | 5541376951 | 5104164626 | 7.89% |
+| `tlb-seq-hot-8m` | 13996800 | 13929570 | 0.48% |
+| `tlb-seq-cold-32m` | 11552162 | 11977252 | -3.68% |
+| `tlb-rand-32m` | 15567772 | 15198171 | 2.37% |
+
+### 第十三轮结果解释
+- 这一轮的收益比第十二轮更混合，但 `base64-enc-4m`、`fnv1a-16m` 与 `tlb-rand-32m` 都有正向改善，说明 IRQ 门控的固定成本压缩确实起效。
+- `base64-dec-4m` 与 `tlb-seq-cold-32m` 的单次结果出现回退，更像宿主机噪声而不是 guest 行为变化，因为这一轮并没有修改 guest 指令路径语义。
+- `GicV3::has_pending()` 改成 O(1) 后，无中断阶段的 `try_take_irq()` 入口理论上已经接近“只做几次本地条件判断”。
+- 这组数据同样来自单次 before/after，对 mixed 结果需要结合后续热点分析一起看，而不能单独据此下结论。
+
+### 第十三轮原始数据文件
+- baseline：`out/perf-decodecache-compact-results.txt`
+- optimized：`out/perf-irqgate-results.txt`
+- log：`out/perf-irqgate.log`
+
+## 第十三轮后 perf / gprof 热点观察
+
+这一轮在当前代码上重新做了两种热点采样：
+- `perf`：`out/perf-post-round13.perf.data` / `out/perf-post-round13.report`
+- `gprof`：`out/gprof-post-round13.txt`
+
+### perf 观察
+
+基于 `out/perf-post-round13.report` 中 `cpu_core/cycles` 样本，当前最靠前的用户态热点大致是：
+- `Cpu::step()`：约 `21.85%`
+- `Cpu::lookup_decoded()`：约 `12.14%`
+- `Cpu::translate_address()`：约 `11.49%`
+- `Cpu::exec_data_processing()`：约 `8.11%`
+- `Cpu::exec_load_store()`：约 `6.92%`
+- `Bus::read()`：约 `6.50%`
+- `exec_load_store()` 内部读辅助 lambda：约 `3.89%`
+- `exec_decoded()`：约 `3.78%`
+- `exec_system()`：约 `3.48%`
+- `decode_insn()`：约 `3.35%`
+- `exec_decoded_load_store_uimm()`：约 `2.59%`
+- `translate_data_address_fast()`：约 `2.48%`
+
+最重要的变化是：`try_take_irq()` 已经不再位于主热点组里，说明第十三轮“IRQ 查询门控 + O(1) has_pending”确实把之前那条固定热链压下去了。
+
+### gprof 观察
+
+基于 `out/gprof-post-round13.txt` 的 flat profile，去掉明显的运行时噪声项（如 `_init`）后，当前最稳定的热点排序与 `perf` 基本一致：
+- `Cpu::lookup_decoded()`：约 `13.73%`
+- `Cpu::step()`：约 `12.78%`
+- `Cpu::translate_address()`：约 `8.58%`
+- `Cpu::exec_load_store()`：约 `7.48%`
+- `Cpu::exec_data_processing()`：约 `5.19%`
+- `BusFastPath::read()`：约 `5.17%`
+- `Bus::read()`：约 `4.08%`
+- `decode_insn()`：约 `2.40%`
+- `exec_decoded()`：约 `2.33%`
+- `translate_data_address_fast()`：约 `1.30%`
+
+### 当前热点结论
+- 第十二轮和第十三轮的方向是对的：decode cache 命中路径和 IRQ 固定成本都被进一步压缩了。
+- 现在的第一梯队已经重新收敛到解释器核心：
+  - 取指后的 `lookup_decoded()` 命中判定
+  - `translate_address()` / `translate_data_address_fast()`
+  - `exec_load_store()` + `Bus::read()` / `BusFastPath::read()`
+- 这说明后续如果还想拿到可观收益，应优先继续压缩访存链和 decoded 命中链，而不是再做零碎 helper 内联。

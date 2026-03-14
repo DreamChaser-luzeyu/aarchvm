@@ -403,6 +403,7 @@ The current implementation already covers and validates:
 - synchronous exception handling via `ESR_EL1/FAR_EL1/ELR_EL1/SPSR_EL1`
 - minimal GICv3 system-register CPU interface
 - minimal Generic Timer sysreg path
+- `CNTKCTL_EL1` gating and trap behavior for EL0 `CNTVCT/CNTPCT/CNTV_*/CNTP_*` accesses
 - PL011 earlycon, normal console output, and BusyBox shell input
 - `WFI` wakeup semantics plus nested IRQ delivery while already in EL1 exception context
 - a growing set of atomics, sysregs, cache-maintenance instructions, and load/store forms encountered during Linux bring-up
@@ -437,6 +438,7 @@ The current regression suite covers:
 - per-instruction bring-up tests for previously implemented ISA subsets
 - MMU/TLB/cache-maintenance tests
 - synchronous exception register tests
+- `cntkctl_el0_timer_access` for EL0 timer-sysreg trap / allow behavior under `CNTKCTL_EL1`
 - GICv3 + timer sysreg IRQ tests
 - `irq_nested_el1_wfi` for `WFI` wakeup plus nested EL1 IRQ delivery
 - `snapshot_resume` for full-machine snapshot save / restore
@@ -447,6 +449,7 @@ The current regression suite covers:
 - expanded `fpsimd_logic_more` coverage for `EOR/BIT/BIF/BSL` separation
 - `fpsimd_arith_shift_perm` for `ADD/SUB/MUL (vector)`, `USHR/SSHR`, `ZIP1/UZP1/TRN1`, and the `MOV (vector)` alias path
 - `fp_scalar_ls` now covers scalar FP `S/D` load/store plus `post-index` / `pre-index` forms
+- `predecode_logic_min` cross-checks the integer decoded fast path against `-decode slow`
 
 Linux shell snapshot build and prompt-step capture:
 

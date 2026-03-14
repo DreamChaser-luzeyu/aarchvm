@@ -27,6 +27,7 @@ build_asm_prog mem_ext
 build_asm_prog branch_reg
 build_asm_prog sys_ctrl
 build_asm_prog cntkctl_el1
+build_asm_prog cntkctl_el0_timer_access
 build_asm_prog ldtr_sttr_usercopy
 build_asm_prog fpsimd_minimal
 build_asm_prog fpsimd_mvni

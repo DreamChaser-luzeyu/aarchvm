@@ -403,6 +403,7 @@ AARCHVM_TIMER_SCALE=100000 \
 - `ESR_EL1/FAR_EL1/ELR_EL1/SPSR_EL1` 同步异常路径
 - 最小 GICv3 sysreg CPU 接口
 - 最小 Generic Timer sysreg 路径
+- `CNTKCTL_EL1` 对 EL0 `CNTVCT/CNTPCT/CNTV_*/CNTP_*` 访问控制与 trap 闭环
 - PL011 `earlycon`、正式控制台、以及 BusyBox shell 输入路径
 - `WFI` 唤醒语义与 EL1 异常上下文中的嵌套 IRQ 接收
 - Linux 启动中实际使用到的一批原子、system register、cache maintenance 和 load/store 指令
@@ -437,6 +438,7 @@ tests/arm64/run_all.sh
 - 先前已实现指令逐项测试
 - MMU/TLB/缓存维护测试
 - 同步异常寄存器测试
+- `cntkctl_el0_timer_access`：验证 `CNTKCTL_EL1` 对 EL0 timer sysreg 的 trap / 放行
 - GICv3 + timer sysreg 中断测试
 - `irq_nested_el1_wfi`：验证 `WFI` 唤醒与 EL1 异常上下文中的嵌套 IRQ
 - `snapshot_resume`：验证整机 snapshot 保存与恢复
@@ -447,6 +449,7 @@ tests/arm64/run_all.sh
 - 扩展后的 `fpsimd_logic_more`：覆盖 `EOR/BIT/BIF/BSL` 区分
 - `fpsimd_arith_shift_perm`：验证 `ADD/SUB/MUL (vector)`、`USHR/SSHR`、`ZIP1/UZP1/TRN1` 以及 `MOV (vector)` 别名路径
 - `fp_scalar_ls`：覆盖标量 FP `S/D` 的基本 load/store 与 `post-index` / `pre-index` 形式
+- `predecode_logic_min`：验证整数 `decoded` 快路径与 `-decode slow` 的一致性
 
 Linux shell snapshot 构建与提示符步数捕获：
 

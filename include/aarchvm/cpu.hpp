@@ -154,7 +154,6 @@ private:
 
   struct DecodedInsn {
     DecodedKind kind = DecodedKind::Fallback;
-    std::uint32_t raw = 0;
     std::int32_t simm = 0;
     std::uint32_t imm = 0;
     std::uint8_t rd = 31;
@@ -167,6 +166,7 @@ private:
 
   static constexpr std::size_t kDecodePageBytes = 4096;
   static constexpr std::size_t kDecodePageSlots = kDecodePageBytes / 4;
+  static constexpr std::size_t kDecodePageValidWords = kDecodePageSlots / 64;
   static constexpr std::size_t kDecodeCachePages = 64;
 
   struct DecodePage {
@@ -174,8 +174,9 @@ private:
     std::uint64_t context_epoch = 0;
     std::uint64_t va_page = 0;
     std::uint64_t pa_page = 0;
+    std::array<std::uint32_t, kDecodePageSlots> raws{};
+    std::array<std::uint64_t, kDecodePageValidWords> valid_words{};
     std::array<DecodedInsn, kDecodePageSlots> insns{};
-    std::array<std::uint8_t, kDecodePageSlots> decoded{};
   };
 
   bool try_take_irq();
@@ -258,6 +259,14 @@ private:
     return std::min<std::uint16_t>(static_cast<std::uint16_t>(icc_pmr_el1_ & 0xFFu), running_priority_);
   }
   void refresh_irq_threshold_cache() { irq_delivery_threshold_ = compute_irq_threshold(); }
+  [[nodiscard]] bool should_try_irq() const {
+    if (sysregs_.irq_masked() || icc_igrpen1_el1_ == 0) {
+      return false;
+    }
+    return !(irq_query_negative_valid_ &&
+             irq_query_epoch_ == gic_.state_epoch() &&
+             irq_query_threshold_ == irq_delivery_threshold_);
+  }
 
   [[nodiscard]] std::uint64_t reg(std::uint32_t idx) const {
     if (idx >= 31) {
