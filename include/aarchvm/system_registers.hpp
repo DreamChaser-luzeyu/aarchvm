@@ -50,11 +50,15 @@ public:
   void set_pan(bool value) { pstate_.pan = value; }
   [[nodiscard]] bool mmu_enabled() const { return (sctlr_el1_ & 1u) != 0; }
   [[nodiscard]] std::uint64_t sctlr_el1() const { return sctlr_el1_; }
+  [[nodiscard]] std::uint64_t cpacr_el1() const { return cpacr_el1_; }
   [[nodiscard]] std::uint64_t ttbr0_el1() const { return ttbr0_el1_; }
   [[nodiscard]] std::uint64_t ttbr1_el1() const { return ttbr1_el1_; }
   [[nodiscard]] std::uint64_t tcr_el1() const { return tcr_el1_; }
   [[nodiscard]] std::uint64_t mair_el1() const { return mair_el1_; }
   [[nodiscard]] std::uint64_t contextidr_el1() const { return contextidr_el1_; }
+  [[nodiscard]] std::uint64_t id_aa64pfr0_el1() const { return id_aa64pfr0_el1_; }
+  [[nodiscard]] std::uint64_t id_aa64isar0_el1() const { return id_aa64isar0_el1_; }
+  [[nodiscard]] std::uint64_t id_aa64mmfr0_el1() const { return id_aa64mmfr0_el1_; }
   void set_par_el1(std::uint64_t value) { par_el1_ = value; }
   [[nodiscard]] std::uint64_t elr_el1() const { return elr_el1_; }
   void set_elr_el1(std::uint64_t value) { elr_el1_ = value; }
@@ -114,12 +118,12 @@ private:
   std::uint64_t id_aa64pfr1_el1_ = 0;
   std::uint64_t id_aa64dfr0_el1_ = 0;
   std::uint64_t id_aa64dfr1_el1_ = 0;
-  std::uint64_t id_aa64isar0_el1_ = 0x0000000000200000ull;
+  std::uint64_t id_aa64isar0_el1_ = 0x0000000000210000ull;
   std::uint64_t id_aa64isar1_el1_ = 0;
   std::uint64_t id_aa64isar2_el1_ = 0;
   std::uint64_t id_aa64isar3_el1_ = 0;
   std::uint64_t id_aa64zfr0_el1_ = 0;
-  std::uint64_t id_aa64mmfr0_el1_ = 0x0000000000000F05ull;
+  std::uint64_t id_aa64mmfr0_el1_ = 0x000001110F000005ull;
   std::uint64_t id_aa64mmfr1_el1_ = 0;
   std::uint64_t id_aa64mmfr2_el1_ = 0;
   std::uint64_t id_aa64mmfr3_el1_ = 0;

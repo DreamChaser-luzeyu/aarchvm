@@ -29,12 +29,12 @@ void SystemRegisters::reset() {
   id_aa64pfr1_el1_ = 0;
   id_aa64dfr0_el1_ = 0;
   id_aa64dfr1_el1_ = 0;
-  id_aa64isar0_el1_ = 0x0000000000200000ull;
+  id_aa64isar0_el1_ = 0x0000000000210000ull;
   id_aa64isar1_el1_ = 0;
   id_aa64isar2_el1_ = 0;
   id_aa64isar3_el1_ = 0;
   id_aa64zfr0_el1_ = 0;
-  id_aa64mmfr0_el1_ = 0x0000000000000F05ull;
+  id_aa64mmfr0_el1_ = 0x000001110F000005ull;
   id_aa64mmfr1_el1_ = 0;
   id_aa64mmfr2_el1_ = 0;
   id_aa64mmfr3_el1_ = 0;

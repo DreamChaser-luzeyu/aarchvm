@@ -72,8 +72,18 @@ shell_mode="serial"
 if [ -r /proc/cmdline ]; then
   for arg in $(cat /proc/cmdline); do
     case "$arg" in
-      aarchvm_suite=*) suite="${arg#aarchvm_suite=}" ;;
-      aarchvm_shell=*) shell_mode="${arg#aarchvm_shell=}" ;;
+      aarchvm_suite=*)
+        suite=$(/bin/busybox cut -d= -f2- <<EOF
+$arg
+EOF
+)
+        ;;
+      aarchvm_shell=*)
+        shell_mode=$(/bin/busybox cut -d= -f2- <<EOF
+$arg
+EOF
+)
+        ;;
     esac
   done
 fi

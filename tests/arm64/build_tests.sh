@@ -55,9 +55,12 @@ build_asm_prog fpsimd_ins_xtl
 build_asm_prog fpsimd_misc_more
 build_asm_prog fpsimd_arith_shift_perm
 build_asm_prog fpsimd_fp_vector
+build_asm_prog fpsimd_more_perm_fp
 build_asm_prog fpsimd_structured_ls
 build_asm_prog fpsimd_widen_sat
+build_asm_prog cpacr_fp_trap
 build_asm_prog pstate_pan
+build_asm_prog id_aa64_feature_regs
 build_asm_prog svc_sysreg_minimal
 build_asm_prog lse_atomics
 build_asm_prog casp_pair
@@ -73,6 +76,9 @@ build_asm_prog mmu_tlbi_non_target
 build_asm_prog mmu_l2_block_vmalle1
 build_asm_prog mmu_at_tlb_observe
 build_asm_prog mmu_ttbr_asid_mask
+build_asm_prog mmu_tlb_asid_scope
+build_asm_prog mmu_pan_user_access
+build_asm_prog mmu_el0_ap_fault
 build_asm_prog mmu_perm_ro_write_abort
 build_asm_prog mmu_xn_fetch_abort
 build_asm_prog mmu_table_ap_inherit

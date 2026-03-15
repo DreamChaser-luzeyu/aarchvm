@@ -96,6 +96,7 @@ private:
 
   struct TableAttrs {
     bool write_protect = false;
+    bool user_no_access = false;
     bool pxn = false;
     bool uxn = false;
   };
@@ -109,10 +110,12 @@ private:
 
   struct TranslationResult {
     std::uint64_t pa = 0;
+    std::uint16_t asid = 0;
     std::uint8_t level = 3;
     std::uint8_t attr_index = 0;
     std::uint8_t mair_attr = 0;
     bool writable = false;
+    bool user_accessible = false;
     bool executable = true;
     bool pxn = false;
     bool uxn = false;
@@ -125,10 +128,12 @@ private:
     bool valid = false;
     std::uint64_t va_page = 0;
     std::uint64_t pa_page = 0;
+    std::uint16_t asid = 0;
     std::uint8_t level = 3;
     std::uint8_t attr_index = 0;
     std::uint8_t mair_attr = 0;
     bool writable = false;
+    bool user_accessible = false;
     bool executable = true;
     bool pxn = false;
     bool uxn = false;
@@ -195,19 +200,25 @@ private:
                                       AccessType access,
                                       std::uint8_t level,
                                       TranslationFault* fault) const {
-    if (access == AccessType::Write && !result.writable) {
+    const auto permission_fault = [&](bool write) {
       if (fault != nullptr) {
-        *fault = TranslationFault{.kind = TranslationFault::Kind::Permission, .level = level, .write = true};
+        *fault = TranslationFault{.kind = TranslationFault::Kind::Permission, .level = level, .write = write};
       }
       return false;
+    };
+    if (sysregs_.in_el0() && !result.user_accessible) {
+      return permission_fault(access == AccessType::Write);
+    }
+    if (!sysregs_.in_el0() && access != AccessType::Fetch && sysregs_.pan() && result.user_accessible) {
+      return permission_fault(access == AccessType::Write);
+    }
+    if (access == AccessType::Write && !result.writable) {
+      return permission_fault(true);
     }
     if (access == AccessType::Fetch) {
       const bool execute_blocked = sysregs_.in_el0() ? result.uxn : result.pxn;
       if (execute_blocked) {
-        if (fault != nullptr) {
-          *fault = TranslationFault{.kind = TranslationFault::Kind::Permission, .level = level, .write = false};
-        }
-        return false;
+        return permission_fault(false);
       }
     }
     return true;
@@ -220,12 +231,17 @@ private:
   [[nodiscard]] bool pa_within_ips(std::uint64_t pa, std::uint8_t ips_bits) const;
   void tlb_flush_all();
   void tlb_flush_va(std::uint64_t va);
+  void tlb_flush_asid(std::uint16_t asid);
   [[nodiscard]] static constexpr std::uint64_t tlb_page_mask() { return (1ull << 44u) - 1ull; }
   [[nodiscard]] static constexpr std::size_t tlb_set_index(std::uint64_t va_page) { return static_cast<std::size_t>(va_page) & (kTlbSets - 1u); }
-  [[nodiscard]] const TlbEntry* tlb_lookup(std::uint64_t va_page) const {
+  [[nodiscard]] std::uint16_t mmu_asid_mask() const;
+  [[nodiscard]] std::uint16_t ttbr_asid(std::uint64_t ttbr) const;
+  [[nodiscard]] std::uint16_t current_translation_asid(bool va_upper) const;
+  [[nodiscard]] std::uint16_t tlbi_operand_asid(std::uint64_t operand) const;
+  [[nodiscard]] const TlbEntry* tlb_lookup(std::uint64_t va_page, std::uint16_t asid) const {
     const auto& set = tlb_entries_[tlb_set_index(va_page)];
     for (const TlbEntry& entry : set) {
-      if (entry.valid && entry.va_page == va_page) {
+      if (entry.valid && entry.va_page == va_page && entry.asid == asid) {
         return &entry;
       }
     }
@@ -233,7 +249,7 @@ private:
   }
   void tlb_insert(std::uint64_t va_page, const TranslationResult& result);
   void tlb_insert_entry(std::uint64_t va_page, const TlbEntry& entry);
-  void tlb_invalidate_page(std::uint64_t va_page);
+  void tlb_invalidate_page(std::uint64_t va_page, std::uint16_t asid, bool match_asid);
   void data_abort(std::uint64_t va);
   [[nodiscard]] bool translate_data_address_fast(std::uint64_t va, bool write, std::uint64_t* out_pa);
   void invalidate_ram_page_caches();
@@ -253,6 +269,9 @@ private:
   void invalidate_decode_va_page(std::uint64_t va_page);
   void invalidate_decode_pa_page(std::uint64_t pa_page);
   void invalidate_decode_tlb_context();
+  [[nodiscard]] bool fp_asimd_traps_enabled_for_current_el() const;
+  [[nodiscard]] bool insn_uses_fp_asimd(std::uint32_t insn) const;
+  void trap_fp_asimd_access();
   void on_code_write(std::uint64_t va, std::uint64_t pa, std::size_t size);
   void parse_pc_watch_list();
   void save_current_sp_to_bank();

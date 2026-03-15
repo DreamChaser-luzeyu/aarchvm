@@ -1100,3 +1100,57 @@
 - 本轮实际保留的只有两个正确性修复：
   - decoded `STR Xn, [Xm,#imm]` 的 64-bit store 宽度修复。
   - host-stop 条件下 shell snapshot 的 `halted` 固化修复。
+
+## 当前行为完善轮的性能观测
+
+这一轮没有继续做性能优化，而是补了两类正确性工作：
+- 向量 `FABD` 的解码冲突修复。
+- `CPACR_EL1.FPEN` 对 FP/AdvSIMD 访问的最小 trap 语义，以及相应单测。
+
+为了确认这些改动没有明显打坏当前主线性能，我重新跑了一次 Linux 算法性能套件，并补抓了一份基于 shell snapshot 的 `gprof` 热点。
+
+### 当前算法性能结果
+
+原始结果文件：`out/perf-suite-results.txt`
+
+| case | host_ns |
+| --- | ---: |
+| `base64-enc-4m` | 2140511752 |
+| `base64-dec-4m` | 2024712952 |
+| `fnv1a-16m` | 3126710077 |
+| `tlb-seq-hot-8m` | 5561744 |
+| `tlb-seq-cold-32m` | 6263538 |
+| `tlb-rand-32m` | 9742291 |
+
+### 当前 gprof 热点
+
+原始结果文件：`out/gprof-current.txt`
+
+在基于 `out/linux-usertests-shell-v1.snap` 的 shell snapshot 恢复路径下，注入 `bench_runner` 后得到的平顶热点大致为：
+- `Cpu::translate_address()`：约 `15.36%`
+- `Cpu::step()`：约 `12.93%`
+- `Cpu::lookup_decoded()`：约 `10.54%`
+- `Cpu::exec_load_store()`：约 `7.57%`
+- `Cpu::exec_data_processing()`：约 `5.55%`
+- `BusFastPath::read()`：约 `4.20%`
+- `Bus::read()`：约 `3.69%`
+- `exec_load_store()` 内部 MMU 读辅助 lambda：约 `2.78%`
+- `Cpu::exec_system()`：约 `2.43%`
+- `Cpu::exec_decoded()`：约 `2.05%`
+
+### 当前 perf 采样说明
+
+我也补抓了一份 snapshot 恢复路径下的 `perf` 数据：
+- data：`out/perf-current-snap.data`
+- report：`out/perf-current-snap.report`
+
+但当前这份 `perf` 采样仍明显被宿主机匿名页 fault 和页清零路径污染，热点主要落在宿主机内核的 `asm_exc_page_fault` / `handle_mm_fault` / `clear_page_erms` 上，因此它对分析解释器本体价值有限。现阶段更可信的本体热点来源仍是同工作负载下的 `gprof` 结果。
+
+### 当前结论
+
+- 本轮正确性补丁没有改变热点分布的主结构。
+- 解释器的第一梯队瓶颈仍然稳定收敛在三条链路：
+  - `step()` 后的取指与 decoded 命中链。
+  - `translate_address()` / `translate_data_address_fast()` 地址翻译链。
+  - `exec_load_store()` + `BusFastPath::read()` / `Bus::read()` 访存链。
+- `CPACR` trap 前置判断已经进入热点表，但占比很低，只在 `0.22%` 左右，说明它没有成为新的固定负担。

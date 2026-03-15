@@ -514,14 +514,17 @@ bool Cpu::translate_data_address_fast(std::uint64_t va, bool write, std::uint64_
     return true;
   }
 
+  const bool va_upper = (va >> 63) != 0;
+  const std::uint16_t asid = current_translation_asid(va_upper);
   const std::uint64_t page = (va >> 12) & tlb_page_mask();
   const std::uint64_t off = va & 0xFFFull;
+  const AccessType access = write ? AccessType::Write : AccessType::Read;
   const TlbEntry* hit = nullptr;
-  if (tlb_last_data_.valid && tlb_last_data_.va_page == page) {
+  if (tlb_last_data_.valid && tlb_last_data_.va_page == page && tlb_last_data_.asid == asid) {
     hit = &tlb_last_data_;
   } else {
     ++perf_counters_.tlb_lookups;
-    hit = tlb_lookup(page);
+    hit = tlb_lookup(page, asid);
     if (hit != nullptr) {
       tlb_last_data_ = *hit;
       hit = &tlb_last_data_;
@@ -529,12 +532,27 @@ bool Cpu::translate_data_address_fast(std::uint64_t va, bool write, std::uint64_
   }
   if (hit != nullptr) {
     ++perf_counters_.tlb_hits;
-    if (write && !hit->writable) {
-      last_translation_fault_ = TranslationFault{.kind = TranslationFault::Kind::Permission, .level = hit->level, .write = true};
+    TranslationResult result{};
+    result.pa = (hit->pa_page << 12) | off;
+    result.asid = hit->asid;
+    result.level = hit->level;
+    result.attr_index = hit->attr_index;
+    result.mair_attr = hit->mair_attr;
+    result.writable = hit->writable;
+    result.user_accessible = hit->user_accessible;
+    result.executable = hit->executable;
+    result.pxn = hit->pxn;
+    result.uxn = hit->uxn;
+    result.memory_type = hit->memory_type;
+    result.leaf_shareability = hit->leaf_shareability;
+    result.walk_attrs = hit->walk_attrs;
+    TranslationFault fault{};
+    if (!access_permitted(result, access, result.level, &fault)) {
+      last_translation_fault_ = fault;
       return false;
     }
     if (out_pa != nullptr) {
-      *out_pa = (hit->pa_page << 12) | off;
+      *out_pa = result.pa;
     }
     return true;
   }
@@ -542,7 +560,6 @@ bool Cpu::translate_data_address_fast(std::uint64_t va, bool write, std::uint64_
   ++perf_counters_.tlb_misses;
   TranslationResult result{};
   TranslationFault fault{};
-  const AccessType access = write ? AccessType::Write : AccessType::Read;
   if (!walk_page_tables(va, access, &result, &fault)) {
     last_translation_fault_ = fault;
     return false;
@@ -1461,6 +1478,56 @@ void Cpu::set_cntvct(std::uint64_t value) {
   sysregs_.set_cntvct(value);
 }
 
+bool Cpu::fp_asimd_traps_enabled_for_current_el() const {
+  const std::uint32_t fpen = static_cast<std::uint32_t>((sysregs_.cpacr_el1() >> 20) & 0x3u);
+  if (sysregs_.in_el0()) {
+    return fpen != 0x3u;
+  }
+  return fpen == 0x0u || fpen == 0x2u;
+}
+
+bool Cpu::insn_uses_fp_asimd(std::uint32_t insn) const {
+  if ((insn & 0x0E000000u) == 0x0E000000u ||
+      (insn & 0x1E000000u) == 0x1E000000u) {
+    return true;
+  }
+
+  if ((insn & 0xFFE00000u) == 0xD5200000u || (insn & 0xFFE00000u) == 0xD5000000u) {
+    const std::uint32_t op0 = (insn >> 19) & 0x3u;
+    const std::uint32_t op1 = (insn >> 16) & 0x7u;
+    const std::uint32_t crn = (insn >> 12) & 0xFu;
+    const std::uint32_t crm = (insn >> 8) & 0xFu;
+    const std::uint32_t op2 = (insn >> 5) & 0x7u;
+    const std::uint32_t key = sysreg_key(op0, op1, crn, crm, op2);
+    return key == sysreg_key(3u, 3u, 4u, 4u, 0u) || // FPCR
+           key == sysreg_key(3u, 3u, 4u, 4u, 1u);   // FPSR
+  }
+
+  if ((insn & 0xFFC00000u) == 0x3D800000u || (insn & 0xFFC00000u) == 0x3DC00000u ||
+      (insn & 0xFFC00000u) == 0x3D000000u || (insn & 0xFFC00000u) == 0x3D400000u ||
+      (insn & 0xFFC00000u) == 0x7D000000u || (insn & 0xFFC00000u) == 0x7D400000u ||
+      (insn & 0xFFC00000u) == 0xBD000000u || (insn & 0xFFC00000u) == 0xBD400000u ||
+      (insn & 0xFFC00000u) == 0xFD000000u || (insn & 0xFFC00000u) == 0xFD400000u ||
+      (insn & 0xFFC00C00u) == 0x3C800C00u || (insn & 0xFFC00C00u) == 0x3CC00C00u ||
+      (insn & 0xFFC00C00u) == 0x3C800400u || (insn & 0xFFC00C00u) == 0x3CC00400u ||
+      (insn & 0xFFE00C00u) == 0x3CA00800u || (insn & 0xFFE00C00u) == 0x3CE00800u ||
+      (insn & 0xFFE00C00u) == 0xBC200800u || (insn & 0xFFE00C00u) == 0xBC600800u ||
+      (insn & 0xFFC00C00u) == 0x3C800000u || (insn & 0xFFC00C00u) == 0x3CC00000u ||
+      (insn & 0xFFC00C00u) == 0xBC000000u || (insn & 0xFFC00C00u) == 0xBC400000u ||
+      (insn & 0xBFFFFC00u) == 0x0C407000u || (insn & 0xBFFFFC00u) == 0x0C007000u ||
+      (insn & 0xBFFFFC00u) == 0x0CDF7000u || (insn & 0xBFFFFC00u) == 0x0C9F7000u ||
+      (insn & 0xBFFFFC00u) == 0x0C408000u || (insn & 0xBFFFFC00u) == 0x0C008000u ||
+      (insn & 0xBFFFFC00u) == 0x0CDF8000u || (insn & 0xBFFFFC00u) == 0x0C9F8000u) {
+    return true;
+  }
+
+  return false;
+}
+
+void Cpu::trap_fp_asimd_access() {
+  enter_sync_exception(pc_ - 4u, 0x07u, 0u, false, 0u);
+}
+
 void Cpu::perf_flush_tlb_all() {
   tlb_flush_all();
   invalidate_decode_all();
@@ -1635,6 +1702,11 @@ bool Cpu::step() {
   }
   if ((insn & 0xFFE0001Fu) == 0xD4000001u) { // SVC #imm16
     enter_sync_exception(this_pc, 0x15u, (insn >> 5) & 0xFFFFu, false, 0);
+    return true;
+  }
+
+  if (fp_asimd_traps_enabled_for_current_el() && insn_uses_fp_asimd(insn)) {
+    trap_fp_asimd_access();
     return true;
   }
 
@@ -1829,10 +1901,12 @@ bool Cpu::translate_address(std::uint64_t va,
 
   if (!sysregs_.mmu_enabled()) {
     out_result->pa = va;
+    out_result->asid = current_translation_asid(false);
     out_result->level = 3;
     out_result->attr_index = 0;
     out_result->mair_attr = 0;
     out_result->writable = true;
+    out_result->user_accessible = true;
     out_result->executable = true;
     out_result->pxn = false;
     out_result->uxn = false;
@@ -1842,17 +1916,19 @@ bool Cpu::translate_address(std::uint64_t va,
     return true;
   }
 
+  const bool va_upper = (va >> 63) != 0;
+  const std::uint16_t asid = current_translation_asid(va_upper);
   const std::uint64_t page = (va >> 12) & tlb_page_mask();
   const std::uint64_t off = va & 0xFFFull;
 
   if (use_tlb) {
     const TlbEntry* hit = nullptr;
     TlbEntry* hot = (access == AccessType::Fetch) ? &tlb_last_fetch_ : &tlb_last_data_;
-    if (hot->valid && hot->va_page == page) {
+    if (hot->valid && hot->va_page == page && hot->asid == asid) {
       hit = hot;
     } else {
       ++perf_counters_.tlb_lookups;
-      hit = tlb_lookup(page);
+      hit = tlb_lookup(page, asid);
       if (hit != nullptr) {
         *hot = *hit;
       }
@@ -1860,10 +1936,12 @@ bool Cpu::translate_address(std::uint64_t va,
     if (hit != nullptr) {
       ++perf_counters_.tlb_hits;
       out_result->pa = (hit->pa_page << 12) | off;
+      out_result->asid = hit->asid;
       out_result->level = hit->level;
       out_result->attr_index = hit->attr_index;
       out_result->mair_attr = hit->mair_attr;
       out_result->writable = hit->writable;
+      out_result->user_accessible = hit->user_accessible;
       out_result->executable = hit->executable;
       out_result->pxn = hit->pxn;
       out_result->uxn = hit->uxn;
@@ -2050,7 +2128,9 @@ bool Cpu::walk_page_tables(std::uint64_t va,
       }
 
       const bool af = ((desc >> 10) & 0x1u) != 0;
-      const bool leaf_ro = ((desc >> 7) & 0x1u) != 0;
+      const std::uint8_t ap = static_cast<std::uint8_t>((desc >> 6) & 0x3u);
+      const bool leaf_ro = (ap & 0x2u) != 0;
+      const bool user_accessible = !inherited.user_no_access && ((ap & 0x1u) != 0);
       const bool dbm = ((desc >> 51) & 0x1u) != 0;
       const bool pxn = ((desc >> 53) & 0x1u) != 0;
       const bool uxn = ((desc >> 54) & 0x1u) != 0;
@@ -2067,10 +2147,12 @@ bool Cpu::walk_page_tables(std::uint64_t va,
       }
 
       out_result->pa = page_base | (va & 0xFFFull);
+      out_result->asid = current_translation_asid(va_upper);
       out_result->level = static_cast<std::uint8_t>(level);
       out_result->attr_index = attr_index;
       out_result->mair_attr = mair_attr;
       out_result->writable = !(inherited.write_protect || (leaf_ro && !dbm));
+      out_result->user_accessible = user_accessible;
       out_result->pxn = pxn || inherited.pxn;
       out_result->uxn = uxn || inherited.uxn;
       out_result->executable = !out_result->pxn;
@@ -2093,6 +2175,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
 
     if (bit1) {
       inherited.write_protect = inherited.write_protect || (((desc >> 62) & 0x1u) != 0);
+      inherited.user_no_access = inherited.user_no_access || (((desc >> 61) & 0x1u) != 0);
       inherited.uxn = inherited.uxn || (((desc >> 60) & 0x1u) != 0);
       inherited.pxn = inherited.pxn || (((desc >> 59) & 0x1u) != 0);
       table_base = desc & 0x0000FFFFFFFFF000ull;
@@ -2117,7 +2200,9 @@ bool Cpu::walk_page_tables(std::uint64_t va,
     }
 
     const bool af = ((desc >> 10) & 0x1u) != 0;
-    const bool leaf_ro = ((desc >> 7) & 0x1u) != 0;
+    const std::uint8_t ap = static_cast<std::uint8_t>((desc >> 6) & 0x3u);
+    const bool leaf_ro = (ap & 0x2u) != 0;
+    const bool user_accessible = !inherited.user_no_access && ((ap & 0x1u) != 0);
     const bool dbm = ((desc >> 51) & 0x1u) != 0;
     const bool pxn = ((desc >> 53) & 0x1u) != 0;
     const bool uxn = ((desc >> 54) & 0x1u) != 0;
@@ -2137,10 +2222,12 @@ bool Cpu::walk_page_tables(std::uint64_t va,
     }
 
     out_result->pa = pa_base | (va & block_mask);
+    out_result->asid = current_translation_asid(va_upper);
     out_result->level = static_cast<std::uint8_t>(level);
     out_result->attr_index = attr_index;
     out_result->mair_attr = mair_attr;
     out_result->writable = !(inherited.write_protect || (leaf_ro && !dbm));
+    out_result->user_accessible = user_accessible;
     out_result->pxn = pxn || inherited.pxn;
     out_result->uxn = uxn || inherited.uxn;
     out_result->executable = !out_result->pxn;
@@ -2255,16 +2342,59 @@ void Cpu::tlb_flush_all() {
   tlb_next_replace_.fill(0);
 }
 
+std::uint16_t Cpu::mmu_asid_mask() const {
+  const std::uint8_t asid_bits_field = static_cast<std::uint8_t>((sysregs_.id_aa64mmfr0_el1() >> 4) & 0xFu);
+  return asid_bits_field == 2u ? 0xFFFFu : 0x00FFu;
+}
+
+std::uint16_t Cpu::ttbr_asid(std::uint64_t ttbr) const {
+  return static_cast<std::uint16_t>((ttbr >> 48) & mmu_asid_mask());
+}
+
+std::uint16_t Cpu::current_translation_asid(bool va_upper) const {
+  (void)va_upper;
+  const bool a1 = ((sysregs_.tcr_el1() >> 22) & 0x1u) != 0;
+  const std::uint64_t ttbr = a1 ? sysregs_.ttbr1_el1() : sysregs_.ttbr0_el1();
+  return ttbr_asid(ttbr);
+}
+
+std::uint16_t Cpu::tlbi_operand_asid(std::uint64_t operand) const {
+  const std::uint16_t high = static_cast<std::uint16_t>((operand >> 48) & mmu_asid_mask());
+  if (high != 0) {
+    return high;
+  }
+  return static_cast<std::uint16_t>(operand & mmu_asid_mask());
+}
+
+void Cpu::tlb_flush_asid(std::uint16_t asid) {
+  asid &= mmu_asid_mask();
+  if (tlb_last_fetch_.valid && tlb_last_fetch_.asid == asid) {
+    tlb_last_fetch_.valid = false;
+  }
+  if (tlb_last_data_.valid && tlb_last_data_.asid == asid) {
+    tlb_last_data_.valid = false;
+  }
+  for (auto& set : tlb_entries_) {
+    for (auto& entry : set) {
+      if (entry.valid && entry.asid == asid) {
+        entry.valid = false;
+      }
+    }
+  }
+}
+
 void Cpu::tlb_insert(std::uint64_t va_page, const TranslationResult& result) {
   ++perf_counters_.tlb_inserts;
   TlbEntry entry{};
   entry.valid = true;
   entry.va_page = va_page;
   entry.pa_page = result.pa >> 12;
+  entry.asid = static_cast<std::uint16_t>(result.asid & mmu_asid_mask());
   entry.level = result.level;
   entry.attr_index = result.attr_index;
   entry.mair_attr = result.mair_attr;
   entry.writable = result.writable;
+  entry.user_accessible = result.user_accessible;
   entry.executable = result.executable;
   entry.pxn = result.pxn;
   entry.uxn = result.uxn;
@@ -2281,7 +2411,7 @@ void Cpu::tlb_insert_entry(std::uint64_t va_page, const TlbEntry& entry) {
   }
   auto& set = tlb_entries_[tlb_set_index(va_page)];
   for (TlbEntry& slot : set) {
-    if (slot.valid && slot.va_page == va_page) {
+    if (slot.valid && slot.va_page == va_page && slot.asid == entry.asid) {
       TlbEntry updated = entry;
       updated.valid = true;
       updated.va_page = va_page;
@@ -2306,27 +2436,29 @@ void Cpu::tlb_insert_entry(std::uint64_t va_page, const TlbEntry& entry) {
   next = static_cast<std::uint8_t>((next + 1u) % kTlbWays);
 }
 
-void Cpu::tlb_invalidate_page(std::uint64_t va_page) {
-  if (tlb_last_fetch_.valid && tlb_last_fetch_.va_page == va_page) {
+void Cpu::tlb_invalidate_page(std::uint64_t va_page, std::uint16_t asid, bool match_asid) {
+  asid &= mmu_asid_mask();
+  if (tlb_last_fetch_.valid && tlb_last_fetch_.va_page == va_page && (!match_asid || tlb_last_fetch_.asid == asid)) {
     tlb_last_fetch_.valid = false;
   }
-  if (tlb_last_data_.valid && tlb_last_data_.va_page == va_page) {
+  if (tlb_last_data_.valid && tlb_last_data_.va_page == va_page && (!match_asid || tlb_last_data_.asid == asid)) {
     tlb_last_data_.valid = false;
   }
   auto& set = tlb_entries_[tlb_set_index(va_page)];
   for (TlbEntry& entry : set) {
-    if (entry.valid && entry.va_page == va_page) {
+    if (entry.valid && entry.va_page == va_page && (!match_asid || entry.asid == asid)) {
       entry.valid = false;
-      return;
     }
   }
 }
+
 void Cpu::tlb_flush_va(std::uint64_t va) {
   ++perf_counters_.tlb_flush_va;
+  const std::uint16_t asid = tlbi_operand_asid(va);
   // Linux feeds TLBI-by-VA operands in architected VA>>12 form, while some
   // local tests historically passed raw VAs. Accept both encodings here.
-  tlb_invalidate_page((va >> 12) & tlb_page_mask());
-  tlb_invalidate_page(va & tlb_page_mask());
+  tlb_invalidate_page((va >> 12) & tlb_page_mask(), asid, true);
+  tlb_invalidate_page(va & tlb_page_mask(), asid, true);
 }
 
 std::uint64_t Cpu::q_reg_lane(std::uint32_t idx, std::size_t lane) const {
@@ -2454,8 +2586,6 @@ bool Cpu::exec_system(std::uint32_t insn) {
   }
 
   // TLBI VAE1/VAE1IS/VALE1/VALE1IS/VAAE1/VAAE1IS/VAALE1/VAALE1IS, Xt.
-  // ASID tagging is not modelled yet, so the ASID-aware variants collapse to
-  // the same per-VA invalidation behaviour.
   if ((insn & 0xFFFFFFE0u) == 0xD5088720u ||
       (insn & 0xFFFFFFE0u) == 0xD5088320u ||
       (insn & 0xFFFFFFE0u) == 0xD50887A0u ||
@@ -2465,16 +2595,23 @@ bool Cpu::exec_system(std::uint32_t insn) {
       (insn & 0xFFFFFFE0u) == 0xD50887E0u ||
       (insn & 0xFFFFFFE0u) == 0xD50883E0u) {
     const std::uint32_t rt = insn & 0x1Fu;
-    tlb_flush_va(reg(rt));
-    invalidate_decode_va(reg(rt), 1u);
+    const std::uint64_t operand = reg(rt);
+    const bool all_asids = (insn & 0x80u) != 0;
+    if (all_asids) {
+      ++perf_counters_.tlb_flush_va;
+      tlb_invalidate_page((operand >> 12) & tlb_page_mask(), 0u, false);
+      tlb_invalidate_page(operand & tlb_page_mask(), 0u, false);
+    } else {
+      tlb_flush_va(operand);
+    }
+    invalidate_decode_va(operand, 1u);
     return true;
   }
 
   // TLBI ASIDE1 / ASIDE1IS, Xt.
-  // ASID tagging is not modelled yet, so invalidate the whole software TLB.
   if ((insn & 0xFFFFFFE0u) == 0xD5088740u ||
       (insn & 0xFFFFFFE0u) == 0xD5088340u) {
-    tlb_flush_all();
+    tlb_flush_asid(tlbi_operand_asid(reg(insn & 0x1Fu)));
     invalidate_decode_all();
     return true;
   }
@@ -2880,10 +3017,13 @@ bool Cpu::exec_system(std::uint32_t insn) {
       return false;
     }
 
-    // Flush software TLB on translation regime changes.
+    // Translation regime changes invalidate decode state. Keep ASID-tagged TLB
+    // entries across TTBR writes so software can switch address spaces by ASID.
+    if (key == ((3u << 14) | (0u << 11) | (2u << 7) | (0u << 3) | 0u) || // TTBR0_EL1
+        key == ((3u << 14) | (0u << 11) | (2u << 7) | (0u << 3) | 1u)) { // TTBR1_EL1
+      invalidate_decode_all();
+    }
     if (key == ((3u << 14) | (0u << 11) | (1u << 7) | (0u << 3) | 0u) || // SCTLR_EL1
-        key == ((3u << 14) | (0u << 11) | (2u << 7) | (0u << 3) | 0u) || // TTBR0_EL1
-        key == ((3u << 14) | (0u << 11) | (2u << 7) | (0u << 3) | 1u) || // TTBR1_EL1
         key == ((3u << 14) | (0u << 11) | (2u << 7) | (0u << 3) | 2u)) { // TCR_EL1
       tlb_flush_all();
       invalidate_decode_all();
@@ -2961,6 +3101,36 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     using FloatT = decltype(lhs);
     if (std::isnan(lhs) || std::isnan(rhs)) {
       return std::numeric_limits<FloatT>::quiet_NaN();
+    }
+    return lhs > rhs ? lhs : rhs;
+  };
+  const auto vector_fp_min_nm = [](auto lhs, auto rhs) {
+    using FloatT = decltype(lhs);
+    const bool lhs_nan = std::isnan(lhs);
+    const bool rhs_nan = std::isnan(rhs);
+    if (lhs_nan && rhs_nan) {
+      return std::numeric_limits<FloatT>::quiet_NaN();
+    }
+    if (lhs_nan) {
+      return rhs;
+    }
+    if (rhs_nan) {
+      return lhs;
+    }
+    return lhs < rhs ? lhs : rhs;
+  };
+  const auto vector_fp_max_nm = [](auto lhs, auto rhs) {
+    using FloatT = decltype(lhs);
+    const bool lhs_nan = std::isnan(lhs);
+    const bool rhs_nan = std::isnan(rhs);
+    if (lhs_nan && rhs_nan) {
+      return std::numeric_limits<FloatT>::quiet_NaN();
+    }
+    if (lhs_nan) {
+      return rhs;
+    }
+    if (rhs_nan) {
+      return lhs;
     }
     return lhs > rhs ? lhs : rhs;
   };
@@ -3372,7 +3542,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
-  if ((insn & 0x9F20FC00u) == 0x0E20D400u) { // FADD/FSUB (vector)
+  if ((insn & 0xBF20FC00u) == 0x0E20D400u) { // FADD/FSUB (vector)
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
     const bool is_sub = ((insn >> 23) & 1u) != 0u;
     std::uint32_t esize_bits = 0;
@@ -3473,6 +3643,122 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
         const double value = is_min ? vector_fp_min(a, b) : vector_fp_max(a, b);
         vector_set_elem(dst, 64u, lane, std::bit_cast<std::uint64_t>(value));
       }
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0x9F20FC00u) == 0x0E20CC00u) { // FMLA/FMLS (vector)
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const bool is_sub = ((insn >> 23) & 1u) != 0u;
+    std::uint32_t esize_bits = 0;
+    std::uint32_t lanes = 0;
+    if (!vector_fp_shape(insn, esize_bits, lanes)) {
+      return false;
+    }
+    const auto acc = qregs_[rd];
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+      if (esize_bits == 32u) {
+        const float a = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(acc, 32u, lane)));
+        const float b = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)));
+        const float c = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane)));
+        const float value = is_sub ? (a - (b * c)) : (a + (b * c));
+        vector_set_elem(dst, 32u, lane, std::bit_cast<std::uint32_t>(value));
+      } else {
+        const double a = std::bit_cast<double>(vector_get_elem(acc, 64u, lane));
+        const double b = std::bit_cast<double>(vector_get_elem(lhs, 64u, lane));
+        const double c = std::bit_cast<double>(vector_get_elem(rhs, 64u, lane));
+        const double value = is_sub ? (a - (b * c)) : (a + (b * c));
+        vector_set_elem(dst, 64u, lane, std::bit_cast<std::uint64_t>(value));
+      }
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0x9F20FC00u) == 0x0E20C400u) { // FMAXNM/FMINNM (vector)
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const bool is_min = ((insn >> 23) & 1u) != 0u;
+    std::uint32_t esize_bits = 0;
+    std::uint32_t lanes = 0;
+    if (!vector_fp_shape(insn, esize_bits, lanes)) {
+      return false;
+    }
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+      if (esize_bits == 32u) {
+        const float a = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)));
+        const float b = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane)));
+        const float value = is_min ? vector_fp_min_nm(a, b) : vector_fp_max_nm(a, b);
+        vector_set_elem(dst, 32u, lane, std::bit_cast<std::uint32_t>(value));
+      } else {
+        const double a = std::bit_cast<double>(vector_get_elem(lhs, 64u, lane));
+        const double b = std::bit_cast<double>(vector_get_elem(rhs, 64u, lane));
+        const double value = is_min ? vector_fp_min_nm(a, b) : vector_fp_max_nm(a, b);
+        vector_set_elem(dst, 64u, lane, std::bit_cast<std::uint64_t>(value));
+      }
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xBF20FC00u) == 0x2E20D400u) { // FABD (vector)
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    std::uint32_t esize_bits = 0;
+    std::uint32_t lanes = 0;
+    if (!vector_fp_shape(insn, esize_bits, lanes)) {
+      return false;
+    }
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+      if (esize_bits == 32u) {
+        const float a = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)));
+        const float b = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane)));
+        vector_set_elem(dst, 32u, lane, std::bit_cast<std::uint32_t>(std::fabs(a - b)));
+      } else {
+        const double a = std::bit_cast<double>(vector_get_elem(lhs, 64u, lane));
+        const double b = std::bit_cast<double>(vector_get_elem(rhs, 64u, lane));
+        vector_set_elem(dst, 64u, lane, std::bit_cast<std::uint64_t>(std::fabs(a - b)));
+      }
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0x9F20FC00u) == 0x0E20EC00u) { // FACGE/FACGT (vector)
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const bool is_gt = ((insn >> 23) & 1u) != 0u;
+    std::uint32_t esize_bits = 0;
+    std::uint32_t lanes = 0;
+    if (!vector_fp_shape(insn, esize_bits, lanes)) {
+      return false;
+    }
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+      bool predicate = false;
+      if (esize_bits == 32u) {
+        const float a = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)));
+        const float b = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane)));
+        if (!std::isnan(a) && !std::isnan(b)) {
+          predicate = is_gt ? (std::fabs(a) > std::fabs(b)) : (std::fabs(a) >= std::fabs(b));
+        }
+      } else {
+        const double a = std::bit_cast<double>(vector_get_elem(lhs, 64u, lane));
+        const double b = std::bit_cast<double>(vector_get_elem(rhs, 64u, lane));
+        if (!std::isnan(a) && !std::isnan(b)) {
+          predicate = is_gt ? (std::fabs(a) > std::fabs(b)) : (std::fabs(a) >= std::fabs(b));
+        }
+      }
+      vector_set_elem(dst, esize_bits, lane, vector_fp_compare_mask(predicate, esize_bits));
     }
     qregs_[rd] = dst;
     return true;
@@ -3686,6 +3972,78 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     for (std::uint32_t i = 0; i < lanes / 2u; ++i) {
       vector_set_elem(dst, esize_bits, i * 2u, vector_get_elem(lhs, esize_bits, i * 2u));
       vector_set_elem(dst, esize_bits, i * 2u + 1u, vector_get_elem(rhs, esize_bits, i * 2u));
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xBF20FC00u) == 0x0E007800u) { // ZIP2 (vector)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t esize_bits = 8u << size;
+    const std::uint32_t total_bits = q ? 128u : 64u;
+    if (esize_bits > total_bits) {
+      return false;
+    }
+    const std::uint32_t lanes = total_bits / esize_bits;
+    if ((lanes & 1u) != 0u) {
+      return false;
+    }
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t i = 0; i < lanes / 2u; ++i) {
+      vector_set_elem(dst, esize_bits, i * 2u, vector_get_elem(lhs, esize_bits, i + lanes / 2u));
+      vector_set_elem(dst, esize_bits, i * 2u + 1u, vector_get_elem(rhs, esize_bits, i + lanes / 2u));
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xBF20FC00u) == 0x0E005800u) { // UZP2 (vector)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t esize_bits = 8u << size;
+    const std::uint32_t total_bits = q ? 128u : 64u;
+    if (esize_bits > total_bits) {
+      return false;
+    }
+    const std::uint32_t lanes = total_bits / esize_bits;
+    if ((lanes & 1u) != 0u) {
+      return false;
+    }
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t i = 0; i < lanes / 2u; ++i) {
+      vector_set_elem(dst, esize_bits, i, vector_get_elem(lhs, esize_bits, i * 2u + 1u));
+      vector_set_elem(dst, esize_bits, i + (lanes / 2u), vector_get_elem(rhs, esize_bits, i * 2u + 1u));
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xBF20FC00u) == 0x0E006800u) { // TRN2 (vector)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t esize_bits = 8u << size;
+    const std::uint32_t total_bits = q ? 128u : 64u;
+    if (esize_bits > total_bits) {
+      return false;
+    }
+    const std::uint32_t lanes = total_bits / esize_bits;
+    if ((lanes & 1u) != 0u) {
+      return false;
+    }
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t i = 0; i < lanes / 2u; ++i) {
+      vector_set_elem(dst, esize_bits, i * 2u, vector_get_elem(lhs, esize_bits, i * 2u + 1u));
+      vector_set_elem(dst, esize_bits, i * 2u + 1u, vector_get_elem(rhs, esize_bits, i * 2u + 1u));
     }
     qregs_[rd] = dst;
     return true;
@@ -7059,10 +7417,12 @@ bool Cpu::save_state(std::ostream& out) const {
   };
   const auto write_tlb_entry = [&](const TlbEntry& entry) {
     return snapshot_io::write(out, entry.pa_page) &&
+           snapshot_io::write(out, entry.asid) &&
            snapshot_io::write(out, entry.level) &&
            snapshot_io::write(out, entry.attr_index) &&
            snapshot_io::write(out, entry.mair_attr) &&
            snapshot_io::write_bool(out, entry.writable) &&
+           snapshot_io::write_bool(out, entry.user_accessible) &&
            snapshot_io::write_bool(out, entry.executable) &&
            snapshot_io::write_bool(out, entry.pxn) &&
            snapshot_io::write_bool(out, entry.uxn) &&
@@ -7150,12 +7510,27 @@ bool Cpu::load_state(std::istream& in, std::uint32_t version) {
     std::uint8_t walk_inner = 0;
     std::uint8_t walk_outer = 0;
     std::uint8_t walk_shareability = 0;
-    if (!snapshot_io::read(in, entry.pa_page) || !snapshot_io::read(in, entry.level) || !snapshot_io::read(in, entry.attr_index) || !snapshot_io::read(in, entry.mair_attr) ||
+    if (!snapshot_io::read(in, entry.pa_page)) {
+      return false;
+    }
+    if (version >= 7) {
+      if (!snapshot_io::read(in, entry.asid) || !snapshot_io::read(in, entry.level) || !snapshot_io::read(in, entry.attr_index) || !snapshot_io::read(in, entry.mair_attr) ||
+          !snapshot_io::read_bool(in, entry.writable) || !snapshot_io::read_bool(in, entry.user_accessible) || !snapshot_io::read_bool(in, entry.executable) || !snapshot_io::read_bool(in, entry.pxn) ||
+          !snapshot_io::read_bool(in, entry.uxn) || !snapshot_io::read(in, memory_type) || !snapshot_io::read(in, leaf_shareability) ||
+          !snapshot_io::read(in, walk_inner) || !snapshot_io::read(in, walk_outer) || !snapshot_io::read(in, walk_shareability) ||
+          !snapshot_io::read(in, entry.walk_attrs.ips_bits)) {
+        return false;
+      }
+    } else if (!snapshot_io::read(in, entry.level) || !snapshot_io::read(in, entry.attr_index) || !snapshot_io::read(in, entry.mair_attr) ||
         !snapshot_io::read_bool(in, entry.writable) || !snapshot_io::read_bool(in, entry.executable) || !snapshot_io::read_bool(in, entry.pxn) ||
         !snapshot_io::read_bool(in, entry.uxn) || !snapshot_io::read(in, memory_type) || !snapshot_io::read(in, leaf_shareability) ||
         !snapshot_io::read(in, walk_inner) || !snapshot_io::read(in, walk_outer) || !snapshot_io::read(in, walk_shareability) ||
         !snapshot_io::read(in, entry.walk_attrs.ips_bits)) {
       return false;
+    }
+    if (version < 7) {
+      entry.asid = 0;
+      entry.user_accessible = false;
     }
     entry.memory_type = static_cast<MemoryType>(memory_type);
     entry.leaf_shareability = static_cast<Shareability>(leaf_shareability);

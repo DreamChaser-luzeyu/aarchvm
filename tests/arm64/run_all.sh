@@ -87,9 +87,15 @@ run fpsimd_ins_xtl.bin 300000
 run fpsimd_misc_more.bin 300000
 run fpsimd_arith_shift_perm.bin 300000
 run fpsimd_fp_vector.bin 400000
+run fpsimd_more_perm_fp.bin 400000
 run fpsimd_structured_ls.bin 400000
 run fpsimd_widen_sat.bin 400000
+run cpacr_fp_trap.bin 300000
 run pstate_pan.bin 200000
+run id_aa64_feature_regs.bin 200000
+run mmu_el0_ap_fault.bin 4000000
+run mmu_pan_user_access.bin 4000000
+run mmu_tlb_asid_scope.bin 4000000
 run svc_sysreg_minimal.bin 300000
 run lse_atomics.bin 400000
 run casp_pair.bin 400000
