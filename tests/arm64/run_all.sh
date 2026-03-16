@@ -81,6 +81,8 @@ run fpsimd_minimal.bin 400000
 run fpsimd_mvni.bin 400000
 run fpsimd_logic_more.bin 400000
 run fp_scalar_ls.bin 400000
+run fp_scalar_regoffset.bin 400000
+run fp_scalar_unscaled.bin 400000
 run fpsimd_ext.bin 400000
 run fp_scalar_elem_ls.bin 400000
 run fpsimd_uminp.bin 400000
@@ -107,6 +109,7 @@ run fpsimd_more_perm_fp.bin 400000
 run fpsimd_structured_ls.bin 400000
 run fpsimd_widen_sat.bin 400000
 run cpacr_fp_trap.bin 300000
+run cpacr_fp_mem_trap.bin 300000
 run pstate_pan.bin 200000
 run id_aa64_feature_regs.bin 200000
 run mmu_el0_ap_fault.bin 4000000

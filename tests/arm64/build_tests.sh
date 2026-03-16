@@ -33,6 +33,8 @@ build_asm_prog fpsimd_minimal
 build_asm_prog fpsimd_mvni
 build_asm_prog fpsimd_logic_more
 build_asm_prog fp_scalar_ls
+build_asm_prog fp_scalar_regoffset
+build_asm_prog fp_scalar_unscaled
 build_asm_prog fpsimd_ext
 build_asm_prog fp_scalar_elem_ls
 build_asm_prog fpsimd_uminp
@@ -59,6 +61,7 @@ build_asm_prog fpsimd_more_perm_fp
 build_asm_prog fpsimd_structured_ls
 build_asm_prog fpsimd_widen_sat
 build_asm_prog cpacr_fp_trap
+build_asm_prog cpacr_fp_mem_trap
 build_asm_prog pstate_pan
 build_asm_prog id_aa64_feature_regs
 build_asm_prog svc_sysreg_minimal

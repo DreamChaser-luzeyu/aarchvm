@@ -617,6 +617,33 @@ void SoC::reset_perf_measurement_state() {
 }
 
 bool SoC::run(std::size_t max_steps) {
+  const auto log_cpu_halt = [&](const Cpu& cpu) {
+    std::cerr << "CPU-HALT cpu=" << cpu.cpu_index()
+              << " mpidr=0x" << std::hex << cpu.mpidr_el1()
+              << " pc=0x" << cpu.pc()
+              << " sp=0x" << cpu.sp()
+              << " pstate=0x" << cpu.pstate_bits()
+              << std::dec
+              << " steps(cpu)=" << cpu.steps()
+              << " steps(global)=" << global_steps_
+              << " exc_depth=" << cpu.exception_depth()
+              << " wfi=" << (cpu.waiting_for_interrupt() ? 1 : 0)
+              << " wfe=" << (cpu.waiting_for_event() ? 1 : 0)
+              << '\n';
+  };
+  const auto all_powered_on_cpus_halted = [&]() {
+    bool any_powered_on = false;
+    for (std::size_t i = 0; i < cpus_.size(); ++i) {
+      if (!cpu_powered_on_[i]) {
+        continue;
+      }
+      any_powered_on = true;
+      if (!cpus_[i]->halted()) {
+        return false;
+      }
+    }
+    return any_powered_on;
+  };
   auto sync_devices = [&]() {
     ++local_perf_counters_.sync_devices;
     const std::uint64_t steps = timer_steps_;
@@ -678,7 +705,12 @@ bool SoC::run(std::size_t max_steps) {
         ++global_steps_;
         ++timer_steps_;
         if (!ok) {
-          return cpu.halted();
+          if (cpu.halted()) {
+            log_cpu_halt(cpu);
+            request_stop();
+            return true;
+          }
+          return false;
         }
         if (stop_requested_) {
           return true;
@@ -711,6 +743,9 @@ bool SoC::run(std::size_t max_steps) {
       const bool ok = cpu->step();
       ++global_steps_;
       --remaining;
+      if (!ok && cpu->halted()) {
+        log_cpu_halt(*cpu);
+      }
       if (!ok && !cpu->halted()) {
         return false;
       }
@@ -720,6 +755,9 @@ bool SoC::run(std::size_t max_steps) {
     }
 
     if (!any_active) {
+      if (all_powered_on_cpus_halted()) {
+        request_stop();
+      }
       break;
     }
     ++timer_steps_;

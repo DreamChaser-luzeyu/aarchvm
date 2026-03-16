@@ -25,6 +25,8 @@ cat /proc/version
 ps
 dmesg -s 128 >/dev/null
 echo DMESG-OK
+dmesg | grep hang >/dev/null
+echo GREP-HANG-OK
 tmp=/tmp/dmesg-stress.log
 : > "$tmp"
 echo DMESG-STRESS-BEGIN
@@ -101,6 +103,7 @@ check 'Linux version 6.12.76'
 check 'busybox'
 check 'PID   USER     TIME  COMMAND'
 check 'DMESG-OK'
+check 'GREP-HANG-OK'
 check 'DMESG-STRESS PASS'
 check 'PING 127.0.0.1 (127.0.0.1): 56 data bytes'
 check 'Filesystem           1K-blocks'

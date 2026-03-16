@@ -1,3 +1,32 @@
+# 修改日志 2026-03-16 18:06
+
+## 本轮修改
+
+- 在 [src/soc.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/soc.cpp) 为 CPU `halted()` 路径补上明确的 `CPU-HALT` 日志，输出 `cpu/mpidr/pc/sp/pstate/steps/exc_depth/wfi/wfe` 等关键信息，避免 guest 已停机时从外部看起来像“卡住”。
+- 在 [src/main.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/main.cpp) 为 `Simulation stopped unexpectedly` 补充诊断细节，统一打印当前 `pc/sp/pstate/steps/exc_depth/wfi/wfe`。
+- 在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 补齐了 scalar FP memory load/store 的一批遗漏实现：包括 `B/H/D` 的 unscaled 访存、`B/H` 的 pre/post-index，以及 `B/H/D/Q` 的 register-offset 访存，修复了 Linux 用户态 `dmesg | grep hang` 会落到 `Illegal instruction` 的问题。
+- 继续修复与这批指令相邻的处理器行为缺口：`insn_uses_fp_asimd()` 现在已覆盖完整的 scalar FP memory `unsigned-imm / unscaled / pre/post-index / register-offset` 家族，使 `CPACR_EL1.FPEN` 禁用 FP/AdvSIMD 时，这些访存指令也会正确触发 FP trap，而不是错误地直接执行。
+- 新增裸机单测 [tests/arm64/fp_scalar_unscaled.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_scalar_unscaled.S) 与 [tests/arm64/fp_scalar_regoffset.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_scalar_regoffset.S)，分别覆盖 scalar FP unscaled 与 register-offset 访存的成功路径。
+- 新增裸机单测 [tests/arm64/cpacr_fp_mem_trap.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/cpacr_fp_mem_trap.S)，专门验证 `ldur d` 与 `str d, [xN, xM]` 在 EL1/EL0 下会受到 `CPACR_EL1.FPEN` 控制并按规范触发 FP access trap。
+- 更新 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)、[tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh) 和 [tests/linux/run_functional_suite.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/run_functional_suite.sh)，把上述新测试和 Linux `grep hang` 复现点纳入默认回归。
+- 更新 [README.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/README.md) 的 `Features`，补充 halt / unexpected-stop 诊断能力说明。
+
+## 本轮测试
+
+- `./build/aarchvm -bin tests/arm64/out/fp_scalar_unscaled.bin -load 0x0 -entry 0x0 -steps 400000`：通过，输出 `U`。
+- `./build/aarchvm -bin tests/arm64/out/fp_scalar_regoffset.bin -load 0x0 -entry 0x0 -steps 400000`：通过，输出 `R`。
+- `./build/aarchvm -bin tests/arm64/out/cpacr_fp_mem_trap.bin -load 0x0 -entry 0x0 -steps 300000`：通过，输出 `T`。
+- `./build/aarchvm -bin tests/arm64/out/cpacr_fp_trap.bin -load 0x0 -entry 0x0 -steps 300000`：通过，输出 `C`。
+- 基于 [out/linux-usertests-shell-v1.snap](/media/luzeyu/Storage2/FOSS_src/aarchvm/out/linux-usertests-shell-v1.snap) 注入 `dmesg | grep hang >/dev/null; echo GREP-HANG-DONE`：通过，日志中仅出现 `GREP-HANG-DONE`，未出现 `Illegal instruction` 或 `UNIMPL`。
+- `timeout 300s ./tests/arm64/run_all.sh`：通过。
+- `AARCHVM_BUS_FASTPATH=1 AARCHVM_TIMER_SCALE=10 timeout 300s ./tests/linux/run_functional_suite.sh`：通过，包含 `GREP-HANG-OK` 与 `FUNCTIONAL-SUITE PASS`。
+
+## 当前结论
+
+- 这轮 `dmesg | grep hang` 的非法指令根因，确实是 scalar FP memory 访存实现缺口，而不是串口、shell 或 `grep` 本身的问题；相关 Linux 用户态路径现已恢复。
+- 在本轮额外源码审阅里，唯一高置信度且与本次修复直接相邻的 Armv8-A 行为缺口，就是 `CPACR_EL1` 对这批 FP memory 指令的 trap 覆盖不完整；该问题现已一并补齐。
+- 仍不能宣称“已完整实现全部 Armv8-A 强制标准”。当前最明显的剩余风险不再是这条 `grep hang` 路径，而是仓库中一批旧的 FP/AdvSIMD 裸机测试仍然不够严格，部分测试即使以异常深度耗尽停机，`run_all.sh` 也不会失败。因此，后续若继续做 Armv8-A 完整性审阅，优先级最高的是把这些旧 FP/AdvSIMD 测试改成真正断言输出和异常状态，而不是只看“进程没退出码报错”。
+
 # 修改日志 2026-03-16 11:47
 
 ## 本轮修改

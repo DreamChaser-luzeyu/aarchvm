@@ -1677,21 +1677,41 @@ bool Cpu::insn_uses_fp_asimd(std::uint32_t insn) const {
            key == sysreg_key(3u, 3u, 4u, 4u, 1u);   // FPSR
   }
 
-  if ((insn & 0xFFC00000u) == 0x3D800000u || (insn & 0xFFC00000u) == 0x3DC00000u ||
+  const bool fp_ls_unsigned_imm =
+      (insn & 0xFFC00000u) == 0x3D800000u || (insn & 0xFFC00000u) == 0x3DC00000u ||
       (insn & 0xFFC00000u) == 0x3D000000u || (insn & 0xFFC00000u) == 0x3D400000u ||
       (insn & 0xFFC00000u) == 0x7D000000u || (insn & 0xFFC00000u) == 0x7D400000u ||
       (insn & 0xFFC00000u) == 0xBD000000u || (insn & 0xFFC00000u) == 0xBD400000u ||
-      (insn & 0xFFC00000u) == 0xFD000000u || (insn & 0xFFC00000u) == 0xFD400000u ||
+      (insn & 0xFFC00000u) == 0xFD000000u || (insn & 0xFFC00000u) == 0xFD400000u;
+  const bool fp_ls_pre_post =
       (insn & 0xFFC00C00u) == 0x3C800C00u || (insn & 0xFFC00C00u) == 0x3CC00C00u ||
       (insn & 0xFFC00C00u) == 0x3C800400u || (insn & 0xFFC00C00u) == 0x3CC00400u ||
+      (insn & 0xFFC00C00u) == 0x3C400C00u || (insn & 0xFFC00C00u) == 0x3C000C00u ||
+      (insn & 0xFFC00C00u) == 0x3C400400u || (insn & 0xFFC00C00u) == 0x3C000400u ||
+      (insn & 0xFFC00C00u) == 0x7C400C00u || (insn & 0xFFC00C00u) == 0x7C000C00u ||
+      (insn & 0xFFC00C00u) == 0x7C400400u || (insn & 0xFFC00C00u) == 0x7C000400u ||
+      (insn & 0xFFC00C00u) == 0xBC400C00u || (insn & 0xFFC00C00u) == 0xBC000C00u ||
+      (insn & 0xFFC00C00u) == 0xBC400400u || (insn & 0xFFC00C00u) == 0xBC000400u ||
+      (insn & 0xFFC00C00u) == 0xFC400C00u || (insn & 0xFFC00C00u) == 0xFC000C00u ||
+      (insn & 0xFFC00C00u) == 0xFC400400u || (insn & 0xFFC00C00u) == 0xFC000400u;
+  const bool fp_ls_regoffset =
       (insn & 0xFFE00C00u) == 0x3CA00800u || (insn & 0xFFE00C00u) == 0x3CE00800u ||
+      (insn & 0xFFE00C00u) == 0x3C200800u || (insn & 0xFFE00C00u) == 0x3C600800u ||
+      (insn & 0xFFE00C00u) == 0x7C200800u || (insn & 0xFFE00C00u) == 0x7C600800u ||
       (insn & 0xFFE00C00u) == 0xBC200800u || (insn & 0xFFE00C00u) == 0xBC600800u ||
+      (insn & 0xFFE00C00u) == 0xFC200800u || (insn & 0xFFE00C00u) == 0xFC600800u;
+  const bool fp_ls_unscaled =
       (insn & 0xFFC00C00u) == 0x3C800000u || (insn & 0xFFC00C00u) == 0x3CC00000u ||
+      (insn & 0xFFC00C00u) == 0x3C000000u || (insn & 0xFFC00C00u) == 0x3C400000u ||
+      (insn & 0xFFC00C00u) == 0x7C000000u || (insn & 0xFFC00C00u) == 0x7C400000u ||
       (insn & 0xFFC00C00u) == 0xBC000000u || (insn & 0xFFC00C00u) == 0xBC400000u ||
+      (insn & 0xFFC00C00u) == 0xFC000000u || (insn & 0xFFC00C00u) == 0xFC400000u;
+  const bool asimd_structured_ls =
       (insn & 0xBFFFFC00u) == 0x0C407000u || (insn & 0xBFFFFC00u) == 0x0C007000u ||
       (insn & 0xBFFFFC00u) == 0x0CDF7000u || (insn & 0xBFFFFC00u) == 0x0C9F7000u ||
       (insn & 0xBFFFFC00u) == 0x0C408000u || (insn & 0xBFFFFC00u) == 0x0C008000u ||
-      (insn & 0xBFFFFC00u) == 0x0CDF8000u || (insn & 0xBFFFFC00u) == 0x0C9F8000u) {
+      (insn & 0xBFFFFC00u) == 0x0CDF8000u || (insn & 0xBFFFFC00u) == 0x0C9F8000u;
+  if (fp_ls_unsigned_imm || fp_ls_pre_post || fp_ls_regoffset || fp_ls_unscaled || asimd_structured_ls) {
     return true;
   }
 
@@ -6008,10 +6028,22 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     return true;
   }
 
-  if ((insn & 0xFFE00C00u) == 0x3CA00800u || (insn & 0xFFE00C00u) == 0x3CE00800u ||
-      (insn & 0xFFE00C00u) == 0xBC200800u || (insn & 0xFFE00C00u) == 0xBC600800u) {
+  if ((insn & 0xFFE00C00u) == 0x3C200800u || (insn & 0xFFE00C00u) == 0x3C600800u ||
+      (insn & 0xFFE00C00u) == 0x7C200800u || (insn & 0xFFE00C00u) == 0x7C600800u ||
+      (insn & 0xFFE00C00u) == 0xBC200800u || (insn & 0xFFE00C00u) == 0xBC600800u ||
+      (insn & 0xFFE00C00u) == 0xFC200800u || (insn & 0xFFE00C00u) == 0xFC600800u ||
+      (insn & 0xFFE00C00u) == 0x3CA00800u || (insn & 0xFFE00C00u) == 0x3CE00800u) {
     const bool is_load = (insn & 0x00400000u) != 0u;
-    const std::size_t size = (insn & 0x80000000u) != 0u ? 4u : 16u;
+    std::size_t size = 16u;
+    if ((insn & 0xFFE00C00u) == 0x3C200800u || (insn & 0xFFE00C00u) == 0x3C600800u) {
+      size = 1u;
+    } else if ((insn & 0xFFE00C00u) == 0x7C200800u || (insn & 0xFFE00C00u) == 0x7C600800u) {
+      size = 2u;
+    } else if ((insn & 0xFFE00C00u) == 0xBC200800u || (insn & 0xFFE00C00u) == 0xBC600800u) {
+      size = 4u;
+    } else if ((insn & 0xFFE00C00u) == 0xFC200800u || (insn & 0xFFE00C00u) == 0xFC600800u) {
+      size = 8u;
+    }
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
     const std::uint32_t option = (insn >> 13) & 0x7u;
     const bool s = ((insn >> 12) & 1u) != 0u;
@@ -6027,7 +6059,17 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     } else {
       return false;
     }
-    off <<= (s ? (size == 16u ? 4u : 2u) : 0u);
+    if (s) {
+      if (size == 16u) {
+        off <<= 4u;
+      } else if (size == 8u) {
+        off <<= 3u;
+      } else if (size == 4u) {
+        off <<= 2u;
+      } else if (size == 2u) {
+        off <<= 1u;
+      }
+    }
     const std::uint64_t addr = sp_or_reg(rn) + off;
     const bool ok = is_load ? load_vec(addr, rt, size) : store_vec(addr, rt, size);
     if (!ok) {
@@ -6036,10 +6078,22 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     return true;
   }
 
-  if ((insn & 0xFFC00C00u) == 0x3C800000u || (insn & 0xFFC00C00u) == 0x3CC00000u ||
-      (insn & 0xFFC00C00u) == 0xBC000000u || (insn & 0xFFC00C00u) == 0xBC400000u) {
+  if ((insn & 0xFFC00C00u) == 0x3C000000u || (insn & 0xFFC00C00u) == 0x3C400000u ||
+      (insn & 0xFFC00C00u) == 0x7C000000u || (insn & 0xFFC00C00u) == 0x7C400000u ||
+      (insn & 0xFFC00C00u) == 0x3C800000u || (insn & 0xFFC00C00u) == 0x3CC00000u ||
+      (insn & 0xFFC00C00u) == 0xBC000000u || (insn & 0xFFC00C00u) == 0xBC400000u ||
+      (insn & 0xFFC00C00u) == 0xFC000000u || (insn & 0xFFC00C00u) == 0xFC400000u) {
     const bool is_load = (insn & 0x00400000u) != 0u;
-    const std::size_t size = (insn & 0x80000000u) != 0u ? 4u : 16u;
+    std::size_t size = 16u;
+    if ((insn & 0xFFC00C00u) == 0x3C000000u || (insn & 0xFFC00C00u) == 0x3C400000u) {
+      size = 1u;
+    } else if ((insn & 0xFFC00C00u) == 0x7C000000u || (insn & 0xFFC00C00u) == 0x7C400000u) {
+      size = 2u;
+    } else if ((insn & 0xFFC00C00u) == 0xBC000000u || (insn & 0xFFC00C00u) == 0xBC400000u) {
+      size = 4u;
+    } else if ((insn & 0xFFC00C00u) == 0xFC000000u || (insn & 0xFFC00C00u) == 0xFC400000u) {
+      size = 8u;
+    }
     const std::int64_t simm9 = sign_extend((insn >> 12) & 0x1FFu, 9);
     const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + simm9);
     const bool ok = is_load ? load_vec(addr, rt, size) : store_vec(addr, rt, size);
@@ -6711,6 +6765,14 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
   if ((insn & 0xFFC00C00u) == 0xBC000400u) return post_pre_fp(4, false, false);
   if ((insn & 0xFFC00C00u) == 0xBC400C00u) return post_pre_fp(4, true, true);
   if ((insn & 0xFFC00C00u) == 0xBC000C00u) return post_pre_fp(4, false, true);
+  if ((insn & 0xFFC00C00u) == 0x3C400400u) return post_pre_fp(1, true, false);
+  if ((insn & 0xFFC00C00u) == 0x3C000400u) return post_pre_fp(1, false, false);
+  if ((insn & 0xFFC00C00u) == 0x3C400C00u) return post_pre_fp(1, true, true);
+  if ((insn & 0xFFC00C00u) == 0x3C000C00u) return post_pre_fp(1, false, true);
+  if ((insn & 0xFFC00C00u) == 0x7C400400u) return post_pre_fp(2, true, false);
+  if ((insn & 0xFFC00C00u) == 0x7C000400u) return post_pre_fp(2, false, false);
+  if ((insn & 0xFFC00C00u) == 0x7C400C00u) return post_pre_fp(2, true, true);
+  if ((insn & 0xFFC00C00u) == 0x7C000C00u) return post_pre_fp(2, false, true);
   if ((insn & 0xFFC00C00u) == 0xFC400400u) return post_pre_fp(8, true, false);
   if ((insn & 0xFFC00C00u) == 0xFC000400u) return post_pre_fp(8, false, false);
   if ((insn & 0xFFC00C00u) == 0xFC400C00u) return post_pre_fp(8, true, true);

@@ -147,6 +147,19 @@ void dump_bytes(const aarchvm::SoC& soc, std::uint64_t base, std::size_t len, co
   std::cerr << std::setfill(' ') << std::dec;
 }
 
+void print_stop_state(const aarchvm::SoC& soc, const char* prefix) {
+  std::cerr << prefix
+            << " pc=0x" << std::hex << soc.pc()
+            << " sp=0x" << soc.sp()
+            << " pstate=0x" << soc.pstate_bits()
+            << std::dec
+            << " steps=" << soc.steps()
+            << " exc_depth=" << soc.exception_depth()
+            << " wfi=" << (soc.cpu_waiting_for_interrupt() ? 1 : 0)
+            << " wfe=" << (soc.cpu_waiting_for_event() ? 1 : 0)
+            << '\n';
+}
+
 void print_usage(const char* argv0) {
   std::cerr
       << "Usage: " << argv0 << " -bin <program.bin> "
@@ -408,7 +421,7 @@ int main(int argc, char** argv) {
       }
       demo_soc.reset(0x00000000);
       if (!demo_soc.run(1000)) {
-        std::cerr << "Simulation stopped unexpectedly\n";
+        print_stop_state(demo_soc, "Simulation stopped unexpectedly");
         return 1;
       }
       return 0;
@@ -558,7 +571,7 @@ int main(int argc, char** argv) {
     }
     const std::size_t n = std::min(run_chunk, remaining);
     if (!soc.run(n)) {
-      std::cerr << "Simulation stopped unexpectedly\n";
+      print_stop_state(soc, "Simulation stopped unexpectedly");
       return 1;
     }
     remaining -= n;

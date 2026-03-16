@@ -16,6 +16,7 @@ It currently boots U-Boot, hands off to Linux, reaches an interactive BusyBox sh
 - Full-machine snapshot save / restore
 - In-tree bare-metal, Linux functional, and Linux algorithm/perf regression suites
 - Optional faster execution paths for bus/decode hot paths
+- Explicit halt / unexpected-stop diagnostics so guest halt states are reported instead of looking like a silent hang
 - Validated 2-core SMP round-robin scheduling with PSCI secondary boot, per-CPU GIC redistributors / timers, cross-core `SEV/WFE`, and exclusive-monitor invalidation tests
 
 ## Documentation
