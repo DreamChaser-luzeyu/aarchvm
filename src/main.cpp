@@ -595,6 +595,24 @@ int main(int argc, char** argv) {
   if (std::getenv("AARCHVM_PRINT_SUMMARY") != nullptr) {
     std::cerr << "SUMMARY: steps=" << soc.steps()
               << " pc=0x" << std::hex << soc.pc() << std::dec << '\n';
+    if (soc.cpu_count() > 1) {
+      for (std::size_t cpu = 0; cpu < soc.cpu_count(); ++cpu) {
+        std::cerr << "CPU-SUMMARY cpu=" << cpu
+                  << " powered_on=" << (soc.cpu_powered_on(cpu) ? 1 : 0)
+                  << " halted=" << (soc.cpu_halted(cpu) ? 1 : 0)
+                  << " pc=0x" << std::hex << soc.cpu_pc(cpu)
+                  << " sp=0x" << soc.cpu_sp(cpu)
+                  << " mpidr=0x" << soc.cpu_mpidr_value(cpu)
+                  << " pstate=0x" << soc.cpu_pstate_bits(cpu)
+                  << std::dec
+                  << " steps=" << soc.cpu_steps(cpu)
+                  << " exc_depth=" << soc.cpu_exception_depth(cpu)
+                  << " irq_masked=" << (soc.cpu_irq_masked(cpu) ? 1 : 0)
+                  << " wfi=" << (soc.cpu_waiting_for_interrupt(cpu) ? 1 : 0)
+                  << " wfe=" << (soc.cpu_waiting_for_event(cpu) ? 1 : 0)
+                  << '\n';
+      }
+    }
   }
   if (std::getenv("AARCHVM_PRINT_TIMER_SUMMARY") != nullptr) {
     std::cerr << "TIMER-SUMMARY counter=0x" << std::hex << soc.timer_counter()
@@ -641,11 +659,14 @@ int main(int argc, char** argv) {
   }
   if (std::getenv("AARCHVM_PRINT_REGS") != nullptr) {
     std::cerr << std::hex << std::setfill('0');
-    for (std::uint32_t i = 0; i < 31; ++i) {
-      std::cerr << "REG x" << std::dec << i << std::hex
-                << "=0x" << std::setw(16) << soc.x(i) << '\n';
+    for (std::size_t cpu = 0; cpu < soc.cpu_count(); ++cpu) {
+      for (std::uint32_t i = 0; i < 31; ++i) {
+        std::cerr << "REG cpu=" << std::dec << cpu << " x" << i << std::hex
+                  << "=0x" << std::setw(16) << soc.cpu_x(cpu, i) << '\n';
+      }
+      std::cerr << "REG cpu=" << std::dec << cpu << " sp=0x" << std::hex
+                << std::setw(16) << soc.cpu_sp(cpu) << '\n';
     }
-    std::cerr << "REG sp=0x" << std::setw(16) << soc.sp() << '\n';
     std::cerr << std::dec << std::setfill(' ');
   }
 

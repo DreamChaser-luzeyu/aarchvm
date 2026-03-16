@@ -51,17 +51,17 @@ AARCHVM_CMD=(
   -segment "$INITRD"@0x46000000
   -fb-sdl on
   -steps "$STEPS"
-  -snapshot-save "$SNAPSHOT"
+  # -snapshot-save "$SNAPSHOT"
 )
 print_cmd 'AARCHVM gui tty1 command:' "${AARCHVM_CMD[@]}"
 printf 'U-Boot scripted input:\n%s\n' "$UBOOT_BOOT_CMDS"
 
-# (
-#   sleep "$UBOOT_DELAY_SEC"
-#   printf '\n\n\n'
-#   sleep "$PROMPT_DELAY_SEC"
-#   printf '%s\n' "$UBOOT_BOOT_CMDS"
-# ) | \
+(
+  sleep "$UBOOT_DELAY_SEC"
+  printf '\n\n\n'
+  sleep "$PROMPT_DELAY_SEC"
+  printf '%s\n' "$UBOOT_BOOT_CMDS"
+) | \
 AARCHVM_BUS_FASTPATH="$FASTPATH" \
 AARCHVM_TIMER_SCALE="$TIMER_SCALE" \
 "${AARCHVM_CMD[@]}"

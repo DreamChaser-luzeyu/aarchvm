@@ -422,6 +422,7 @@ console=ttyAMA0,115200 console=tty1 earlycon=pl011,0x09000000 rdinit=/init initr
 - `AARCHVM_PS2_RX_SCRIPT`：按步数向 PS/2 键盘设备注入输入字节，供 KMI/键盘路径测试使用。
 - `AARCHVM_BUS_FASTPATH=1`：启用总线快路径。
 - `AARCHVM_TIMER_SCALE=<n>`：调整虚拟计时推进比例，加速 Linux 启动与测试。
+- 在当前“按指令数推进虚拟时间”的模型下，2 核 Linux 串口 shell 路径如果保持 `console=ttyAMA0,115200`，应使用 `AARCHVM_TIMER_SCALE=1`。像 `10` 这样的更大倍率仍适合 `tty1` / framebuffer GUI 路径，但会让 SMP 串口启动在 guest 视角中过快前进，可能在到达 shell 前就触发 Linux 的 RCU / `stop_machine` 看门狗路径。
 - `AARCHVM_STDIN_RX_GAP=<steps>`：对来自非交互式 stdin 的 UART 输入做步数节流，适合脚本化串口会话与批量命令注入。
 - `AARCHVM_DEBUG_SLOW=1`：强制启用保守的调试慢路径，关闭指令预解码、SoC 总线 fast path，以及 CPU 对 RAM 的直读直写快路径，便于在不依赖这些宿主机侧优化捷径的情况下复查回归。
 - `AARCHVM_TRACE_WRITE_VA=<va>` / `AARCHVM_TRACE_WRITE_PA=<pa>`：记录所有命中指定虚拟地址或物理地址的 guest 写操作，适合定位内存破坏、地址别名或跨页写入问题。

@@ -79,10 +79,13 @@ AARCHVM_VERIFY_CMD=(
   -stop-on-uart "$STOP_PATTERN"
 )
 
+echo "-----------"
 print_cmd 'AARCHVM build command:' "${AARCHVM_BUILD_CMD[@]}"
 printf 'U-Boot scripted input:\n%s\n' "$UBOOT_BOOT_CMDS"
+echo "-----------"
 
 set -o pipefail
+set +e
 (
   sleep "$UBOOT_DELAY_SEC"
   printf '\n\n\n'
@@ -94,6 +97,14 @@ AARCHVM_BUS_FASTPATH="$FASTPATH" \
 AARCHVM_TIMER_SCALE="$TIMER_SCALE" \
 timeout "$TIMEOUT_SEC" "${AARCHVM_BUILD_CMD[@]}" \
   > "$LOG" 2>&1
+BUILD_RC=$?
+set -e
+
+if [[ "$BUILD_RC" -ne 0 ]]; then
+  echo "snapshot build failed with exit code $BUILD_RC" >&2
+  tail -n 200 "$LOG" >&2
+  exit 1
+fi
 
 test -f "$SNAPSHOT" && echo "snapshot produced: $SNAPSHOT" || { echo "snapshot not produced: $SNAPSHOT" >&2; exit 1; }
 grep -Fq "$STOP_PATTERN" "$LOG" || { echo 'shell prompt stop pattern not observed during snapshot build' >&2; tail -n 160 "$LOG" >&2; exit 1; }

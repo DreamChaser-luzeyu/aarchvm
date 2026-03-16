@@ -48,10 +48,15 @@ public:
   [[nodiscard]] bool stop_requested() const { return stop_requested_; }
   [[nodiscard]] std::optional<std::uint8_t> read_u8(std::uint64_t addr) const;
   [[nodiscard]] std::uint64_t pc() const;
+  [[nodiscard]] std::uint64_t cpu_pc(std::size_t cpu_index) const;
   [[nodiscard]] std::uint64_t steps() const;
+  [[nodiscard]] std::uint64_t cpu_steps(std::size_t cpu_index) const;
   [[nodiscard]] std::size_t cpu_count() const { return cpus_.size(); }
   [[nodiscard]] std::uint64_t x(std::uint32_t idx) const;
+  [[nodiscard]] std::uint64_t cpu_x(std::size_t cpu_index, std::uint32_t reg_index) const;
   [[nodiscard]] std::uint64_t sp() const;
+  [[nodiscard]] std::uint64_t cpu_sp(std::size_t cpu_index) const;
+  [[nodiscard]] std::uint64_t cpu_mpidr_value(std::size_t cpu_index) const;
   [[nodiscard]] std::uint64_t uart_tx_count() const;
   [[nodiscard]] std::uint64_t uart_mmio_reads() const;
   [[nodiscard]] std::uint64_t uart_mmio_writes() const;
@@ -63,12 +68,19 @@ public:
   [[nodiscard]] std::uint32_t uart_imsc() const;
   [[nodiscard]] std::uint32_t uart_ris() const;
   [[nodiscard]] std::uint64_t pstate_bits() const;
+  [[nodiscard]] std::uint64_t cpu_pstate_bits(std::size_t cpu_index) const;
   [[nodiscard]] std::uint64_t icc_igrpen1_el1() const;
   [[nodiscard]] std::uint32_t exception_depth() const;
+  [[nodiscard]] std::uint32_t cpu_exception_depth(std::size_t cpu_index) const;
   [[nodiscard]] bool cpu_waiting_for_interrupt() const;
+  [[nodiscard]] bool cpu_waiting_for_interrupt(std::size_t cpu_index) const;
   [[nodiscard]] bool cpu_waiting_for_event() const;
+  [[nodiscard]] bool cpu_waiting_for_event(std::size_t cpu_index) const;
+  [[nodiscard]] bool cpu_halted(std::size_t cpu_index) const;
+  [[nodiscard]] bool cpu_powered_on(std::size_t cpu_index) const;
   [[nodiscard]] std::uint64_t vbar_el1() const;
   [[nodiscard]] bool irq_masked() const;
+  [[nodiscard]] bool cpu_irq_masked(std::size_t cpu_index) const;
   [[nodiscard]] bool gic_pending(std::uint32_t intid) const;
   [[nodiscard]] bool gic_enabled(std::uint32_t intid) const;
   [[nodiscard]] std::uint32_t gicd_ctlr() const;
@@ -127,6 +139,8 @@ private:
   [[nodiscard]] std::optional<std::size_t> cpu_index_from_mpidr(std::uint64_t mpidr) const;
   [[nodiscard]] Cpu& primary_cpu() { return *cpus_.front(); }
   [[nodiscard]] const Cpu& primary_cpu() const { return *cpus_.front(); }
+  [[nodiscard]] Cpu& cpu(std::size_t cpu_index) { return *cpus_.at(cpu_index); }
+  [[nodiscard]] const Cpu& cpu(std::size_t cpu_index) const { return *cpus_.at(cpu_index); }
   [[nodiscard]] static std::uint64_t cpu_mpidr(std::size_t cpu_index);
 
   struct PerfSession {

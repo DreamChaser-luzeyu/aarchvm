@@ -1,3 +1,64 @@
+# 修改日志 2026-03-16 22:40
+
+## 本轮修改
+
+- 新增并填写 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)，将“让模拟器逐步朝事件驱动方向演进”的设计方案正式落盘。
+- 方案内容围绕当前代码结构展开，覆盖了统一 guest 时间、事件队列、主循环重构、Generic Timer deadline 化、WFI/WFE 停车、SMP 量子调度、GIC 增量更新、UART/KMI 状态变化驱动、SDL 与 guest 时间解耦、快照补强以及对应的测试策略。
+- 该方案明确把“事件驱动”界定为外层 SoC 调度、时间推进和设备同步模型的演进，而不是直接跳过 CPU 指令解释或立即转向 JIT。
+
+## 本轮测试
+
+- 文档修改，未运行单元测试或回归测试。
+
+## 当前结论
+
+- 当前最值得优先推进的不是继续堆局部快路径，而是先把外层时间推进和设备同步模型整理为可事件化的框架。
+- 事件驱动化的低风险高收益切入点，依次是：统一 guest 时间、timer deadline 化、WFI/WFE 真正停车、单活跃 CPU 长突发执行，以及 GIC/UART/KMI 的增量状态更新。
+
+# 修改日志 2026-03-16 21:57
+
+## 本轮修改
+
+- 按当前主线约定，统一让 Linux SMP snapshot 构建路径使用标准设备树 `dts/aarchvm-linux-smp.dtb`，不再使用调试专用的 `dts/aarchvm-linux-smp-headless.dtb`。
+- 更新 [tests/linux/build_linux_smp_shell_snapshot.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/build_linux_smp_shell_snapshot.sh)，将默认 `AARCHVM_LINUX_DTB` 从 `dts/aarchvm-linux-smp-headless.dtb` 切回 `dts/aarchvm-linux-smp.dtb`。
+- 删除调试用设备树源文件 [dts/aarchvm-linux-smp-headless.dts](/media/luzeyu/Storage2/FOSS_src/aarchvm/dts/aarchvm-linux-smp-headless.dts)，避免后续脚本与文档继续分叉。
+
+## 本轮测试
+
+- `timeout 240s ./tests/linux/build_linux_smp_shell_snapshot.sh`：通过，确认标准 `dts/aarchvm-linux-smp.dtb` 下仍可自动生成并校验 `out/linux-smp-shell-v1.snap`。
+- `timeout 240s ./tests/linux/run_functional_suite_smp.sh`：通过，确认切回标准 SMP DT 后，SMP 功能回归与 `less` 进入/恢复烟雾段仍保持通过。
+
+## 当前结论
+
+- 从设备树内容看，这次统一不会改变 SMP snapshot 路径的内核命令行来源，因为实际 `bootargs` 仍由 U-Boot 运行时注入；差异主要回到是否保留 framebuffer / KMI 节点，属于你要求的“统一使用标准 SMP DT”范围。
+
+# 修改日志 2026-03-16 21:47
+
+## 本轮修改
+
+- 重新分析了 `out/my_test.snap` 与 `console=ttyAMA0,115200` 的 SMP 串口启动路径。最终确认主因不是 `ttyAMA0` 设备语义损坏，而是当前“按指令数推进虚拟时间”的模型在 SMP 串口大量输出场景下，把 guest 虚拟时间推进得过快，进而触发 Linux 的 RCU / `stop_machine` 看门狗路径。
+- 修复了 [tests/linux/build_linux_shell_snapshot.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/build_linux_shell_snapshot.sh) 中此前残留的临时手改状态：
+  - 恢复了通过管道自动向 U-Boot 注入启动命令；
+  - 恢复按 `AARCHVM_LINUX_DTB` / `AARCHVM_TIMER_SCALE` / `AARCHVM_BUS_FASTPATH` 等环境变量工作；
+  - 去掉了错误写死的 SMP DTB、`-fb-sdl on` 与 `AARCHVM_TIMER_SCALE=10`；
+  - 重新把构建阶段日志写回 `out/...build.log`，并在构建阶段启用 `AARCHVM_PRINT_SUMMARY=1`，使脚本能重新可靠地解析 prompt 停止点。
+- 将 [tests/linux/build_linux_smp_shell_snapshot.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/build_linux_smp_shell_snapshot.sh) 的默认 `AARCHVM_TIMER_SCALE` 从 `10` 调整为 `1`，以适配 2 核 `ttyAMA0` 串口 shell 路径。
+- 将 [tests/linux/run_functional_suite_smp.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/run_functional_suite_smp.sh) 的默认 `AARCHVM_TIMER_SCALE` 同步调整为 `1`，避免 SMP 串口功能回归再次在 guest 内部触发 RCU / `stop_machine` 超时。
+- 更新 [doc/README.en.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/README.en.md) 与 [doc/README.zh.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/README.zh.md)，补充当前时间模型下 `ttyAMA0` SMP 串口路径应使用 `AARCHVM_TIMER_SCALE=1` 的说明，并区分它与 `tty1` / framebuffer GUI 路径的推荐倍率。
+
+## 本轮测试
+
+- 手工等价冷启动复现：
+  - `AARCHVM_TIMER_SCALE=10` + `console=ttyAMA0,115200` + 2 核 headless DTB：稳定停在 Linux 早期启动阶段，日志在 `CPU features: detected: LSE atomic instructions` 附近后几乎不再推进。
+  - `AARCHVM_TIMER_SCALE=1` + 同一条 U-Boot / Linux 启动命令：可以稳定越过上述停点，继续完成 `ttyAMA0` 接管、网络协议族初始化与 `initramfs` 解包，证明主因是时间推进倍率而非串口 MMIO 语义本身。
+- `timeout 240s ./tests/linux/build_linux_smp_shell_snapshot.sh`：通过，可自动生成并校验 `out/linux-smp-shell-v1.snap`，日志中的 prompt 停止点为 `SUMMARY: steps=867345325 ...`。
+- `timeout 240s ./tests/linux/run_functional_suite_smp.sh`：通过，包括 3 轮 `uname/ps/dmesg/mount/df/cpuinfo/ping` 检查，以及 `dmesg | less` 的进入 / 恢复烟雾段。
+
+## 当前结论
+
+- 这条 `console=ttyAMA0,115200` SMP 卡住问题的主因是时间模型配置不当，而不是先前怀疑的 `tty1` 路径、snapshot 恢复遗漏或 PL011 基本读写语义错误。
+- `out/my_test.snap` 中双核一起卡在 `rcu_momentary_eqs()` / `multi_cpu_stop()`，更像是“guest 已经进入 RCU / stop_machine 自救路径后的坏状态快照”，而不是问题的最初根因。
+
 # 修改日志 2026-03-16 18:06
 
 ## 本轮修改

@@ -781,16 +781,36 @@ std::uint64_t SoC::pc() const {
   return primary_cpu().pc();
 }
 
+std::uint64_t SoC::cpu_pc(std::size_t cpu_index) const {
+  return cpu(cpu_index).pc();
+}
+
 std::uint64_t SoC::steps() const {
   return global_steps_;
+}
+
+std::uint64_t SoC::cpu_steps(std::size_t cpu_index) const {
+  return cpu(cpu_index).steps();
 }
 
 std::uint64_t SoC::x(std::uint32_t idx) const {
   return primary_cpu().x(idx);
 }
 
+std::uint64_t SoC::cpu_x(std::size_t cpu_index, std::uint32_t reg_index) const {
+  return cpu(cpu_index).x(reg_index);
+}
+
 std::uint64_t SoC::sp() const {
   return primary_cpu().sp();
+}
+
+std::uint64_t SoC::cpu_sp(std::size_t cpu_index) const {
+  return cpu(cpu_index).sp();
+}
+
+std::uint64_t SoC::cpu_mpidr_value(std::size_t cpu_index) const {
+  return cpu(cpu_index).mpidr_el1();
 }
 
 std::uint64_t SoC::uart_tx_count() const {
@@ -837,6 +857,10 @@ std::uint64_t SoC::pstate_bits() const {
   return primary_cpu().pstate_bits();
 }
 
+std::uint64_t SoC::cpu_pstate_bits(std::size_t cpu_index) const {
+  return cpu(cpu_index).pstate_bits();
+}
+
 std::uint64_t SoC::icc_igrpen1_el1() const {
   return primary_cpu().icc_igrpen1_el1();
 }
@@ -845,12 +869,32 @@ std::uint32_t SoC::exception_depth() const {
   return primary_cpu().exception_depth();
 }
 
+std::uint32_t SoC::cpu_exception_depth(std::size_t cpu_index) const {
+  return cpu(cpu_index).exception_depth();
+}
+
 bool SoC::cpu_waiting_for_interrupt() const {
   return primary_cpu().waiting_for_interrupt();
 }
 
+bool SoC::cpu_waiting_for_interrupt(std::size_t cpu_index) const {
+  return cpu(cpu_index).waiting_for_interrupt();
+}
+
 bool SoC::cpu_waiting_for_event() const {
   return primary_cpu().waiting_for_event();
+}
+
+bool SoC::cpu_waiting_for_event(std::size_t cpu_index) const {
+  return cpu(cpu_index).waiting_for_event();
+}
+
+bool SoC::cpu_halted(std::size_t cpu_index) const {
+  return cpu(cpu_index).halted();
+}
+
+bool SoC::cpu_powered_on(std::size_t cpu_index) const {
+  return cpu_powered_on_.at(cpu_index);
 }
 
 std::uint64_t SoC::vbar_el1() const {
@@ -859,6 +903,10 @@ std::uint64_t SoC::vbar_el1() const {
 
 bool SoC::irq_masked() const {
   return primary_cpu().irq_masked();
+}
+
+bool SoC::cpu_irq_masked(std::size_t cpu_index) const {
+  return cpu(cpu_index).irq_masked();
 }
 
 bool SoC::gic_pending(std::uint32_t intid) const {
