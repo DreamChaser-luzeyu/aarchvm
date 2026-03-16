@@ -44,6 +44,8 @@ constexpr std::uint16_t kDecodedFlagLoad = 1u << 5;
 constexpr std::uint16_t kDecodedFlagSigned = 1u << 6;
 constexpr std::uint16_t kDecodedFlagResult64 = 1u << 7;
 constexpr std::uint16_t kDecodedFlagInvert = 1u << 8;
+constexpr std::uint32_t kTimerVirtPpiIntId = 27u;
+constexpr std::uint32_t kTimerPhysPpiIntId = 30u;
 
 constexpr std::uint32_t sysreg_key(std::uint32_t op0,
                                    std::uint32_t op1,
@@ -1495,6 +1497,13 @@ void Cpu::load_current_sp_from_bank() {
 
 std::uint64_t Cpu::shared_timer_steps() const {
   return callbacks_.time_steps ? callbacks_.time_steps() : steps_;
+}
+
+void Cpu::refresh_local_timer_irq_lines() {
+  const bool timer_virt_level = timer_.irq_pending() || timer_.irq_pending_virtual(cpu_index_);
+  const bool timer_phys_level = timer_.irq_pending_physical(cpu_index_);
+  gic_.set_level(cpu_index_, kTimerVirtPpiIntId, timer_virt_level);
+  gic_.set_level(cpu_index_, kTimerPhysPpiIntId, timer_phys_level);
 }
 
 void Cpu::parse_pc_watch_list() {
@@ -3222,26 +3231,32 @@ bool Cpu::exec_system(std::uint32_t insn) {
     }
     if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (3u << 3) | 1u)) { // CNTV_CTL_EL0
       timer_.write_cntv_ctl_el0(cpu_index_, shared_timer_steps(), reg(rt));
+      refresh_local_timer_irq_lines();
       return true;
     }
     if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (3u << 3) | 2u)) { // CNTV_CVAL_EL0
       timer_.write_cntv_cval_el0(cpu_index_, shared_timer_steps(), reg(rt));
+      refresh_local_timer_irq_lines();
       return true;
     }
     if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (3u << 3) | 0u)) { // CNTV_TVAL_EL0
       timer_.write_cntv_tval_el0(cpu_index_, shared_timer_steps(), reg(rt));
+      refresh_local_timer_irq_lines();
       return true;
     }
     if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (2u << 3) | 1u)) { // CNTP_CTL_EL0
       timer_.write_cntp_ctl_el0(cpu_index_, shared_timer_steps(), reg(rt));
+      refresh_local_timer_irq_lines();
       return true;
     }
     if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (2u << 3) | 2u)) { // CNTP_CVAL_EL0
       timer_.write_cntp_cval_el0(cpu_index_, shared_timer_steps(), reg(rt));
+      refresh_local_timer_irq_lines();
       return true;
     }
     if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (2u << 3) | 0u)) { // CNTP_TVAL_EL0
       timer_.write_cntp_tval_el0(cpu_index_, shared_timer_steps(), reg(rt));
+      refresh_local_timer_irq_lines();
       return true;
     }
     if (key == ((3u << 14) | (0u << 11) | (4u << 7) | (1u << 3) | 0u)) { // SP_EL0
@@ -7698,6 +7713,7 @@ bool Cpu::save_state(std::ostream& out) const {
 }
 
 bool Cpu::load_state(std::istream& in, std::uint32_t version) {
+  constexpr std::size_t kLegacyExceptionStackCapacity = 8;
   const auto read_translation_fault = [&](TranslationFault& fault) {
     std::uint8_t kind = 0;
     if (!snapshot_io::read(in, kind) || kind > static_cast<std::uint8_t>(TranslationFault::Kind::Permission) ||
@@ -7755,21 +7771,53 @@ bool Cpu::load_state(std::istream& in, std::uint32_t version) {
   irq_query_threshold_ = 0;
   irq_query_negative_valid_ = false;
   irq_delivery_threshold_ = 0xFF;
+  exception_is_irq_stack_.fill(false);
+  exception_intid_stack_.fill(0);
+  exception_prev_prio_stack_.fill(0x100);
+  exception_prio_dropped_stack_.fill(false);
   if (!sysregs_.load_state(in) ||
       !snapshot_io::read(in, exception_depth_) ||
-      exception_depth_ > exception_is_irq_stack_.size() ||
-      !snapshot_io::read_array(in, exception_is_irq_stack_) ||
-      !snapshot_io::read_array(in, exception_intid_stack_)) {
+      exception_depth_ > exception_is_irq_stack_.size()) {
     return false;
   }
-  if (version >= 3) {
-    if (!snapshot_io::read_array(in, exception_prev_prio_stack_) ||
-        !snapshot_io::read_array(in, exception_prio_dropped_stack_)) {
+  if (version >= 12) {
+    if (!snapshot_io::read_array(in, exception_is_irq_stack_) ||
+        !snapshot_io::read_array(in, exception_intid_stack_)) {
       return false;
     }
+    if (version >= 3) {
+      if (!snapshot_io::read_array(in, exception_prev_prio_stack_) ||
+          !snapshot_io::read_array(in, exception_prio_dropped_stack_)) {
+        return false;
+      }
+    } else {
+      exception_prev_prio_stack_.fill(0x100);
+      exception_prio_dropped_stack_.fill(false);
+    }
   } else {
-    exception_prev_prio_stack_.fill(0x100);
-    exception_prio_dropped_stack_.fill(false);
+    std::array<bool, kLegacyExceptionStackCapacity> legacy_is_irq{};
+    std::array<std::uint32_t, kLegacyExceptionStackCapacity> legacy_intid{};
+    if (exception_depth_ > legacy_is_irq.size() ||
+        !snapshot_io::read_array(in, legacy_is_irq) ||
+        !snapshot_io::read_array(in, legacy_intid)) {
+      return false;
+    }
+    std::copy(legacy_is_irq.begin(), legacy_is_irq.end(), exception_is_irq_stack_.begin());
+    std::copy(legacy_intid.begin(), legacy_intid.end(), exception_intid_stack_.begin());
+
+    if (version >= 3) {
+      std::array<std::uint16_t, kLegacyExceptionStackCapacity> legacy_prev_prio{};
+      std::array<bool, kLegacyExceptionStackCapacity> legacy_prio_dropped{};
+      if (!snapshot_io::read_array(in, legacy_prev_prio) ||
+          !snapshot_io::read_array(in, legacy_prio_dropped)) {
+        return false;
+      }
+      std::copy(legacy_prev_prio.begin(), legacy_prev_prio.end(), exception_prev_prio_stack_.begin());
+      std::copy(legacy_prio_dropped.begin(), legacy_prio_dropped.end(), exception_prio_dropped_stack_.begin());
+    } else {
+      exception_prev_prio_stack_.fill(0x100);
+      exception_prio_dropped_stack_.fill(false);
+    }
   }
   if (!snapshot_io::read_bool(in, sync_reported_) ||
       !snapshot_io::read_bool(in, waiting_for_interrupt_) ||

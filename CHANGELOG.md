@@ -534,3 +534,85 @@
   - `tests/linux/run_functional_suite.sh` 通过。
 - 额外说明：
   - `tests/linux/build_linux_smp_shell_snapshot.sh` 在当前仓库状态下未能在默认 `4.5e9` steps 预算内走到 shell prompt，构建日志停在内核早期启动并以 `SUMMARY: steps=4500000000` 结束，因此本轮未完成基于该脚本的 SMP Linux 回归闭环。
+
+# 修改日志 2026-03-16 14:40
+
+## 本轮修改
+
+- 结合 `out/my_test.snap` 的异常状态和源码路径，定位到一个明确的 timer/GIC 竞态：
+  - guest 在 IRQ handler 中通过 `CNTV_*` / `CNTP_*` sysreg 重编程本地 timer 后，`GenericTimer` 内部 pending 状态会立刻变化；
+  - 但 GIC 的本地 PPI 线电平此前只会在 SoC 的下一轮 `sync_devices()` 里刷新；
+  - 如果 handler 在这之前执行 `ICC_EOIR1_EL1`，GIC 仍会看到旧的高电平，并把同一个 timer interrupt 重新挂回 pending，造成虚假的二次进入。
+- 在 CPU 中新增 `refresh_local_timer_irq_lines()`，并在所有 `CNTV_CTL/CVAL/TVAL_EL0`、`CNTP_CTL/CVAL/TVAL_EL0` 的 sysreg 写路径后立即同步本核 timer PPI 电平到 GIC。
+- 新增裸机回归用例 `tests/arm64/gic_timer_rearm_no_spurious.S`：
+  - 在 timer IRQ handler 中先把 timer 重编程到远未来；
+  - 再执行 `EOIR/DIR` 并临时开 IRQ；
+  - 验证不会因为 stale GIC level 发生错误的嵌套重入。
+- 将该回归接入 `tests/arm64/build_tests.sh` 与 `tests/arm64/run_all.sh`。
+- 修复 `tests/linux/run_functional_suite.sh` 的时序脆弱性：
+  - 原脚本依赖冷启动后按步数估算时刻向串口注入命令，当前仓库状态下会出现 shell 只回显命令但不执行的现象；
+  - 现改为先确保 `out/linux-usertests-shell-v1.snap` 最新，再从 shell snapshot 恢复并直接喂功能命令，使单核 Linux 功能回归稳定通过。
+
+## 本轮测试
+
+- 定向单测：
+  - `./build/aarchvm -bin tests/arm64/out/gic_timer_rearm_no_spurious.bin -load 0x0 -entry 0x0 -steps 2000000`
+- 坏快照定向观测：
+  - `env AARCHVM_TRACE_IRQ_TAKE=1 AARCHVM_TRACE_TIMER=1 ./build/aarchvm -smp 2 -snapshot-load out/my_test.snap -steps 500000 -fb-sdl off`
+  - `env AARCHVM_PRINT_SUMMARY=1 AARCHVM_PRINT_IRQ_SUMMARY=1 AARCHVM_PRINT_TIMER_SUMMARY=1 ./build/aarchvm -smp 2 -snapshot-load out/my_test.snap -steps 500000 -fb-sdl off`
+- 裸机完整回归：
+  - `tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `tests/linux/run_functional_suite.sh`
+
+## 当前结论
+
+- `out/my_test.snap` 保存时主核已经处于深异常嵌套状态，因此它本身不是一个“修完代码就一定能直接救活”的快照。
+- 但从该快照暴露出来的执行形态可以反推出一个真实 bug：timer sysreg 写后 GIC 本地 PPI 电平更新滞后，这会放大 `fbcon/simpledrm` 重输出路径中的 timer IRQ 重入问题。
+- 修复后，新增的专门单测已经通过；坏快照上的 trace 也能看到 CPU1 的 timer IRQ 按重新编程后的 `CVAL` 正常再次到期，而不是在 handler 内因为旧高电平被立即错误重挂。
+- 本轮已稳定通过：
+  - `tests/arm64/run_all.sh`
+  - `tests/linux/run_functional_suite.sh`
+- 本轮未完成：
+  - `tests/linux/run_functional_suite_smp.sh`
+  - 原因不是本次 timer/GIC 修复引入 panic，而是 `tests/linux/build_linux_smp_shell_snapshot.sh` 在当前 2-core / 1GiB 配置下，默认 `4.5e9` steps 预算内仍无法稳定走到 shell prompt，导致 SMP Linux 功能回归脚本本身无法闭环。
+
+# 修改日志 2026-03-16 16:27
+
+## 本轮修改
+
+- 重新分析 `out/my_test.snap`，确认它不是“恢复后坏掉”，而是“保存前主核就已经进入坏状态”：
+  - `CPU0` 在快照中已是 `halted=1`；
+  - `exception_depth=8` 且顶层还有待处理的本地 IRQ；
+  - 下一次进入异常时会直接撞上 emulator 自身的 8 层异常栈上限。
+- 将 CPU 内部异常 bookkeeping 容量从固定 8 层提升到 64 层，避免 Linux/SMP 场景下较深的同 EL 异常/IRQ 嵌套被 emulator 人为判死。
+- 保持旧快照兼容：
+  - 将快照版本从 `11` 升到 `12`；
+  - `Cpu::load_state()` 对旧版快照仍按历史 8 层格式读取，再扩展填充到新的 64 层数组。
+- 新增裸机定向回归 `tests/arm64/nested_sync_depth.S`：
+  - 人工构造 16 层同 EL 同步异常嵌套；
+  - 验证 emulator 不再因为内部异常栈容量过小而提前 halt。
+- 将该新用例接入 `tests/arm64/build_tests.sh` 与 `tests/arm64/run_all.sh`。
+
+## 本轮测试
+
+- 定向单测：
+  - `./build/aarchvm -bin tests/arm64/out/nested_sync_depth.bin -load 0x0 -entry 0x0 -steps 400000`
+- 旧快照兼容性：
+  - `env AARCHVM_PRINT_SUMMARY=1 ./build/aarchvm -smp 2 -snapshot-load out/my_test.snap -steps 1 -fb-sdl off`
+- 裸机完整回归：
+  - `tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `tests/linux/run_functional_suite.sh`
+
+## 当前结论
+
+- `out/my_test.snap` 抓到的现场说明 guest 在保存前已经把主核推进到了 emulator 自身的异常嵌套上限，因此“8 层固定上限”本身就是一个真实 bug。
+- 本轮修复后：
+  - 新增的 16 层嵌套异常用例通过；
+  - 旧版坏快照仍可加载；
+  - `tests/arm64/run_all.sh` 通过；
+  - `tests/linux/run_functional_suite.sh` 通过。
+- 仍未闭环的部分：
+  - `tests/linux/run_functional_suite_smp.sh`
+  - 当前阻塞点仍是 SMP shell snapshot 基础设施未就绪，脚本日志显示 `Failed to load snapshot: out/linux-smp-shell-v1.snap`，因此这轮没有把它计入功能失败。

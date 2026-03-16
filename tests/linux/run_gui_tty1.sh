@@ -39,8 +39,8 @@ EOC
 )
 AARCHVM_CMD=(
   ./build/aarchvm
-  # -smp 2
-  # -smp-mode psci
+  -smp 2
+  -smp-mode psci
   -bin u-boot-2026.01/build-qemu_arm64/u-boot.bin
   -load 0x0
   -entry 0x0

@@ -300,6 +300,7 @@ private:
   void save_current_sp_to_bank();
   void load_current_sp_from_bank();
   [[nodiscard]] std::uint64_t shared_timer_steps() const;
+  void refresh_local_timer_irq_lines();
   [[nodiscard]] std::uint16_t compute_irq_threshold() const {
     return std::min<std::uint16_t>(static_cast<std::uint16_t>(icc_pmr_el1_ & 0xFFu), running_priority_);
   }
@@ -365,6 +366,7 @@ private:
   static constexpr std::size_t kTlbEntries = 4096;
   static constexpr std::size_t kTlbWays = 4;
   static constexpr std::size_t kTlbSets = kTlbEntries / kTlbWays;
+  static constexpr std::size_t kExceptionStackCapacity = 64;
 
   Bus& bus_;
   GicV3& gic_;
@@ -373,10 +375,10 @@ private:
   std::array<std::array<std::uint64_t, 2>, 32> qregs_{};
   SystemRegisters sysregs_{};
   std::uint32_t exception_depth_ = 0;
-  std::array<bool, 8> exception_is_irq_stack_{};
-  std::array<std::uint32_t, 8> exception_intid_stack_{};
-  std::array<std::uint16_t, 8> exception_prev_prio_stack_{};
-  std::array<bool, 8> exception_prio_dropped_stack_{};
+  std::array<bool, kExceptionStackCapacity> exception_is_irq_stack_{};
+  std::array<std::uint32_t, kExceptionStackCapacity> exception_intid_stack_{};
+  std::array<std::uint16_t, kExceptionStackCapacity> exception_prev_prio_stack_{};
+  std::array<bool, kExceptionStackCapacity> exception_prio_dropped_stack_{};
   bool sync_reported_ = false;
   bool trace_exceptions_ = false;
   bool trace_all_exceptions_ = false;

@@ -45,7 +45,9 @@ run mmu_table_pxn_inherit.bin 4000000
 run mmu_tcr_ips_mair_decode.bin 4000000
 run mmu_af_fault.bin 4000000
 run sync_exception_regs.bin 2000000
+./build/aarchvm -bin tests/arm64/out/nested_sync_depth.bin -load 0x0 -entry 0x0 -steps 400000 | grep -qx 'P'
 run gic_timer_sysreg.bin 2000000
+run gic_timer_rearm_no_spurious.bin 2000000
 run gic_timer_phys_sysreg.bin 2000000
 run bitfield_basic.bin 400000
 run p1_core.bin 600000

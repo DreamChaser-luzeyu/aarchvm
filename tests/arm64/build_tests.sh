@@ -92,7 +92,9 @@ build_asm_prog mmu_table_pxn_inherit
 build_asm_prog mmu_tcr_ips_mair_decode
 build_asm_prog mmu_af_fault
 build_asm_prog sync_exception_regs
+build_asm_prog nested_sync_depth
 build_asm_prog gic_timer_sysreg
+build_asm_prog gic_timer_rearm_no_spurious
 build_asm_prog gic_timer_phys_sysreg
 build_asm_prog bitfield_basic
 build_asm_prog p1_core
