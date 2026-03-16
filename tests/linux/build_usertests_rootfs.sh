@@ -24,6 +24,18 @@ aarch64-linux-gnu-gcc -O2 -static -Wall -Wextra -march=armv8-a -mno-outline-atom
 aarch64-linux-gnu-gcc -O2 -static -Wall -Wextra -march=armv8-a -mno-outline-atomics -fno-tree-vectorize -fno-tree-slp-vectorize \
   -o out/console_mux tests/linux/console_mux.c -lutil
 
+aarch64-linux-gnu-gcc -O2 -static -Wall -Wextra -march=armv8-a -mno-outline-atomics -fno-tree-vectorize -fno-tree-slp-vectorize \
+  -o out/poll_tty_smoke tests/linux/poll_tty_smoke.c
+
+aarch64-linux-gnu-gcc -O2 -static -Wall -Wextra -march=armv8-a -mno-outline-atomics -fno-tree-vectorize -fno-tree-slp-vectorize \
+  -o out/poll_tty_affine tests/linux/poll_tty_affine.c
+
+aarch64-linux-gnu-gcc -O2 -static -Wall -Wextra -march=armv8-a -mno-outline-atomics -fno-tree-vectorize -fno-tree-slp-vectorize \
+  -o out/poll_pipe_tty_affine tests/linux/poll_pipe_tty_affine.c
+
+aarch64-linux-gnu-gcc -O2 -static -Wall -Wextra -march=armv8-a -mno-outline-atomics -fno-tree-vectorize -fno-tree-slp-vectorize \
+  -o out/read_tty_spin_affine tests/linux/read_tty_spin_affine.c
+
 if [[ ! -d out/initramfs-full-root ]]; then
   echo "missing out/initramfs-full-root; build the full busybox rootfs first" >&2
   exit 1
@@ -38,6 +50,10 @@ cp out/fpint_selftest out/initramfs-usertests-root/bin/fpint_selftest
 cp out/functional_init out/initramfs-usertests-root/bin/functional_init
 cp out/fb_mark out/initramfs-usertests-root/bin/fb_mark
 cp out/console_mux out/initramfs-usertests-root/bin/console_mux
+cp out/poll_tty_smoke out/initramfs-usertests-root/bin/poll_tty_smoke
+cp out/poll_tty_affine out/initramfs-usertests-root/bin/poll_tty_affine
+cp out/poll_pipe_tty_affine out/initramfs-usertests-root/bin/poll_pipe_tty_affine
+cp out/read_tty_spin_affine out/initramfs-usertests-root/bin/read_tty_spin_affine
 
 cat > out/initramfs-usertests-root/init <<'EOS'
 #!/bin/sh
@@ -45,7 +61,6 @@ cat > out/initramfs-usertests-root/init <<'EOS'
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 
 echo "INIT-START"
-/bin/busybox --install -s /bin >/dev/null 2>&1 || true
 
 /bin/busybox mkdir -p /dev /proc /sys /tmp /run /mnt /root /etc /dev/pts
 /bin/busybox mount -t devtmpfs devtmpfs /dev
@@ -53,7 +68,11 @@ echo "INIT-START"
 [ -c /dev/null ] || /bin/busybox mknod /dev/null c 1 3
 
 echo "INIT-DEV-OK"
-exec >/dev/console 2>&1 </dev/console
+serial_stdio=/dev/console
+if [ -c /dev/ttyAMA0 ]; then
+  serial_stdio=/dev/ttyAMA0
+fi
+exec >"$serial_stdio" 2>&1 <"$serial_stdio"
 
 echo "INIT-CONSOLE-OK"
 /bin/busybox mount -t proc proc /proc
@@ -73,16 +92,10 @@ if [ -r /proc/cmdline ]; then
   for arg in $(cat /proc/cmdline); do
     case "$arg" in
       aarchvm_suite=*)
-        suite=$(/bin/busybox cut -d= -f2- <<EOF
-$arg
-EOF
-)
+        suite=${arg#*=}
         ;;
       aarchvm_shell=*)
-        shell_mode=$(/bin/busybox cut -d= -f2- <<EOF
-$arg
-EOF
-)
+        shell_mode=${arg#*=}
         ;;
     esac
   done
@@ -113,6 +126,25 @@ case "$suite" in
 esac
 EOS
 
+cat > out/initramfs-usertests-root/bin/run_dmesg_stress_check <<'EOS'
+#!/bin/sh
+set -e
+tmp=/tmp/dmesg-stress.log
+: > "$tmp"
+echo DMESG-STRESS-BEGIN
+i=1
+while [ "$i" -le 4 ]; do
+  echo DMESG-STRESS-ROUND:$i
+  dmesg | tee -a "$tmp"
+  i=$((i + 1))
+done
+bad=$(LC_ALL=C tr -d '\11\12\15\40-\176' < "$tmp" | wc -c)
+echo DMESG-STRESS-BADCOUNT:$bad
+[ "$bad" -eq 0 ]
+echo DMESG-STRESS PASS
+echo DMESG-STRESS-END
+EOS
+
 cat > out/initramfs-usertests-root/bin/run_usertests <<'EOS'
 #!/bin/sh
 set -e
@@ -130,10 +162,13 @@ pwd
 cat /proc/version
 /bin/busybox ls /bin
 ps
+dmesg -s 128 >/dev/null
+echo DMESG-OK
+/bin/run_dmesg_stress_check
 ping -c 1 127.0.0.1 || true
 mount
 df
-run_usertests
+/bin/run_usertests
 echo FUNCTIONAL-SUITE PASS
 EOS
 
@@ -145,57 +180,17 @@ chmod 0755 \
   out/initramfs-usertests-root/bin/functional_init \
   out/initramfs-usertests-root/bin/fb_mark \
   out/initramfs-usertests-root/bin/console_mux \
+  out/initramfs-usertests-root/bin/poll_tty_smoke \
+  out/initramfs-usertests-root/bin/poll_tty_affine \
+  out/initramfs-usertests-root/bin/poll_pipe_tty_affine \
+  out/initramfs-usertests-root/bin/read_tty_spin_affine \
+  out/initramfs-usertests-root/bin/run_dmesg_stress_check \
   out/initramfs-usertests-root/bin/run_usertests \
   out/initramfs-usertests-root/bin/run_functional_suite
 
 (
   cd out/initramfs-usertests-root
-  {
-    printf '.\0'
-    printf './init\0'
-    printf './bin\0'
-    printf './bin/busybox\0'
-    printf './bin/sh\0'
-    printf './bin/console_mux\0'
-    printf './bin/fb_mark\0'
-    printf './bin/bench_runner\0'
-    printf './bin/fpsimd_selftest\0'
-    printf './bin/fpint_selftest\0'
-    printf './bin/functional_init\0'
-    printf './bin/run_usertests\0'
-    printf './bin/run_functional_suite\0'
-    printf './dev\0'
-    printf './proc\0'
-    printf './sys\0'
-    printf './tmp\0'
-    printf './run\0'
-    printf './mnt\0'
-    printf './root\0'
-    printf './etc\0'
-    find . -print0 | \
-      grep -zvxF '.' | \
-      grep -zvxF './init' | \
-      grep -zvxF './bin' | \
-      grep -zvxF './bin/busybox' | \
-      grep -zvxF './bin/sh' | \
-      grep -zvxF './bin/console_mux' | \
-      grep -zvxF './bin/fb_mark' | \
-      grep -zvxF './bin/bench_runner' | \
-      grep -zvxF './bin/fpsimd_selftest' | \
-      grep -zvxF './bin/fpint_selftest' | \
-      grep -zvxF './bin/functional_init' | \
-      grep -zvxF './bin/run_usertests' | \
-      grep -zvxF './bin/run_functional_suite' | \
-      grep -zvxF './dev' | \
-      grep -zvxF './proc' | \
-      grep -zvxF './sys' | \
-      grep -zvxF './tmp' | \
-      grep -zvxF './run' | \
-      grep -zvxF './mnt' | \
-      grep -zvxF './root' | \
-      grep -zvxF './etc' | \
-      sort -z
-  } | cpio --null -o -H newc > ../initramfs-usertests.cpio
+  find . -print0 | sort -z | cpio --null -o -H newc > ../initramfs-usertests.cpio
 )
 gzip -n -f -c out/initramfs-usertests.cpio > out/initramfs-usertests.cpio.gz
 

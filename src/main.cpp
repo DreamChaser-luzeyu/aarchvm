@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
 #include <fcntl.h>
 #include <fstream>
 #include <iomanip>
@@ -32,6 +33,8 @@ struct Options {
   std::uint64_t load_addr = 0;
   std::uint64_t entry_pc = 0;
   std::size_t max_steps = 1000000;
+  std::size_t cpu_count = 1;
+  aarchvm::SoC::SecondaryBootMode secondary_boot_mode = aarchvm::SoC::SecondaryBootMode::AllStart;
   std::uint64_t init_sp = 0;
   std::optional<std::string> dtb_path;
   std::uint64_t dtb_addr = 0x40000000ull;
@@ -47,6 +50,11 @@ struct Options {
 
 std::uint64_t parse_u64(const std::string& text) {
   return std::stoull(text, nullptr, 0);
+}
+
+bool env_enabled(const char* name) {
+  const char* value = std::getenv(name);
+  return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 
 bool read_binary_file(const std::string& path, std::vector<std::uint8_t>& out) {
@@ -142,7 +150,7 @@ void dump_bytes(const aarchvm::SoC& soc, std::uint64_t base, std::size_t len, co
 void print_usage(const char* argv0) {
   std::cerr
       << "Usage: " << argv0 << " -bin <program.bin> "
-      << "[-load <addr>] [-entry <pc>] [-steps <n>] [-sp <addr>] "
+      << "[-load <addr>] [-entry <pc>] [-steps <n>] [-sp <addr>] [-smp <n>] [-smp-mode <all|psci>] "
       << "[-dtb <file>] [-dtb-addr <addr>] [-segment <file@addr>]... "
       << "[-snapshot-load <file>] [-snapshot-save <file>] [-drive <image.bin>] \n"
       << "[-stop-on-uart <text>] [-decode <fast|slow>] [-fb-sdl <on|off>]\n";
@@ -180,6 +188,21 @@ std::optional<Options> parse_args(int argc, char** argv) {
       has_entry = true;
     } else if (key == "-steps") {
       opt.max_steps = static_cast<std::size_t>(parse_u64(val));
+    } else if (key == "-smp") {
+      opt.cpu_count = static_cast<std::size_t>(parse_u64(val));
+      if (opt.cpu_count == 0) {
+        std::cerr << "-smp must be >= 1\n";
+        return std::nullopt;
+      }
+    } else if (key == "-smp-mode") {
+      if (val == "all") {
+        opt.secondary_boot_mode = aarchvm::SoC::SecondaryBootMode::AllStart;
+      } else if (val == "psci") {
+        opt.secondary_boot_mode = aarchvm::SoC::SecondaryBootMode::PsciOff;
+      } else {
+        std::cerr << "Invalid -smp-mode value (expected all or psci): " << val << '\n';
+        return std::nullopt;
+      }
     } else if (key == "-sp") {
       opt.init_sp = parse_u64(val);
     } else if (key == "-dtb") {
@@ -279,23 +302,91 @@ private:
   termios old_{};
 };
 
-void pump_stdin_to_uart(aarchvm::SoC& soc) {
+std::uint64_t piped_stdin_gap_steps() {
+  const char* gap_env = std::getenv("AARCHVM_STDIN_RX_GAP");
+  if (gap_env == nullptr || *gap_env == '\0') {
+    return 2000u;
+  }
+  const auto gap = parse_u64(gap_env);
+  return gap == 0 ? 1u : gap;
+}
+
+class SerialEscapeSequence {
+public:
+  [[nodiscard]] bool consume(std::uint8_t byte,
+                             aarchvm::SoC& soc,
+                             bool interactive_stdin,
+                             std::deque<std::uint8_t>& buffered_bytes) {
+    if (!interactive_stdin) {
+      buffered_bytes.push_back(byte);
+      return false;
+    }
+
+    if (!pending_ctrl_a_) {
+      if (byte == kEscapePrefix) {
+        pending_ctrl_a_ = true;
+        return false;
+      }
+      soc.inject_uart_rx(byte);
+      return false;
+    }
+
+    pending_ctrl_a_ = false;
+    if (byte == 'x' || byte == 'X') {
+      std::cerr << "Host serial escape Ctrl+A,x received; stopping simulation\n";
+      return true;
+    }
+    if (byte == kEscapePrefix) {
+      soc.inject_uart_rx(kEscapePrefix);
+      return false;
+    }
+
+    soc.inject_uart_rx(kEscapePrefix);
+    soc.inject_uart_rx(byte);
+    return false;
+  }
+
+private:
+  static constexpr std::uint8_t kEscapePrefix = 0x01u;
+  bool pending_ctrl_a_ = false;
+};
+
+[[nodiscard]] bool pump_stdin_to_uart(aarchvm::SoC& soc,
+                                      bool interactive_stdin,
+                                      std::deque<std::uint8_t>& buffered_bytes,
+                                      SerialEscapeSequence& escape_sequence) {
   std::uint8_t buf[64];
   while (true) {
     const ssize_t n = ::read(STDIN_FILENO, buf, sizeof(buf));
     if (n > 0) {
       for (ssize_t i = 0; i < n; ++i) {
-        soc.inject_uart_rx(buf[i]);
+        if (escape_sequence.consume(buf[i], soc, interactive_stdin, buffered_bytes)) {
+          return true;
+        }
       }
       continue;
     }
     if (n == 0) {
-      return;
+      return false;
     }
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
-      return;
+      return false;
     }
-    return;
+    return false;
+  }
+}
+
+void inject_buffered_stdin_to_uart(std::deque<std::uint8_t>& buffered_bytes,
+                                   std::uint64_t gap_steps,
+                                   std::uint64_t& next_inject_step,
+                                   aarchvm::SoC& soc) {
+  static constexpr std::size_t kMaxInflightRxBytes = 16u;
+  while (!buffered_bytes.empty() &&
+         next_inject_step <= soc.steps() &&
+         soc.uart_rx_fifo_size() < kMaxInflightRxBytes) {
+    soc.inject_uart_rx(buffered_bytes.front());
+    buffered_bytes.pop_front();
+    next_inject_step += gap_steps;
   }
 }
 
@@ -327,11 +418,13 @@ int main(int argc, char** argv) {
   }
   const Options& opt = *parsed;
 
-  aarchvm::SoC soc;
+  aarchvm::SoC soc(opt.cpu_count);
+  const bool debug_slow_mode = env_enabled("AARCHVM_DEBUG_SLOW");
+  soc.set_secondary_boot_mode(opt.secondary_boot_mode);
   if (opt.framebuffer_sdl_specified) {
     soc.set_framebuffer_sdl_enabled(opt.framebuffer_sdl);
   }
-  soc.set_predecode_enabled(opt.predecode_enabled);
+  soc.set_predecode_enabled(debug_slow_mode ? false : opt.predecode_enabled);
   if (opt.stop_on_uart_pattern.has_value()) {
     soc.set_stop_on_uart_pattern(*opt.stop_on_uart_pattern);
   } else if (const char* stop_on_uart = std::getenv("AARCHVM_STOP_ON_UART"); stop_on_uart != nullptr) {
@@ -426,21 +519,32 @@ int main(int argc, char** argv) {
   }
 
   const bool interactive_stdin = isatty(STDIN_FILENO);
-  (void)interactive_stdin;
-  
   RawStdinGuard stdin_guard;
   const std::vector<ByteEvent> uart_rx_events = parse_byte_script_env("AARCHVM_UART_RX_SCRIPT");
   const std::vector<ByteEvent> ps2_rx_events = parse_byte_script_env("AARCHVM_PS2_RX_SCRIPT");
+  const std::uint64_t stdin_gap_steps = piped_stdin_gap_steps();
+  std::deque<std::uint8_t> buffered_stdin_uart;
+  SerialEscapeSequence serial_escape_sequence;
+  std::uint64_t next_stdin_inject_step = soc.steps();
   std::size_t next_uart_rx_event = 0;
   std::size_t next_ps2_rx_event = 0;
   std::size_t remaining = opt.max_steps;
   while (remaining > 0) {
-    pump_stdin_to_uart(soc);
+    if (pump_stdin_to_uart(soc, interactive_stdin, buffered_stdin_uart, serial_escape_sequence)) {
+      break;
+    }
+    if (!interactive_stdin) {
+      inject_buffered_stdin_to_uart(buffered_stdin_uart, stdin_gap_steps, next_stdin_inject_step, soc);
+    }
     inject_scheduled_uart_rx(uart_rx_events, next_uart_rx_event, soc);
     inject_scheduled_ps2_rx(ps2_rx_events, next_ps2_rx_event, soc);
 
     std::size_t run_chunk = 200000u;
 
+    if (!interactive_stdin && !buffered_stdin_uart.empty() && next_stdin_inject_step > soc.steps()) {
+      const std::uint64_t until_inject = next_stdin_inject_step - soc.steps();
+      run_chunk = std::min<std::size_t>(run_chunk, static_cast<std::size_t>(until_inject));
+    }
     if (next_uart_rx_event < uart_rx_events.size() && uart_rx_events[next_uart_rx_event].step > soc.steps()) {
       const std::uint64_t until_inject = uart_rx_events[next_uart_rx_event].step - soc.steps();
       run_chunk = std::min<std::size_t>(run_chunk, static_cast<std::size_t>(until_inject));
@@ -534,4 +638,3 @@ int main(int argc, char** argv) {
 
   return 0;
 }
-

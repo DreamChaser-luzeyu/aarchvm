@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <iosfwd>
 
 namespace aarchvm {
 
@@ -22,6 +23,9 @@ public:
 
   std::uint64_t read(std::uint64_t offset, std::size_t size) override;
   void write(std::uint64_t offset, std::uint64_t value, std::size_t size) override;
+  void reset_state();
+  [[nodiscard]] bool save_state(std::ostream& out) const;
+  [[nodiscard]] bool load_state(std::istream& in);
 
 private:
   std::uint64_t read_reg(std::uint64_t offset) const;

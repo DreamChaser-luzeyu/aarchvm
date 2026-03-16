@@ -2,6 +2,8 @@
 
 #include "aarchvm/snapshot_io.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <iostream>
 
@@ -19,18 +21,20 @@ bool gic_trace_enabled() {
   return enabled;
 }
 
-bool gic_pending_trace_enabled() {
-  static const bool enabled = env_flag_enabled("AARCHVM_TRACE_GIC_PENDING");
-  return enabled;
-}
-
-void trace_gic(const char* tag, std::uint32_t intid, bool enable) {
+void trace_gic(const char* tag, std::size_t cpu, std::uint32_t intid, bool value) {
   if (!gic_trace_enabled()) {
     return;
   }
-  if (intid == 11u || intid == 14u || intid == 27u || intid == 30u || intid == 33u) {
-    std::cerr << std::dec << tag << " intid=" << intid << " val=" << (enable ? 1 : 0) << '\n';
+  if (intid < 32u || intid == 33u || intid == 34u) {
+    std::cerr << std::dec << tag << " cpu=" << cpu << " intid=" << intid << " val=" << (value ? 1 : 0) << '\n';
   }
+}
+
+std::uint32_t gicr_affinity_value(std::uint64_t mpidr) {
+  return (static_cast<std::uint32_t>((mpidr >> 32) & 0xFFu) << 24u) |
+         (static_cast<std::uint32_t>((mpidr >> 16) & 0xFFu) << 16u) |
+         (static_cast<std::uint32_t>((mpidr >> 8) & 0xFFu) << 8u) |
+         static_cast<std::uint32_t>(mpidr & 0xFFu);
 }
 
 constexpr std::uint32_t kGicdCtlr = 0x0000;
@@ -47,31 +51,31 @@ constexpr std::uint32_t kGicdPidr2 = 0xFFE8;
 constexpr std::uint32_t kGicrTyper = 0x0008;
 constexpr std::uint32_t kGicrWaker = 0x0014;
 constexpr std::uint32_t kGicrPidr2 = 0xFFE8;
-constexpr std::uint32_t kGicrSgiIgroupr0 = 0x0B0080u;
-constexpr std::uint32_t kGicrSgiIsenabler0 = 0x0B0100u;
-constexpr std::uint32_t kGicrSgiIcenabler0 = 0x0B0180u;
-constexpr std::uint32_t kGicrSgiIspendr0 = 0x0B0200u;
-constexpr std::uint32_t kGicrSgiIcpendr0 = 0x0B0280u;
-constexpr std::uint32_t kGicrSgiIsactiver0 = 0x0B0300u;
-constexpr std::uint32_t kGicrSgiIcactiver0 = 0x0B0380u;
-constexpr std::uint32_t kGicrSgiIpriorityr = 0x0B0400u;
-constexpr std::uint32_t kGicrSgiIcfgr0 = 0x0B0C00u;
-constexpr std::uint32_t kGicrSgiIcfgr1 = 0x0B0C04u;
+constexpr std::uint32_t kGicrSgiIgroupr0 = 0x10080u;
+constexpr std::uint32_t kGicrSgiIsenabler0 = 0x10100u;
+constexpr std::uint32_t kGicrSgiIcenabler0 = 0x10180u;
+constexpr std::uint32_t kGicrSgiIspendr0 = 0x10200u;
+constexpr std::uint32_t kGicrSgiIcpendr0 = 0x10280u;
+constexpr std::uint32_t kGicrSgiIsactiver0 = 0x10300u;
+constexpr std::uint32_t kGicrSgiIcactiver0 = 0x10380u;
+constexpr std::uint32_t kGicrSgiIpriorityr = 0x10400u;
+constexpr std::uint32_t kGicrSgiIcfgr0 = 0x10C00u;
+constexpr std::uint32_t kGicrSgiIcfgr1 = 0x10C04u;
 
 constexpr std::uint32_t kGicArchRevGicv3 = 0x3u << 4;
-constexpr std::uint8_t kDefaultPriority = 0xC0u;
+constexpr std::uint64_t kRedistBaseConst = 0x0A0000;
 
 bool is_write1_bitmap_register(std::uint64_t offset) {
   return (offset >= kGicdIsenabler && offset < (kGicdIsenabler + 0x80u)) ||
          (offset >= kGicdIcenabler && offset < (kGicdIcenabler + 0x80u)) ||
          (offset >= kGicdIsactiver && offset < (kGicdIsactiver + 0x80u)) ||
          (offset >= kGicdIcactiver && offset < (kGicdIcactiver + 0x80u)) ||
-         (offset >= kGicrSgiIsenabler0 && offset < (kGicrSgiIsenabler0 + 4u)) ||
-         (offset >= kGicrSgiIcenabler0 && offset < (kGicrSgiIcenabler0 + 4u)) ||
-         (offset >= kGicrSgiIspendr0 && offset < (kGicrSgiIspendr0 + 4u)) ||
-         (offset >= kGicrSgiIcpendr0 && offset < (kGicrSgiIcpendr0 + 4u)) ||
-         (offset >= kGicrSgiIsactiver0 && offset < (kGicrSgiIsactiver0 + 4u)) ||
-         (offset >= kGicrSgiIcactiver0 && offset < (kGicrSgiIcactiver0 + 4u));
+         (offset >= kRedistBaseConst + kGicrSgiIsenabler0 && offset < (kRedistBaseConst + kGicrSgiIsenabler0 + 4u)) ||
+         (offset >= kRedistBaseConst + kGicrSgiIcenabler0 && offset < (kRedistBaseConst + kGicrSgiIcenabler0 + 4u)) ||
+         (offset >= kRedistBaseConst + kGicrSgiIspendr0 && offset < (kRedistBaseConst + kGicrSgiIspendr0 + 4u)) ||
+         (offset >= kRedistBaseConst + kGicrSgiIcpendr0 && offset < (kRedistBaseConst + kGicrSgiIcpendr0 + 4u)) ||
+         (offset >= kRedistBaseConst + kGicrSgiIsactiver0 && offset < (kRedistBaseConst + kGicrSgiIsactiver0 + 4u)) ||
+         (offset >= kRedistBaseConst + kGicrSgiIcactiver0 && offset < (kRedistBaseConst + kGicrSgiIcactiver0 + 4u));
 }
 
 std::uint32_t read_part(std::uint32_t value, std::uint64_t offset, std::size_t size) {
@@ -88,9 +92,29 @@ std::uint32_t read_part(std::uint32_t value, std::uint64_t offset, std::size_t s
 } // namespace
 
 GicV3::GicV3() {
-  enabled_.fill(false);
-  priorities_.fill(kDefaultPriority);
-  rebuild_bitmaps();
+  set_cpu_count(1);
+  spi_priorities_.fill(kDefaultPriority);
+}
+
+void GicV3::set_cpu_count(std::size_t cpu_count) {
+  cpu_count_ = std::max<std::size_t>(1, cpu_count);
+  locals_.assign(cpu_count_, LocalCpuState{});
+  for (auto& local : locals_) {
+    local.priorities.fill(kDefaultPriority);
+  }
+  ++state_epoch_;
+}
+
+void GicV3::set_cpu_affinity(std::size_t cpu_index, std::uint64_t mpidr) {
+  local_cpu(cpu_index).mpidr = mpidr;
+}
+
+GicV3::LocalCpuState& GicV3::local_cpu(std::size_t cpu_index) {
+  return locals_[std::min(cpu_index, locals_.size() - 1u)];
+}
+
+const GicV3::LocalCpuState& GicV3::local_cpu(std::size_t cpu_index) const {
+  return locals_[std::min(cpu_index, locals_.size() - 1u)];
 }
 
 std::uint64_t GicV3::read(std::uint64_t offset, std::size_t size) {
@@ -98,12 +122,14 @@ std::uint64_t GicV3::read(std::uint64_t offset, std::size_t size) {
     return 0;
   }
 
-  const std::uint32_t value32 =
-      (offset < kDistSize) ? read_dist_reg32(offset & ~0x3ull) : read_redist_reg32(offset & ~0x3ull);
+  const auto read32 = [&](std::uint64_t off) {
+    return (off < kDistSize) ? read_dist_reg32(off & ~0x3ull) : read_redist_reg32(off & ~0x3ull);
+  };
+
+  const std::uint32_t value32 = read32(offset);
   if (size == 8u) {
     const std::uint64_t lo = value32;
-    const std::uint64_t hi =
-        (offset < kDistSize) ? read_dist_reg32((offset & ~0x7ull) + 4u) : read_redist_reg32((offset & ~0x7ull) + 4u);
+    const std::uint64_t hi = read32((offset & ~0x7ull) + 4u);
     return lo | (hi << 32u);
   }
   return read_part(value32, offset, size);
@@ -160,19 +186,19 @@ std::uint32_t GicV3::read_dist_reg32(std::uint64_t offset) const {
   }
   if (offset >= kGicdIsenabler && offset < (kGicdIsenabler + 0x80u)) {
     const std::uint32_t n = static_cast<std::uint32_t>((offset - kGicdIsenabler) / 4u);
-    return (n == 0u) ? 0u : get_enable_range(n * 32u);
+    return (n == 0u) ? 0u : get_spi_enable_range(n * 32u);
   }
   if (offset >= kGicdIcenabler && offset < (kGicdIcenabler + 0x80u)) {
     const std::uint32_t n = static_cast<std::uint32_t>((offset - kGicdIcenabler) / 4u);
-    return (n == 0u) ? 0u : get_enable_range(n * 32u);
+    return (n == 0u) ? 0u : get_spi_enable_range(n * 32u);
   }
   if (offset >= kGicdIsactiver && offset < (kGicdIsactiver + 0x80u)) {
     const std::uint32_t n = static_cast<std::uint32_t>((offset - kGicdIsactiver) / 4u);
-    return (n == 0u) ? 0u : get_active_range(n * 32u);
+    return (n == 0u) ? 0u : get_spi_active_range(n * 32u);
   }
   if (offset >= kGicdIcactiver && offset < (kGicdIcactiver + 0x80u)) {
     const std::uint32_t n = static_cast<std::uint32_t>((offset - kGicdIcactiver) / 4u);
-    return (n == 0u) ? 0u : get_active_range(n * 32u);
+    return (n == 0u) ? 0u : get_spi_active_range(n * 32u);
   }
   if (offset >= kGicdIpriorityr && offset < (kGicdIpriorityr + kNumIntIds)) {
     const std::uint32_t first = static_cast<std::uint32_t>(offset - kGicdIpriorityr);
@@ -188,38 +214,78 @@ std::uint32_t GicV3::read_dist_reg32(std::uint64_t offset) const {
 }
 
 std::uint32_t GicV3::read_redist_reg32(std::uint64_t offset) const {
-  if (offset == (kRedistBase + kGicrTyper)) {
-    return 1u << 4;
+  if (offset < kRedistBase) {
+    return 0;
   }
-  if (offset == (kRedistBase + kGicrWaker)) {
-    return gicr_waker_ & ~0x4u;
+  const std::uint64_t rel = offset - kRedistBase;
+  const std::size_t frame = static_cast<std::size_t>(rel / kRedistFrameSize);
+  if (frame >= locals_.size()) {
+    return 0;
   }
-  if (offset == (kRedistBase + kGicrPidr2)) {
+  const std::uint64_t inner = rel % kRedistFrameSize;
+  const auto& local = local_cpu(frame);
+
+  if (inner == kGicrTyper) {
+    const bool last = (frame + 1u) == locals_.size();
+    const std::uint32_t proc_num = static_cast<std::uint32_t>(frame) << 8u;
+    return (last ? (1u << 4) : 0u) | proc_num;
+  }
+  if (inner == (kGicrTyper + 4u)) {
+    return gicr_affinity_value(local.mpidr);
+  }
+  if (inner == kGicrWaker) {
+    return local.gicr_waker & ~0x4u;
+  }
+  if (inner == kGicrPidr2) {
     return kGicArchRevGicv3;
   }
-  if (offset == (kRedistSgiBase + 0x0008u)) {
-    return 1u << 4;
+  if (inner == kGicrSgiIgroupr0) {
+    return local.gicr_igroupr0;
   }
-  if (offset == kGicrSgiIgroupr0) {
-    return gicr_igroupr0_;
+  if (inner == kGicrSgiIsenabler0 || inner == kGicrSgiIcenabler0) {
+    std::uint32_t value = 0;
+    for (std::uint32_t intid = 0; intid < kLocalIntIds; ++intid) {
+      if (local.enabled[intid]) {
+        value |= (1u << intid);
+      }
+    }
+    return value;
   }
-  if (offset == kGicrSgiIsenabler0 || offset == kGicrSgiIcenabler0) {
-    return get_enable_range(0u);
+  if (inner == kGicrSgiIspendr0 || inner == kGicrSgiIcpendr0) {
+    std::uint32_t value = 0;
+    for (std::uint32_t intid = 0; intid < kLocalIntIds; ++intid) {
+      if (local.pending[intid]) {
+        value |= (1u << intid);
+      }
+    }
+    return value;
   }
-  if (offset == kGicrSgiIspendr0 || offset == kGicrSgiIcpendr0) {
-    return get_pending_range(0u);
+  if (inner == kGicrSgiIsactiver0 || inner == kGicrSgiIcactiver0) {
+    std::uint32_t value = 0;
+    for (std::uint32_t intid = 0; intid < kLocalIntIds; ++intid) {
+      if (local.active[intid]) {
+        value |= (1u << intid);
+      }
+    }
+    return value;
   }
-  if (offset == kGicrSgiIsactiver0 || offset == kGicrSgiIcactiver0) {
-    return get_active_range(0u);
+  if (inner >= kGicrSgiIpriorityr && inner < (kGicrSgiIpriorityr + kLocalIntIds)) {
+    std::uint32_t out = 0;
+    const std::uint32_t first = static_cast<std::uint32_t>(inner - kGicrSgiIpriorityr);
+    for (std::uint32_t i = 0; i < 4u; ++i) {
+      const std::uint32_t intid = first + i;
+      if (intid >= kLocalIntIds) {
+        break;
+      }
+      out |= static_cast<std::uint32_t>(local.priorities[intid]) << (i * 8u);
+    }
+    return out;
   }
-  if (offset >= kGicrSgiIpriorityr && offset < (kGicrSgiIpriorityr + 32u)) {
-    return get_priority_range(static_cast<std::uint32_t>(offset - kGicrSgiIpriorityr));
+  if (inner == kGicrSgiIcfgr0) {
+    return local.gicr_icfgr0;
   }
-  if (offset == kGicrSgiIcfgr0) {
-    return gicr_icfgr0_;
-  }
-  if (offset == kGicrSgiIcfgr1) {
-    return gicr_icfgr1_;
+  if (inner == kGicrSgiIcfgr1) {
+    return local.gicr_icfgr1;
   }
   return 0;
 }
@@ -232,296 +298,183 @@ void GicV3::write_dist_reg32(std::uint64_t offset, std::uint32_t value) {
   if (offset >= kGicdIsenabler && offset < (kGicdIsenabler + 0x80u)) {
     const std::uint32_t n = static_cast<std::uint32_t>((offset - kGicdIsenabler) / 4u);
     if (n != 0u) {
-      set_enable_range(n * 32u, value, true);
+      set_spi_enable_range(n * 32u, value, true);
     }
     return;
   }
   if (offset >= kGicdIcenabler && offset < (kGicdIcenabler + 0x80u)) {
     const std::uint32_t n = static_cast<std::uint32_t>((offset - kGicdIcenabler) / 4u);
     if (n != 0u) {
-      set_enable_range(n * 32u, value, false);
+      set_spi_enable_range(n * 32u, value, false);
     }
     return;
   }
   if (offset >= kGicdIsactiver && offset < (kGicdIsactiver + 0x80u)) {
     const std::uint32_t n = static_cast<std::uint32_t>((offset - kGicdIsactiver) / 4u);
     if (n != 0u) {
-      set_active_range(n * 32u, value, true);
+      set_spi_active_range(n * 32u, value, true);
     }
     return;
   }
   if (offset >= kGicdIcactiver && offset < (kGicdIcactiver + 0x80u)) {
     const std::uint32_t n = static_cast<std::uint32_t>((offset - kGicdIcactiver) / 4u);
     if (n != 0u) {
-      set_active_range(n * 32u, value, false);
+      set_spi_active_range(n * 32u, value, false);
     }
     return;
   }
   if (offset >= kGicdIpriorityr && offset < (kGicdIpriorityr + kNumIntIds)) {
     const std::uint32_t first = static_cast<std::uint32_t>(offset - kGicdIpriorityr);
-    set_priority_range(first, value, 0u, 4u);
-    return;
+    set_priority_range(first, value, 0u, 4u, 0u, false);
   }
 }
 
 void GicV3::write_redist_reg32(std::uint64_t offset, std::uint32_t value) {
-  if (offset == (kRedistBase + kGicrWaker)) {
-    gicr_waker_ = value & 0x2u;
+  if (offset < kRedistBase) {
     return;
   }
-  if (offset == kGicrSgiIgroupr0) {
-    gicr_igroupr0_ = value;
+  const std::uint64_t rel = offset - kRedistBase;
+  const std::size_t frame = static_cast<std::size_t>(rel / kRedistFrameSize);
+  if (frame >= locals_.size()) {
     return;
   }
-  if (offset == kGicrSgiIsenabler0) {
-    set_enable_range(0u, value, true);
-    return;
-  }
-  if (offset == kGicrSgiIcenabler0) {
-    set_enable_range(0u, value, false);
-    return;
-  }
-  if (offset == kGicrSgiIspendr0) {
-    set_pending_range(0u, value, true);
-    return;
-  }
-  if (offset == kGicrSgiIcpendr0) {
-    set_pending_range(0u, value, false);
-    return;
-  }
-  if (offset == kGicrSgiIsactiver0) {
-    set_active_range(0u, value, true);
-    return;
-  }
-  if (offset == kGicrSgiIcactiver0) {
-    set_active_range(0u, value, false);
-    return;
-  }
-  if (offset >= kGicrSgiIpriorityr && offset < (kGicrSgiIpriorityr + 32u)) {
-    set_priority_range(static_cast<std::uint32_t>(offset - kGicrSgiIpriorityr), value, 0u, 4u);
-    return;
-  }
-  if (offset == kGicrSgiIcfgr0) {
-    gicr_icfgr0_ = value;
-    return;
-  }
-  if (offset == kGicrSgiIcfgr1) {
-    gicr_icfgr1_ = value;
-    return;
-  }
-}
+  const std::uint64_t inner = rel % kRedistFrameSize;
+  auto& local = local_cpu(frame);
 
-void GicV3::refresh_word(std::uint32_t word_index_value) {
-  if (word_index_value >= kWords) {
+  if (inner == kGicrWaker) {
+    local.gicr_waker = value & 0x2u;
     return;
   }
-
-  const std::uint32_t first = word_index_value * 64u;
-  std::uint64_t pending_word = 0;
-  std::uint64_t enabled_word = 0;
-  std::uint64_t active_word = 0;
-  for (std::uint32_t bit = 0; bit < 64u; ++bit) {
-    const std::uint32_t intid = first + bit;
-    if (intid >= kNumIntIds) {
-      break;
+  if (inner == kGicrSgiIgroupr0) {
+    local.gicr_igroupr0 = value;
+    return;
+  }
+  if (inner == kGicrSgiIsenabler0) {
+    for (std::uint32_t intid = 0; intid < kLocalIntIds; ++intid) {
+      if ((value & (1u << intid)) != 0u) {
+        set_local_enabled_bit(frame, intid, true);
+      }
     }
-    if (pending_[intid]) {
-      pending_word |= (1ull << bit);
-    }
-    if (enabled_[intid]) {
-      enabled_word |= (1ull << bit);
-    }
-    if (active_[intid]) {
-      active_word |= (1ull << bit);
-    }
-  }
-  pending_bits_[word_index_value] = pending_word;
-  enabled_bits_[word_index_value] = enabled_word;
-  active_bits_[word_index_value] = active_word;
-  pending_enabled_bits_[word_index_value] = pending_word & enabled_word & ~active_word;
-}
-
-void GicV3::rebuild_bitmaps() {
-  pending_bits_.fill(0);
-  enabled_bits_.fill(0);
-  active_bits_.fill(0);
-  pending_enabled_bits_.fill(0);
-  for (std::uint32_t word = 0; word < kWords; ++word) {
-    refresh_word(word);
-  }
-  recompute_best_pending();
-}
-
-bool GicV3::is_candidate(std::uint32_t intid) const {
-  return intid < kNumIntIds && pending_[intid] && enabled_[intid] && !active_[intid];
-}
-
-void GicV3::consider_best_pending(std::uint32_t intid) {
-  if (!is_candidate(intid)) {
     return;
   }
-  const std::uint8_t prio = priorities_[intid];
-  if (!best_pending_valid_ || prio < best_pending_priority_ ||
-      (prio == best_pending_priority_ && intid < best_pending_intid_)) {
-    best_pending_valid_ = true;
-    best_pending_intid_ = intid;
-    best_pending_priority_ = prio;
+  if (inner == kGicrSgiIcenabler0) {
+    for (std::uint32_t intid = 0; intid < kLocalIntIds; ++intid) {
+      if ((value & (1u << intid)) != 0u) {
+        set_local_enabled_bit(frame, intid, false);
+      }
+    }
+    return;
+  }
+  if (inner == kGicrSgiIspendr0) {
+    for (std::uint32_t intid = 0; intid < kLocalIntIds; ++intid) {
+      if ((value & (1u << intid)) != 0u) {
+        set_local_pending_bit(frame, intid, true);
+      }
+    }
+    return;
+  }
+  if (inner == kGicrSgiIcpendr0) {
+    for (std::uint32_t intid = 0; intid < kLocalIntIds; ++intid) {
+      if ((value & (1u << intid)) != 0u) {
+        set_local_pending_bit(frame, intid, false);
+      }
+    }
+    return;
+  }
+  if (inner == kGicrSgiIsactiver0) {
+    for (std::uint32_t intid = 0; intid < kLocalIntIds; ++intid) {
+      if ((value & (1u << intid)) != 0u) {
+        set_local_active_bit(frame, intid, true);
+      }
+    }
+    return;
+  }
+  if (inner == kGicrSgiIcactiver0) {
+    for (std::uint32_t intid = 0; intid < kLocalIntIds; ++intid) {
+      if ((value & (1u << intid)) != 0u) {
+        set_local_active_bit(frame, intid, false);
+      }
+    }
+    return;
+  }
+  if (inner >= kGicrSgiIpriorityr && inner < (kGicrSgiIpriorityr + kLocalIntIds)) {
+    set_priority_range(static_cast<std::uint32_t>(inner - kGicrSgiIpriorityr), value, 0u, 4u, frame, true);
+    return;
+  }
+  if (inner == kGicrSgiIcfgr0) {
+    local.gicr_icfgr0 = value;
+    return;
+  }
+  if (inner == kGicrSgiIcfgr1) {
+    local.gicr_icfgr1 = value;
+    return;
   }
 }
 
-void GicV3::recompute_best_pending() {
-  ++perf_counters_.recompute_calls;
-  best_pending_valid_ = false;
-  best_pending_intid_ = 1023u;
-  best_pending_priority_ = 0xFFu;
-  for (std::uint32_t intid = 0; intid < kNumIntIds; ++intid) {
-    if (!pending_[intid] || !enabled_[intid] || active_[intid]) {
+void GicV3::set_spi_enable_range(std::uint32_t first_intid, std::uint32_t bits, bool enable) {
+  for (std::uint32_t bit = 0; bit < 32u; ++bit) {
+    if ((bits & (1u << bit)) == 0u) {
       continue;
     }
-    const std::uint8_t prio = priorities_[intid];
-    if (!best_pending_valid_ || prio < best_pending_priority_ ||
-        (prio == best_pending_priority_ && intid < best_pending_intid_)) {
-      best_pending_valid_ = true;
-      best_pending_intid_ = intid;
-      best_pending_priority_ = prio;
+    const std::uint32_t intid = first_intid + bit;
+    if (intid >= kNumIntIds || intid < kFirstSpiIntId) {
+      continue;
     }
+    set_spi_enabled_bit(intid, enable);
   }
 }
 
-void GicV3::set_pending_bit(std::uint32_t intid, bool value) {
-  if (intid >= kNumIntIds || pending_[intid] == value) {
-    return;
-  }
-  if (gic_pending_trace_enabled() && (intid == 21u || intid == 27u || intid == 33u)) {
-    std::cerr << std::dec << "GIC-PEND intid=" << intid << " val=" << (value ? 1 : 0) << '\n';
-  }
-  const bool was_best = best_pending_valid_ && best_pending_intid_ == intid;
-  pending_[intid] = value;
-  ++state_epoch_;
-  refresh_word(word_index(intid));
-  if (value) {
-    consider_best_pending(intid);
-  } else if (was_best) {
-    recompute_best_pending();
-  }
-}
-
-void GicV3::set_enabled_bit(std::uint32_t intid, bool value) {
-  if (intid >= kNumIntIds || enabled_[intid] == value) {
-    return;
-  }
-  const bool was_best = best_pending_valid_ && best_pending_intid_ == intid;
-  enabled_[intid] = value;
-  ++state_epoch_;
-  refresh_word(word_index(intid));
-  if (value) {
-    consider_best_pending(intid);
-  } else if (was_best) {
-    recompute_best_pending();
-  }
-}
-
-void GicV3::set_active_bit(std::uint32_t intid, bool value) {
-  if (intid >= kNumIntIds || active_[intid] == value) {
-    return;
-  }
-  const bool was_best = best_pending_valid_ && best_pending_intid_ == intid;
-  active_[intid] = value;
-  ++state_epoch_;
-  refresh_word(word_index(intid));
-  if (!value) {
-    consider_best_pending(intid);
-  } else if (was_best) {
-    recompute_best_pending();
-  }
-}
-
-void GicV3::set_enable_range(std::uint32_t first_intid, std::uint32_t bits, bool enable) {
+std::uint32_t GicV3::get_spi_enable_range(std::uint32_t first_intid) const {
+  std::uint32_t value = 0;
   for (std::uint32_t bit = 0; bit < 32u; ++bit) {
     const std::uint32_t intid = first_intid + bit;
-    if (intid >= kNumIntIds) {
-      break;
+    if (intid >= kNumIntIds || intid < kFirstSpiIntId) {
+      continue;
     }
-    if (((bits >> bit) & 1u) != 0u) {
-      enabled_[intid] = enable;
-      trace_gic("GIC-ENABLE", intid, enable);
-    }
-  }
-  refresh_word(word_index(first_intid));
-  recompute_best_pending();
-}
-
-std::uint32_t GicV3::get_enable_range(std::uint32_t first_intid) const {
-  std::uint32_t bits = 0;
-  for (std::uint32_t bit = 0; bit < 32u; ++bit) {
-    const std::uint32_t intid = first_intid + bit;
-    if (intid >= kNumIntIds) {
-      break;
-    }
-    if (enabled_[intid]) {
-      bits |= (1u << bit);
+    if (spi_enabled_[spi_index(intid)]) {
+      value |= (1u << bit);
     }
   }
-  return bits;
+  return value;
 }
 
-void GicV3::set_pending_range(std::uint32_t first_intid, std::uint32_t bits, bool value) {
+void GicV3::set_spi_active_range(std::uint32_t first_intid, std::uint32_t bits, bool value) {
   for (std::uint32_t bit = 0; bit < 32u; ++bit) {
+    if ((bits & (1u << bit)) == 0u) {
+      continue;
+    }
     const std::uint32_t intid = first_intid + bit;
-    if (intid >= kNumIntIds) {
-      break;
+    if (intid >= kNumIntIds || intid < kFirstSpiIntId) {
+      continue;
     }
-    if (((bits >> bit) & 1u) != 0u) {
-      set_pending_bit(intid, value);
-    }
+    set_spi_active_bit(intid, value);
   }
 }
 
-std::uint32_t GicV3::get_pending_range(std::uint32_t first_intid) const {
-  std::uint32_t bits = 0;
+std::uint32_t GicV3::get_spi_active_range(std::uint32_t first_intid) const {
+  std::uint32_t value = 0;
   for (std::uint32_t bit = 0; bit < 32u; ++bit) {
     const std::uint32_t intid = first_intid + bit;
-    if (intid >= kNumIntIds) {
-      break;
+    if (intid >= kNumIntIds || intid < kFirstSpiIntId) {
+      continue;
     }
-    if (pending_[intid]) {
-      bits |= (1u << bit);
-    }
-  }
-  return bits;
-}
-
-void GicV3::set_active_range(std::uint32_t first_intid, std::uint32_t bits, bool value) {
-  for (std::uint32_t bit = 0; bit < 32u; ++bit) {
-    const std::uint32_t intid = first_intid + bit;
-    if (intid >= kNumIntIds) {
-      break;
-    }
-    if (((bits >> bit) & 1u) != 0u) {
-      set_active_bit(intid, value);
+    if (spi_active_[spi_index(intid)]) {
+      value |= (1u << bit);
     }
   }
-}
-
-std::uint32_t GicV3::get_active_range(std::uint32_t first_intid) const {
-  std::uint32_t bits = 0;
-  for (std::uint32_t bit = 0; bit < 32u; ++bit) {
-    const std::uint32_t intid = first_intid + bit;
-    if (intid >= kNumIntIds) {
-      break;
-    }
-    if (active_[intid]) {
-      bits |= (1u << bit);
-    }
-  }
-  return bits;
+  return value;
 }
 
 std::uint32_t GicV3::get_priority_range(std::uint32_t first_intid) const {
   std::uint32_t value = 0;
   for (std::uint32_t i = 0; i < 4u; ++i) {
     const std::uint32_t intid = first_intid + i;
-    const std::uint8_t prio = (intid < kNumIntIds) ? priorities_[intid] : kDefaultPriority;
+    std::uint8_t prio = kDefaultPriority;
+    if (intid < kLocalIntIds) {
+      prio = locals_[0].priorities[intid];
+    } else if (intid < kNumIntIds) {
+      prio = spi_priorities_[spi_index(intid)];
+    }
     value |= static_cast<std::uint32_t>(prio) << (i * 8u);
   }
   return value;
@@ -530,169 +483,406 @@ std::uint32_t GicV3::get_priority_range(std::uint32_t first_intid) const {
 void GicV3::set_priority_range(std::uint32_t first_intid,
                                std::uint32_t value,
                                std::uint32_t start_byte,
-                               std::uint32_t count) {
-  bool need_recompute = false;
-  for (std::uint32_t i = 0; i < count; ++i) {
-    const std::uint32_t intid = first_intid + start_byte + i;
-    if (intid >= kNumIntIds) {
-      break;
-    }
-    const std::uint8_t old_prio = priorities_[intid];
-    const std::uint8_t new_prio = static_cast<std::uint8_t>((value >> (i * 8u)) & 0xFFu);
-    if (old_prio == new_prio) {
-      continue;
-    }
-    priorities_[intid] = new_prio;
-    ++state_epoch_;
-    if (best_pending_valid_ && best_pending_intid_ == intid) {
-      need_recompute = true;
-    } else {
-      consider_best_pending(intid);
+                               std::uint32_t count,
+                               std::size_t cpu_index,
+                               bool local) {
+  for (std::uint32_t i = start_byte; i < count; ++i) {
+    const std::uint32_t intid = first_intid + i;
+    const std::uint8_t prio = static_cast<std::uint8_t>((value >> (i * 8u)) & 0xFFu);
+    if (local) {
+      if (intid < kLocalIntIds) {
+        local_cpu(cpu_index).priorities[intid] = prio;
+      }
+    } else if (intid >= kFirstSpiIntId && intid < kNumIntIds) {
+      spi_priorities_[spi_index(intid)] = prio;
     }
   }
-  if (need_recompute) {
-    recompute_best_pending();
+  ++state_epoch_;
+}
+
+void GicV3::set_local_pending_bit(std::size_t cpu_index, std::uint32_t intid, bool value) {
+  auto& local = local_cpu(cpu_index);
+  if (intid >= kLocalIntIds || local.pending[intid] == value) {
+    return;
   }
+  local.pending[intid] = value;
+  ++state_epoch_;
+  trace_gic("GIC-PEND-L", cpu_index, intid, value);
+}
+
+void GicV3::set_local_enabled_bit(std::size_t cpu_index, std::uint32_t intid, bool value) {
+  auto& local = local_cpu(cpu_index);
+  if (intid >= kLocalIntIds || local.enabled[intid] == value) {
+    return;
+  }
+  local.enabled[intid] = value;
+  ++state_epoch_;
+}
+
+void GicV3::set_local_active_bit(std::size_t cpu_index, std::uint32_t intid, bool value) {
+  auto& local = local_cpu(cpu_index);
+  if (intid >= kLocalIntIds || local.active[intid] == value) {
+    return;
+  }
+  local.active[intid] = value;
+  ++state_epoch_;
+}
+
+void GicV3::set_spi_pending_bit(std::uint32_t intid, bool value) {
+  if (intid < kFirstSpiIntId || intid >= kNumIntIds) {
+    return;
+  }
+  auto& slot = spi_pending_[spi_index(intid)];
+  if (slot == value) {
+    return;
+  }
+  slot = value;
+  ++state_epoch_;
+  trace_gic("GIC-PEND-S", 0, intid, value);
+}
+
+void GicV3::set_spi_enabled_bit(std::uint32_t intid, bool value) {
+  if (intid < kFirstSpiIntId || intid >= kNumIntIds) {
+    return;
+  }
+  auto& slot = spi_enabled_[spi_index(intid)];
+  if (slot == value) {
+    return;
+  }
+  slot = value;
+  ++state_epoch_;
+}
+
+void GicV3::set_spi_active_bit(std::uint32_t intid, bool value) {
+  if (intid < kFirstSpiIntId || intid >= kNumIntIds) {
+    return;
+  }
+  auto& slot = spi_active_[spi_index(intid)];
+  if (slot == value) {
+    return;
+  }
+  slot = value;
+  ++state_epoch_;
 }
 
 void GicV3::set_pending(std::uint32_t intid) {
-  set_pending_bit(intid, true);
-  if (!best_pending_valid_) {
-    ++state_epoch_;
+  if (is_local_intid(intid)) {
+    set_pending(0, intid);
+    return;
+  }
+  set_spi_pending_bit(intid, true);
+}
+
+void GicV3::set_pending(std::size_t cpu_index, std::uint32_t intid) {
+  if (is_local_intid(intid)) {
+    set_local_pending_bit(cpu_index, intid, true);
+  } else {
+    set_spi_pending_bit(intid, true);
   }
 }
 
 void GicV3::set_level(std::uint32_t intid, bool asserted) {
   ++perf_counters_.set_level_calls;
-  if (intid >= kNumIntIds || line_level_[intid] == asserted) {
+  if (is_local_intid(intid)) {
+    set_level(0, intid, asserted);
     return;
   }
-  line_level_[intid] = asserted;
+  if (intid >= kNumIntIds || spi_line_level_[spi_index(intid)] == asserted) {
+    return;
+  }
+  spi_line_level_[spi_index(intid)] = asserted;
   ++state_epoch_;
-  if (asserted && !active_[intid]) {
-    set_pending_bit(intid, true);
+  if (asserted && !spi_active_[spi_index(intid)]) {
+    set_spi_pending_bit(intid, true);
+  }
+  trace_gic("GIC-LVL-S", 0, intid, asserted);
+}
+
+void GicV3::set_level(std::size_t cpu_index, std::uint32_t intid, bool asserted) {
+  ++perf_counters_.set_level_calls;
+  if (!is_local_intid(intid)) {
+    set_level(intid, asserted);
+    return;
+  }
+  auto& local = local_cpu(cpu_index);
+  if (local.line_level[intid] == asserted) {
+    return;
+  }
+  local.line_level[intid] = asserted;
+  ++state_epoch_;
+  if (asserted && !local.active[intid]) {
+    set_local_pending_bit(cpu_index, intid, true);
+  }
+  trace_gic("GIC-LVL-L", cpu_index, intid, asserted);
+}
+
+bool GicV3::match_affinity(std::size_t cpu_index,
+                           std::uint8_t aff3,
+                           std::uint8_t aff2,
+                           std::uint8_t aff1) const {
+  const std::uint64_t mpidr = local_cpu(cpu_index).mpidr;
+  return (((mpidr >> 32) & 0xFFu) == aff3) &&
+         (((mpidr >> 16) & 0xFFu) == aff2) &&
+         (((mpidr >> 8) & 0xFFu) == aff1);
+}
+
+void GicV3::send_sgi(std::size_t source_cpu, std::uint64_t value) {
+  const std::uint32_t intid = static_cast<std::uint32_t>((value >> 24) & 0xFu);
+  const bool irm = ((value >> 40) & 0x1u) != 0u;
+  const std::uint16_t target_list = static_cast<std::uint16_t>(value & 0xFFFFu);
+  const std::uint8_t aff1 = static_cast<std::uint8_t>((value >> 16) & 0xFFu);
+  const std::uint8_t aff2 = static_cast<std::uint8_t>((value >> 32) & 0xFFu);
+  const std::uint8_t aff3 = static_cast<std::uint8_t>((value >> 48) & 0xFFu);
+  if (intid >= 16u) {
+    return;
+  }
+
+  for (std::size_t cpu = 0; cpu < locals_.size(); ++cpu) {
+    if (irm) {
+      if (cpu == source_cpu) {
+        continue;
+      }
+      set_local_pending_bit(cpu, intid, true);
+      continue;
+    }
+    if (!match_affinity(cpu, aff3, aff2, aff1)) {
+      continue;
+    }
+    const std::uint32_t aff0 = static_cast<std::uint32_t>(local_cpu(cpu).mpidr & 0xFFu);
+    if (aff0 < 16u && ((target_list >> aff0) & 0x1u) != 0u) {
+      set_local_pending_bit(cpu, intid, true);
+    }
   }
 }
 
-bool GicV3::has_pending() const {
-  ++perf_counters_.has_pending_calls;
-  return best_pending_valid_;
+bool GicV3::local_candidate(std::size_t cpu_index, std::uint32_t intid, std::uint8_t pmr) const {
+  const auto& local = local_cpu(cpu_index);
+  return local.pending[intid] && local.enabled[intid] && local.priorities[intid] < pmr;
 }
 
-bool GicV3::has_pending(std::uint8_t pmr) const {
-  ++perf_counters_.has_pending_calls;
-  return best_pending_valid_ && best_pending_priority_ < pmr;
+bool GicV3::spi_candidate(std::uint32_t intid, std::uint8_t pmr) const {
+  return spi_pending_[spi_index(intid)] && spi_enabled_[spi_index(intid)] && spi_priorities_[spi_index(intid)] < pmr;
 }
 
-bool GicV3::acknowledge(std::uint32_t& intid) {
+bool GicV3::has_pending(std::size_t cpu_index) const {
+  return has_pending(cpu_index, 0xFFu);
+}
+
+bool GicV3::has_pending(std::size_t cpu_index, std::uint8_t pmr) const {
+  ++perf_counters_.has_pending_calls;
+  for (std::uint32_t intid = 0; intid < kLocalIntIds; ++intid) {
+    if (local_candidate(cpu_index, intid, pmr)) {
+      return true;
+    }
+  }
+  for (std::uint32_t intid = kFirstSpiIntId; intid < kNumIntIds; ++intid) {
+    if (spi_candidate(intid, pmr)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool GicV3::acknowledge(std::size_t cpu_index, std::uint32_t& intid) {
+  return acknowledge(cpu_index, 0xFFu, intid);
+}
+
+bool GicV3::acknowledge(std::size_t cpu_index, std::uint8_t pmr, std::uint32_t& intid) {
   ++perf_counters_.acknowledge_calls;
-  for (std::uint32_t word = 0; word < kWords; ++word) {
-    const std::uint64_t bits = pending_enabled_bits_[word];
-    if (bits == 0u) {
+  for (std::uint32_t local_intid = 0; local_intid < kLocalIntIds; ++local_intid) {
+    if (!local_candidate(cpu_index, local_intid, pmr)) {
       continue;
     }
-    const std::uint32_t bit = static_cast<std::uint32_t>(__builtin_ctzll(bits));
-    intid = word * 64u + bit;
-    set_pending_bit(intid, false);
-    set_active_bit(intid, true);
+    intid = local_intid;
+    set_local_pending_bit(cpu_index, local_intid, false);
+    set_local_active_bit(cpu_index, local_intid, true);
+    return true;
+  }
+  for (std::uint32_t global_intid = kFirstSpiIntId; global_intid < kNumIntIds; ++global_intid) {
+    if (!spi_candidate(global_intid, pmr)) {
+      continue;
+    }
+    intid = global_intid;
+    set_spi_pending_bit(global_intid, false);
+    set_spi_active_bit(global_intid, true);
     return true;
   }
   intid = 1023u;
   return false;
 }
 
-bool GicV3::acknowledge(std::uint8_t pmr, std::uint32_t& intid) {
-  ++perf_counters_.acknowledge_calls;
-  if (!best_pending_valid_ || best_pending_priority_ >= pmr) {
-    intid = 1023u;
-    return false;
+void GicV3::eoi(std::size_t cpu_index, std::uint32_t intid) {
+  if (is_local_intid(intid)) {
+    set_local_active_bit(cpu_index, intid, false);
+    if (local_cpu(cpu_index).line_level[intid]) {
+      set_local_pending_bit(cpu_index, intid, true);
+    }
+    return;
   }
-  intid = best_pending_intid_;
-  set_pending_bit(intid, false);
-  set_active_bit(intid, true);
-  return true;
-}
-
-void GicV3::eoi(std::uint32_t intid) {
   if (intid >= kNumIntIds) {
     return;
   }
-  set_active_bit(intid, false);
-  if (line_level_[intid]) {
-    set_pending_bit(intid, true);
+  set_spi_active_bit(intid, false);
+  if (spi_line_level_[spi_index(intid)]) {
+    set_spi_pending_bit(intid, true);
   }
 }
 
 bool GicV3::pending(std::uint32_t intid) const {
+  if (intid < kLocalIntIds) {
+    return local_cpu(0).pending[intid];
+  }
   if (intid >= kNumIntIds) {
     return false;
   }
-  return (pending_bits_[word_index(intid)] & bit_mask(intid)) != 0u;
+  return spi_pending_[spi_index(intid)];
 }
 
 bool GicV3::enabled(std::uint32_t intid) const {
+  if (intid < kLocalIntIds) {
+    return local_cpu(0).enabled[intid];
+  }
   if (intid >= kNumIntIds) {
     return false;
   }
-  return (enabled_bits_[word_index(intid)] & bit_mask(intid)) != 0u;
+  return spi_enabled_[spi_index(intid)];
 }
 
-std::uint8_t GicV3::priority(std::uint32_t intid) const {
+std::uint8_t GicV3::priority(std::size_t cpu_index, std::uint32_t intid) const {
+  if (intid < kLocalIntIds) {
+    return local_cpu(cpu_index).priorities[intid];
+  }
   if (intid >= kNumIntIds) {
     return kDefaultPriority;
   }
-  return priorities_[intid];
+  return spi_priorities_[spi_index(intid)];
 }
 
 bool GicV3::save_state(std::ostream& out) const {
-  return snapshot_io::write_array(out, pending_) &&
-         snapshot_io::write_array(out, enabled_) &&
-         snapshot_io::write_array(out, active_) &&
-         snapshot_io::write_array(out, line_level_) &&
-         snapshot_io::write_array(out, priorities_) &&
-         snapshot_io::write(out, gicd_ctlr_) &&
-         snapshot_io::write(out, gicr_waker_) &&
-         snapshot_io::write(out, gicr_igroupr0_) &&
-         snapshot_io::write(out, gicr_icfgr0_) &&
-         snapshot_io::write(out, gicr_icfgr1_);
+  const std::uint32_t snapshot_cpu_count = static_cast<std::uint32_t>(locals_.size());
+  if (!snapshot_io::write(out, snapshot_cpu_count) ||
+      !snapshot_io::write_array(out, spi_pending_) ||
+      !snapshot_io::write_array(out, spi_enabled_) ||
+      !snapshot_io::write_array(out, spi_active_) ||
+      !snapshot_io::write_array(out, spi_line_level_) ||
+      !snapshot_io::write_array(out, spi_priorities_) ||
+      !snapshot_io::write(out, gicd_ctlr_)) {
+    return false;
+  }
+  for (const auto& local : locals_) {
+    if (!snapshot_io::write_array(out, local.pending) ||
+        !snapshot_io::write_array(out, local.enabled) ||
+        !snapshot_io::write_array(out, local.active) ||
+        !snapshot_io::write_array(out, local.line_level) ||
+        !snapshot_io::write_array(out, local.priorities) ||
+        !snapshot_io::write(out, local.gicr_waker) ||
+        !snapshot_io::write(out, local.gicr_igroupr0) ||
+        !snapshot_io::write(out, local.gicr_icfgr0) ||
+        !snapshot_io::write(out, local.gicr_icfgr1) ||
+        !snapshot_io::write(out, local.mpidr)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool GicV3::load_state(std::istream& in, std::uint32_t version) {
-  active_.fill(false);
-  line_level_.fill(false);
-  priorities_.fill(kDefaultPriority);
-  gicr_igroupr0_ = 0xFFFFFFFFu;
-  gicr_icfgr0_ = 0xAAAAAAAAu;
-  gicr_icfgr1_ = 0;
-  if (!snapshot_io::read_array(in, pending_) ||
-      !snapshot_io::read_array(in, enabled_)) {
-    return false;
-  }
-  if (version >= 3) {
-    if (!snapshot_io::read_array(in, active_)) {
+  spi_pending_.fill(false);
+  spi_enabled_.fill(false);
+  spi_active_.fill(false);
+  spi_line_level_.fill(false);
+  spi_priorities_.fill(kDefaultPriority);
+  set_cpu_count(1);
+
+  if (version >= 5) {
+    std::uint32_t snapshot_cpu_count = 0;
+    if (!snapshot_io::read(in, snapshot_cpu_count) || snapshot_cpu_count == 0u) {
       return false;
     }
-    if (version >= 4) {
-      if (!snapshot_io::read_array(in, line_level_)) {
+    set_cpu_count(snapshot_cpu_count);
+    if (!snapshot_io::read_array(in, spi_pending_) ||
+        !snapshot_io::read_array(in, spi_enabled_) ||
+        !snapshot_io::read_array(in, spi_active_) ||
+        !snapshot_io::read_array(in, spi_line_level_) ||
+        !snapshot_io::read_array(in, spi_priorities_) ||
+        !snapshot_io::read(in, gicd_ctlr_)) {
+      return false;
+    }
+    for (auto& local : locals_) {
+      if (!snapshot_io::read_array(in, local.pending) ||
+          !snapshot_io::read_array(in, local.enabled) ||
+          !snapshot_io::read_array(in, local.active) ||
+          !snapshot_io::read_array(in, local.line_level) ||
+          !snapshot_io::read_array(in, local.priorities) ||
+          !snapshot_io::read(in, local.gicr_waker) ||
+          !snapshot_io::read(in, local.gicr_igroupr0) ||
+          !snapshot_io::read(in, local.gicr_icfgr0) ||
+          !snapshot_io::read(in, local.gicr_icfgr1) ||
+          !snapshot_io::read(in, local.mpidr)) {
         return false;
       }
     }
-    if (!snapshot_io::read_array(in, priorities_)) {
+  } else {
+    std::array<bool, kNumIntIds> pending{};
+    std::array<bool, kNumIntIds> enabled{};
+    std::array<bool, kNumIntIds> active{};
+    std::array<bool, kNumIntIds> line_level{};
+    std::array<std::uint8_t, kNumIntIds> priorities{};
+    std::uint32_t gicr_waker = 0;
+    std::uint32_t gicr_igroupr0 = 0xFFFFFFFFu;
+    std::uint32_t gicr_icfgr0 = 0xAAAAAAAAu;
+    std::uint32_t gicr_icfgr1 = 0;
+    priorities.fill(kDefaultPriority);
+    if (!snapshot_io::read_array(in, pending) ||
+        !snapshot_io::read_array(in, enabled)) {
       return false;
     }
-  }
-  if (!snapshot_io::read(in, gicd_ctlr_) ||
-      !snapshot_io::read(in, gicr_waker_)) {
-    return false;
-  }
-  if (version >= 3) {
-    if (!snapshot_io::read(in, gicr_igroupr0_) ||
-        !snapshot_io::read(in, gicr_icfgr0_) ||
-        !snapshot_io::read(in, gicr_icfgr1_)) {
+    if (version >= 3) {
+      if (!snapshot_io::read_array(in, active)) {
+        return false;
+      }
+      if (version >= 4) {
+        if (!snapshot_io::read_array(in, line_level)) {
+          return false;
+        }
+      }
+      if (!snapshot_io::read_array(in, priorities)) {
+        return false;
+      }
+    }
+    if (!snapshot_io::read(in, gicd_ctlr_) ||
+        !snapshot_io::read(in, gicr_waker)) {
       return false;
     }
+    if (version >= 3) {
+      if (!snapshot_io::read(in, gicr_igroupr0) ||
+          !snapshot_io::read(in, gicr_icfgr0) ||
+          !snapshot_io::read(in, gicr_icfgr1)) {
+        return false;
+      }
+    }
+    for (std::uint32_t intid = 0; intid < kNumIntIds; ++intid) {
+      if (intid < kLocalIntIds) {
+        locals_[0].pending[intid] = pending[intid];
+        locals_[0].enabled[intid] = enabled[intid];
+        locals_[0].active[intid] = active[intid];
+        locals_[0].line_level[intid] = line_level[intid];
+        locals_[0].priorities[intid] = priorities[intid];
+      } else {
+        spi_pending_[spi_index(intid)] = pending[intid];
+        spi_enabled_[spi_index(intid)] = enabled[intid];
+        spi_active_[spi_index(intid)] = active[intid];
+        spi_line_level_[spi_index(intid)] = line_level[intid];
+        spi_priorities_[spi_index(intid)] = priorities[intid];
+      }
+    }
+    locals_[0].gicr_waker = gicr_waker;
+    locals_[0].gicr_igroupr0 = gicr_igroupr0;
+    locals_[0].gicr_icfgr0 = gicr_icfgr0;
+    locals_[0].gicr_icfgr1 = gicr_icfgr1;
   }
-  rebuild_bitmaps();
+
+  ++state_epoch_;
   return true;
 }
 

@@ -39,29 +39,12 @@ EOC
 )
 AARCHVM_CMD=(
   ./build/aarchvm
-  # -smp 2
-  # -smp-mode psci
-  -bin u-boot-2026.01/build-qemu_arm64/u-boot.bin
-  -load 0x0
-  -entry 0x0
-  -sp 0x47fff000
-  -dtb "$LINUX_DTB"
-  -dtb-addr "$DTB_ADDR"
-  -segment linux-6.12.76/build-aarchvm/arch/arm64/boot/Image@0x40400000
-  -segment "$INITRD"@0x46000000
-  -fb-sdl on
+  -snapshot-load "$SNAPSHOT"
   -steps "$STEPS"
-  -snapshot-save "$SNAPSHOT"
 )
 print_cmd 'AARCHVM gui tty1 command:' "${AARCHVM_CMD[@]}"
 printf 'U-Boot scripted input:\n%s\n' "$UBOOT_BOOT_CMDS"
 
-# (
-#   sleep "$UBOOT_DELAY_SEC"
-#   printf '\n\n\n'
-#   sleep "$PROMPT_DELAY_SEC"
-#   printf '%s\n' "$UBOOT_BOOT_CMDS"
-# ) | \
 AARCHVM_BUS_FASTPATH="$FASTPATH" \
 AARCHVM_TIMER_SCALE="$TIMER_SCALE" \
 "${AARCHVM_CMD[@]}"

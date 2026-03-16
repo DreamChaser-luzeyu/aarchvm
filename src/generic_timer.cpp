@@ -7,7 +7,6 @@
 #include <cstdlib>
 #include <istream>
 #include <iostream>
-#include <limits>
 
 namespace aarchvm {
 
@@ -23,11 +22,16 @@ bool timer_trace_enabled() {
   return enabled;
 }
 
-void trace_timer(const char* tag, std::uint64_t a = 0, std::uint64_t b = 0, std::uint64_t c = 0) {
+void trace_timer(const char* tag,
+                 std::uint64_t cpu = 0,
+                 std::uint64_t a = 0,
+                 std::uint64_t b = 0,
+                 std::uint64_t c = 0) {
   if (!timer_trace_enabled()) {
     return;
   }
   std::cerr << tag
+            << " cpu=" << std::dec << cpu
             << " a=0x" << std::hex << a
             << " b=0x" << b
             << " c=0x" << c
@@ -35,6 +39,19 @@ void trace_timer(const char* tag, std::uint64_t a = 0, std::uint64_t b = 0, std:
 }
 
 } // namespace
+
+void GenericTimer::set_cpu_count(std::size_t cpu_count) {
+  cpu_count_ = std::max<std::size_t>(1, cpu_count);
+  cpu_states_.resize(cpu_count_);
+}
+
+GenericTimer::CpuState& GenericTimer::cpu_state(std::size_t cpu_index) {
+  return cpu_states_[std::min(cpu_index, cpu_states_.size() - 1u)];
+}
+
+const GenericTimer::CpuState& GenericTimer::cpu_state(std::size_t cpu_index) const {
+  return cpu_states_[std::min(cpu_index, cpu_states_.size() - 1u)];
+}
 
 std::uint64_t GenericTimer::read(std::uint64_t offset, std::size_t size) {
   if (size != 8 && size != 4) {
@@ -138,10 +155,24 @@ void GenericTimer::update_channel_irq(TimerChannel& channel, std::uint64_t curre
 }
 
 std::uint64_t GenericTimer::steps_until_irq(std::uint64_t steps, std::uint64_t max_steps) const {
+  std::uint64_t best = max_steps;
+  for (std::size_t cpu = 0; cpu < cpu_states_.size(); ++cpu) {
+    best = std::min(best, steps_until_irq(cpu, steps, best));
+    if (best == 0u) {
+      break;
+    }
+  }
+  return best;
+}
+
+std::uint64_t GenericTimer::steps_until_irq(std::size_t cpu_index,
+                                            std::uint64_t steps,
+                                            std::uint64_t max_steps) const {
   if (max_steps == 0u) {
     return 0u;
   }
-  if (mmio_irq_pending_ || cntv_irq_pending_ || cntp_irq_pending_) {
+  const auto& state = cpu_state(cpu_index);
+  if (mmio_irq_pending_ || state.cntv.irq_pending || state.cntp.irq_pending) {
     return 0u;
   }
 
@@ -158,86 +189,96 @@ std::uint64_t GenericTimer::steps_until_irq(std::uint64_t steps, std::uint64_t m
     }
   }
 
-  best = std::min(best, steps_until_channel_irq(cntv_, current, cycles_per_step_, max_steps));
-  best = std::min(best, steps_until_channel_irq(cntp_, current, cycles_per_step_, max_steps));
+  best = std::min(best, steps_until_channel_irq(state.cntv, current, cycles_per_step_, best));
+  best = std::min(best, steps_until_channel_irq(state.cntp, current, cycles_per_step_, best));
   return best;
 }
 
-std::uint64_t GenericTimer::read_cntv_ctl_el0(std::uint64_t steps) const {
-  return read_ctl(cntv_, counter_at_steps(steps));
+bool GenericTimer::irq_pending_virtual(std::size_t cpu_index) const {
+  return cpu_state(cpu_index).cntv.irq_pending;
 }
 
-void GenericTimer::write_cntv_ctl_el0(std::uint64_t steps, std::uint64_t value) {
+void GenericTimer::clear_virtual_irq(std::size_t cpu_index) {
+  cpu_state(cpu_index).cntv.irq_pending = false;
+}
+
+bool GenericTimer::irq_pending_physical(std::size_t cpu_index) const {
+  return cpu_state(cpu_index).cntp.irq_pending;
+}
+
+void GenericTimer::clear_physical_irq(std::size_t cpu_index) {
+  cpu_state(cpu_index).cntp.irq_pending = false;
+}
+
+std::uint64_t GenericTimer::read_cntv_ctl_el0(std::size_t cpu_index, std::uint64_t steps) const {
+  return read_ctl(cpu_state(cpu_index).cntv, counter_at_steps(steps));
+}
+
+void GenericTimer::write_cntv_ctl_el0(std::size_t cpu_index, std::uint64_t steps, std::uint64_t value) {
   sync_to_steps(steps);
-  write_ctl(cntv_, value);
-  trace_timer("TIMER-V-CTL", counter_, value, cntv_.cval);
-  cntv_enable_ = cntv_.enable;
-  cntv_imask_ = cntv_.imask;
-  cntv_fired_ = cntv_.fired;
-  cntv_irq_pending_ = cntv_.irq_pending;
+  auto& cntv = cpu_state(cpu_index).cntv;
+  write_ctl(cntv, value);
+  trace_timer("TIMER-V-CTL", cpu_index, counter_, value, cntv.cval);
   update_irq_state();
 }
 
-void GenericTimer::write_cntv_cval_el0(std::uint64_t steps, std::uint64_t value) {
+std::uint64_t GenericTimer::read_cntv_cval_el0(std::size_t cpu_index) const {
+  return cpu_state(cpu_index).cntv.cval;
+}
+
+void GenericTimer::write_cntv_cval_el0(std::size_t cpu_index, std::uint64_t steps, std::uint64_t value) {
   sync_to_steps(steps);
-  write_cval(cntv_, value);
-  trace_timer("TIMER-V-CVAL", counter_, value, 0);
-  cntv_cval_el0_ = cntv_.cval;
-  cntv_fired_ = cntv_.fired;
-  cntv_irq_pending_ = cntv_.irq_pending;
+  auto& cntv = cpu_state(cpu_index).cntv;
+  write_cval(cntv, value);
+  trace_timer("TIMER-V-CVAL", cpu_index, counter_, value, 0);
   update_irq_state();
 }
 
-std::uint64_t GenericTimer::read_cntv_tval_el0(std::uint64_t steps) const {
-  return read_tval(cntv_, counter_at_steps(steps));
+std::uint64_t GenericTimer::read_cntv_tval_el0(std::size_t cpu_index, std::uint64_t steps) const {
+  return read_tval(cpu_state(cpu_index).cntv, counter_at_steps(steps));
 }
 
-void GenericTimer::write_cntv_tval_el0(std::uint64_t steps, std::uint64_t value) {
+void GenericTimer::write_cntv_tval_el0(std::size_t cpu_index, std::uint64_t steps, std::uint64_t value) {
   sync_to_steps(steps);
-  write_tval(cntv_, counter_, value);
-  trace_timer("TIMER-V-TVAL", counter_, value, cntv_.cval);
-  cntv_cval_el0_ = cntv_.cval;
-  cntv_fired_ = cntv_.fired;
-  cntv_irq_pending_ = cntv_.irq_pending;
+  auto& cntv = cpu_state(cpu_index).cntv;
+  write_tval(cntv, counter_, value);
+  trace_timer("TIMER-V-TVAL", cpu_index, counter_, value, cntv.cval);
   update_irq_state();
 }
 
-std::uint64_t GenericTimer::read_cntp_ctl_el0(std::uint64_t steps) const {
-  return read_ctl(cntp_, counter_at_steps(steps));
+std::uint64_t GenericTimer::read_cntp_ctl_el0(std::size_t cpu_index, std::uint64_t steps) const {
+  return read_ctl(cpu_state(cpu_index).cntp, counter_at_steps(steps));
 }
 
-void GenericTimer::write_cntp_ctl_el0(std::uint64_t steps, std::uint64_t value) {
+void GenericTimer::write_cntp_ctl_el0(std::size_t cpu_index, std::uint64_t steps, std::uint64_t value) {
   sync_to_steps(steps);
-  write_ctl(cntp_, value);
-  trace_timer("TIMER-P-CTL", counter_, value, cntp_.cval);
-  cntp_enable_ = cntp_.enable;
-  cntp_imask_ = cntp_.imask;
-  cntp_fired_ = cntp_.fired;
-  cntp_irq_pending_ = cntp_.irq_pending;
+  auto& cntp = cpu_state(cpu_index).cntp;
+  write_ctl(cntp, value);
+  trace_timer("TIMER-P-CTL", cpu_index, counter_, value, cntp.cval);
   update_irq_state();
 }
 
-void GenericTimer::write_cntp_cval_el0(std::uint64_t steps, std::uint64_t value) {
+std::uint64_t GenericTimer::read_cntp_cval_el0(std::size_t cpu_index) const {
+  return cpu_state(cpu_index).cntp.cval;
+}
+
+void GenericTimer::write_cntp_cval_el0(std::size_t cpu_index, std::uint64_t steps, std::uint64_t value) {
   sync_to_steps(steps);
-  write_cval(cntp_, value);
-  trace_timer("TIMER-P-CVAL", counter_, value, 0);
-  cntp_cval_el0_ = cntp_.cval;
-  cntp_fired_ = cntp_.fired;
-  cntp_irq_pending_ = cntp_.irq_pending;
+  auto& cntp = cpu_state(cpu_index).cntp;
+  write_cval(cntp, value);
+  trace_timer("TIMER-P-CVAL", cpu_index, counter_, value, 0);
   update_irq_state();
 }
 
-std::uint64_t GenericTimer::read_cntp_tval_el0(std::uint64_t steps) const {
-  return read_tval(cntp_, counter_at_steps(steps));
+std::uint64_t GenericTimer::read_cntp_tval_el0(std::size_t cpu_index, std::uint64_t steps) const {
+  return read_tval(cpu_state(cpu_index).cntp, counter_at_steps(steps));
 }
 
-void GenericTimer::write_cntp_tval_el0(std::uint64_t steps, std::uint64_t value) {
+void GenericTimer::write_cntp_tval_el0(std::size_t cpu_index, std::uint64_t steps, std::uint64_t value) {
   sync_to_steps(steps);
-  write_tval(cntp_, counter_, value);
-  trace_timer("TIMER-P-TVAL", counter_, value, cntp_.cval);
-  cntp_cval_el0_ = cntp_.cval;
-  cntp_fired_ = cntp_.fired;
-  cntp_irq_pending_ = cntp_.irq_pending;
+  auto& cntp = cpu_state(cpu_index).cntp;
+  write_tval(cntp, counter_, value);
+  trace_timer("TIMER-P-TVAL", cpu_index, counter_, value, cntp.cval);
   update_irq_state();
 }
 
@@ -245,109 +286,108 @@ void GenericTimer::update_irq_state() {
   if (enabled_ && !mmio_irq_pending_ && !fired_ && counter_ >= compare_) {
     mmio_irq_pending_ = true;
     fired_ = true;
-    trace_timer("TIMER-MMIO-IRQ", counter_, compare_, 0);
+    trace_timer("TIMER-MMIO-IRQ", 0, counter_, compare_, 0);
   }
 
-  cntv_.cval = cntv_cval_el0_;
-  cntv_.enable = cntv_enable_;
-  cntv_.imask = cntv_imask_;
-  cntv_.fired = cntv_fired_;
-  cntv_.irq_pending = cntv_irq_pending_;
-  const bool old_cntv_pending = cntv_.irq_pending;
-  update_channel_irq(cntv_, counter_);
-  if (!old_cntv_pending && cntv_.irq_pending) {
-    trace_timer("TIMER-V-IRQ", counter_, cntv_.cval, read_ctl(cntv_, counter_));
-  }
-  cntv_cval_el0_ = cntv_.cval;
-  cntv_enable_ = cntv_.enable;
-  cntv_imask_ = cntv_.imask;
-  cntv_fired_ = cntv_.fired;
-  cntv_irq_pending_ = cntv_.irq_pending;
+  for (std::size_t cpu = 0; cpu < cpu_states_.size(); ++cpu) {
+    auto& state = cpu_states_[cpu];
+    const bool old_cntv_pending = state.cntv.irq_pending;
+    update_channel_irq(state.cntv, counter_);
+    if (!old_cntv_pending && state.cntv.irq_pending) {
+      trace_timer("TIMER-V-IRQ", cpu, counter_, state.cntv.cval, read_ctl(state.cntv, counter_));
+    }
 
-  cntp_.cval = cntp_cval_el0_;
-  cntp_.enable = cntp_enable_;
-  cntp_.imask = cntp_imask_;
-  cntp_.fired = cntp_fired_;
-  cntp_.irq_pending = cntp_irq_pending_;
-  const bool old_cntp_pending = cntp_.irq_pending;
-  update_channel_irq(cntp_, counter_);
-  if (!old_cntp_pending && cntp_.irq_pending) {
-    trace_timer("TIMER-P-IRQ", counter_, cntp_.cval, read_ctl(cntp_, counter_));
+    const bool old_cntp_pending = state.cntp.irq_pending;
+    update_channel_irq(state.cntp, counter_);
+    if (!old_cntp_pending && state.cntp.irq_pending) {
+      trace_timer("TIMER-P-IRQ", cpu, counter_, state.cntp.cval, read_ctl(state.cntp, counter_));
+    }
   }
-  cntp_cval_el0_ = cntp_.cval;
-  cntp_enable_ = cntp_.enable;
-  cntp_imask_ = cntp_.imask;
-  cntp_fired_ = cntp_.fired;
-  cntp_irq_pending_ = cntp_.irq_pending;
 }
 
 bool GenericTimer::save_state(std::ostream& out) const {
-  return snapshot_io::write(out, counter_) &&
-         snapshot_io::write(out, compare_) &&
-         snapshot_io::write_bool(out, enabled_) &&
-         snapshot_io::write_bool(out, mmio_irq_pending_) &&
-         snapshot_io::write_bool(out, fired_) &&
-         snapshot_io::write(out, cntv_cval_el0_) &&
-         snapshot_io::write_bool(out, cntv_enable_) &&
-         snapshot_io::write_bool(out, cntv_imask_) &&
-         snapshot_io::write_bool(out, cntv_fired_) &&
-         snapshot_io::write_bool(out, cntv_irq_pending_) &&
-         snapshot_io::write(out, cntp_cval_el0_) &&
-         snapshot_io::write_bool(out, cntp_enable_) &&
-         snapshot_io::write_bool(out, cntp_imask_) &&
-         snapshot_io::write_bool(out, cntp_fired_) &&
-         snapshot_io::write_bool(out, cntp_irq_pending_);
+  const std::uint32_t snapshot_cpu_count = static_cast<std::uint32_t>(cpu_states_.size());
+  if (!snapshot_io::write(out, counter_) ||
+      !snapshot_io::write(out, compare_) ||
+      !snapshot_io::write_bool(out, enabled_) ||
+      !snapshot_io::write_bool(out, mmio_irq_pending_) ||
+      !snapshot_io::write_bool(out, fired_) ||
+      !snapshot_io::write(out, snapshot_cpu_count)) {
+    return false;
+  }
+  for (const auto& state : cpu_states_) {
+    if (!snapshot_io::write(out, state.cntv.cval) ||
+        !snapshot_io::write_bool(out, state.cntv.enable) ||
+        !snapshot_io::write_bool(out, state.cntv.imask) ||
+        !snapshot_io::write_bool(out, state.cntv.fired) ||
+        !snapshot_io::write_bool(out, state.cntv.irq_pending) ||
+        !snapshot_io::write(out, state.cntp.cval) ||
+        !snapshot_io::write_bool(out, state.cntp.enable) ||
+        !snapshot_io::write_bool(out, state.cntp.imask) ||
+        !snapshot_io::write_bool(out, state.cntp.fired) ||
+        !snapshot_io::write_bool(out, state.cntp.irq_pending)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool GenericTimer::load_state(std::istream& in, std::uint32_t version) {
   step_anchor_ = 0;
   cycles_per_step_ = 1;
-  cntp_cval_el0_ = 0;
-  cntp_enable_ = false;
-  cntp_imask_ = false;
-  cntp_fired_ = false;
-  cntp_irq_pending_ = false;
+  cpu_count_ = 1;
+  cpu_states_.assign(1, CpuState{});
 
   if (!snapshot_io::read(in, counter_) ||
       !snapshot_io::read(in, compare_) ||
       !snapshot_io::read_bool(in, enabled_) ||
       !snapshot_io::read_bool(in, mmio_irq_pending_) ||
-      !snapshot_io::read_bool(in, fired_) ||
-      !snapshot_io::read(in, cntv_cval_el0_) ||
-      !snapshot_io::read_bool(in, cntv_enable_) ||
-      !snapshot_io::read_bool(in, cntv_imask_) ||
-      !snapshot_io::read_bool(in, cntv_fired_)) {
+      !snapshot_io::read_bool(in, fired_)) {
     return false;
   }
 
-  if (version >= 2) {
-    if (!snapshot_io::read_bool(in, cntv_irq_pending_) ||
-        !snapshot_io::read(in, cntp_cval_el0_) ||
-        !snapshot_io::read_bool(in, cntp_enable_) ||
-        !snapshot_io::read_bool(in, cntp_imask_) ||
-        !snapshot_io::read_bool(in, cntp_fired_) ||
-        !snapshot_io::read_bool(in, cntp_irq_pending_)) {
+  if (version >= 3) {
+    std::uint32_t snapshot_cpu_count = 0;
+    if (!snapshot_io::read(in, snapshot_cpu_count) || snapshot_cpu_count == 0u) {
       return false;
     }
+    cpu_count_ = snapshot_cpu_count;
+    cpu_states_.assign(cpu_count_, CpuState{});
+    for (auto& state : cpu_states_) {
+      if (!snapshot_io::read(in, state.cntv.cval) ||
+          !snapshot_io::read_bool(in, state.cntv.enable) ||
+          !snapshot_io::read_bool(in, state.cntv.imask) ||
+          !snapshot_io::read_bool(in, state.cntv.fired) ||
+          !snapshot_io::read_bool(in, state.cntv.irq_pending) ||
+          !snapshot_io::read(in, state.cntp.cval) ||
+          !snapshot_io::read_bool(in, state.cntp.enable) ||
+          !snapshot_io::read_bool(in, state.cntp.imask) ||
+          !snapshot_io::read_bool(in, state.cntp.fired) ||
+          !snapshot_io::read_bool(in, state.cntp.irq_pending)) {
+        return false;
+      }
+    }
   } else {
-    cntv_irq_pending_ = false;
-    cntp_cval_el0_ = 0;
-    cntp_enable_ = false;
-    cntp_imask_ = false;
-    cntp_fired_ = false;
-    cntp_irq_pending_ = false;
+    auto& state = cpu_states_[0];
+    if (!snapshot_io::read(in, state.cntv.cval) ||
+        !snapshot_io::read_bool(in, state.cntv.enable) ||
+        !snapshot_io::read_bool(in, state.cntv.imask) ||
+        !snapshot_io::read_bool(in, state.cntv.fired)) {
+      return false;
+    }
+
+    if (version >= 2) {
+      if (!snapshot_io::read_bool(in, state.cntv.irq_pending) ||
+          !snapshot_io::read(in, state.cntp.cval) ||
+          !snapshot_io::read_bool(in, state.cntp.enable) ||
+          !snapshot_io::read_bool(in, state.cntp.imask) ||
+          !snapshot_io::read_bool(in, state.cntp.fired) ||
+          !snapshot_io::read_bool(in, state.cntp.irq_pending)) {
+        return false;
+      }
+    }
   }
 
-  cntv_.cval = cntv_cval_el0_;
-  cntv_.enable = cntv_enable_;
-  cntv_.imask = cntv_imask_;
-  cntv_.fired = cntv_fired_;
-  cntv_.irq_pending = cntv_irq_pending_;
-  cntp_.cval = cntp_cval_el0_;
-  cntp_.enable = cntp_enable_;
-  cntp_.imask = cntp_imask_;
-  cntp_.fired = cntp_fired_;
-  cntp_.irq_pending = cntp_irq_pending_;
   update_irq_state();
   return true;
 }

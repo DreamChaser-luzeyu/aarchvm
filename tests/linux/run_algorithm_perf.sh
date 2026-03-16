@@ -15,12 +15,14 @@ PROMPT_DELAY_SEC="${AARCHVM_UBOOT_PROMPT_DELAY_SEC:-1}"
 COMMAND_STEP_DELTA="${AARCHVM_PERF_COMMAND_STEP_DELTA:-50000}"
 COMMAND_STEP_GAP="${AARCHVM_PERF_COMMAND_STEP_GAP:-2000}"
 BUILD_LOG="${AARCHVM_USERTEST_SNAPSHOT_LOG:-out/linux-usertests-shell-v1-build.log}"
+LINUX_DTB="${AARCHVM_LINUX_DTB:-dts/aarchvm-linux-min.dtb}"
+DTB_ADDR=0x47f00000
 AARCHVM_ARGS_RAW="${AARCHVM_ARGS:-}"
 AARCHVM_EXTRA_ARGS=()
 if [[ -n "$AARCHVM_ARGS_RAW" ]]; then
   read -r -a AARCHVM_EXTRA_ARGS <<< "$AARCHVM_ARGS_RAW"
 fi
-INITRD="out/initramfs-usertests.cpio"
+INITRD="out/initramfs-usertests.cpio.gz"
 INITRD_SIZE_HEX=$(printf '0x%x' "$(stat -c '%s' "$INITRD")")
 CMD="${AARCHVM_PERF_COMMAND:-bench_runner}"
 
@@ -38,6 +40,14 @@ build_uart_rx_script() {
   printf '%s' "$out"
 }
 
+print_cmd() {
+  local label="$1"
+  shift
+  printf '%s' "$label"
+  printf ' %q' "$@"
+  printf '\n'
+}
+
 if [[ ! -f "$BUILD_LOG" || ! -f "$INITRD" || tests/linux/build_usertests_rootfs.sh -nt "$BUILD_LOG" || tests/linux/build_linux_shell_snapshot.sh -nt "$BUILD_LOG" || "$INITRD" -nt "$BUILD_LOG" ]]; then
   tests/linux/build_linux_shell_snapshot.sh >/dev/null
 fi
@@ -47,29 +57,39 @@ PROMPT_STEPS=$(tr -d '\r' < "$BUILD_LOG" | sed -n 's/.*SUMMARY: steps=\([0-9][0-
 RX_SCRIPT=$(build_uart_rx_script "$CMD" "$((PROMPT_STEPS + COMMAND_STEP_DELTA))" "$COMMAND_STEP_GAP")
 
 mkdir -p "$(dirname "$LOG")"
+UBOOT_BOOT_CMDS=$(cat <<EOC
+setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 rdinit=/init initramfs_async=0
+booti 0x40400000 0x46000000:${INITRD_SIZE_HEX} ${DTB_ADDR}
+EOC
+)
+AARCHVM_CMD=(
+  ./build/aarchvm
+  "${AARCHVM_EXTRA_ARGS[@]}"
+  -bin u-boot-2026.01/build-qemu_arm64/u-boot.bin
+  -load 0x0
+  -entry 0x0
+  -sp 0x47fff000
+  -dtb "$LINUX_DTB"
+  -dtb-addr "$DTB_ADDR"
+  -segment linux-6.12.76/build-aarchvm/arch/arm64/boot/Image@0x40400000
+  -segment "$INITRD"@0x46000000
+  -steps "$STEPS"
+  -fb-sdl off
+)
+print_cmd 'AARCHVM perf command:' "${AARCHVM_CMD[@]}"
+printf 'U-Boot scripted input:\n%s\n' "$UBOOT_BOOT_CMDS"
+
 set -o pipefail
 (
   sleep "$UBOOT_DELAY_SEC"
   printf '\n'
   sleep "$PROMPT_DELAY_SEC"
-  printf 'setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 rdinit=/init initramfs_async=0\n'
-  printf 'booti 0x40400000 0x46000000:%s 0x47f00000\n' "$INITRD_SIZE_HEX"
+  printf '%s\n' "$UBOOT_BOOT_CMDS"
 ) | \
 AARCHVM_UART_RX_SCRIPT="$RX_SCRIPT" \
 AARCHVM_BUS_FASTPATH="$FASTPATH" \
 AARCHVM_TIMER_SCALE="$TIMER_SCALE" \
-timeout "$TIMEOUT_SEC" ./build/aarchvm "${AARCHVM_EXTRA_ARGS[@]}" \
-  -bin u-boot-2026.01/build-qemu_arm64/u-boot.bin \
-  -load 0x0 \
-  -entry 0x0 \
-  -sp 0x47fff000 \
-  -dtb dts/aarchvm-current.dtb \
-  -dtb-addr 0x40000000 \
-  -segment linux-6.12.76/build-aarchvm/arch/arm64/boot/Image@0x40400000 \
-  -segment "$INITRD"@0x46000000 \
-  -segment dts/aarchvm-linux-min.dtb@0x47f00000 \
-  -steps "$STEPS" \
-  -fb-sdl off \
+timeout "$TIMEOUT_SEC" "${AARCHVM_CMD[@]}" \
   > "$LOG" 2>&1
 
 tr -d '\r\000' < "$LOG" > "${LOG%.log}.clean.log"

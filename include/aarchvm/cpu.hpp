@@ -10,6 +10,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iosfwd>
 #include <optional>
 #include <string>
@@ -19,16 +20,30 @@ namespace aarchvm {
 
 class Cpu {
 public:
+  struct Callbacks {
+    std::function<void(Cpu&)> sev_broadcast;
+    std::function<void(Cpu&, std::uint64_t, std::size_t)> memory_write;
+    std::function<void(Cpu&)> tlbi_vmalle1_broadcast;
+    std::function<void(Cpu&, std::uint64_t, bool)> tlbi_vae1_broadcast;
+    std::function<void(Cpu&, std::uint16_t)> tlbi_aside1_broadcast;
+    std::function<void(Cpu&)> ic_ivau_broadcast;
+    std::function<bool(Cpu&, bool, std::uint16_t)> smccc_call;
+    std::function<std::uint64_t()> time_steps;
+  };
+
   explicit Cpu(Bus& bus, GicV3& gic, GenericTimer& timer);
 
   bool step();
 
   void reset(std::uint64_t pc);
+  void set_callbacks(Callbacks callbacks) { callbacks_ = std::move(callbacks); }
   void set_predecode_enabled(bool enabled);
   [[nodiscard]] bool predecode_enabled() const { return predecode_enabled_; }
   void invalidate_decode_all();
   void set_cntvct(std::uint64_t value);
   void set_sp(std::uint64_t value);
+  void set_cpu_index(std::size_t value) { cpu_index_ = value; }
+  void set_mpidr(std::uint64_t value) { sysregs_.set_mpidr_el1(value); }
   void set_x(std::uint32_t idx, std::uint64_t value) {
     if (idx < 32) {
       regs_[idx] = value;
@@ -40,6 +55,8 @@ public:
   [[nodiscard]] std::uint64_t steps() const { return steps_; }
   [[nodiscard]] std::uint64_t x(std::uint32_t idx) const { return reg(idx); }
   [[nodiscard]] std::uint64_t sp() const { return regs_[31]; }
+  [[nodiscard]] std::size_t cpu_index() const { return cpu_index_; }
+  [[nodiscard]] std::uint64_t mpidr_el1() const { return sysregs_.mpidr_el1(); }
   [[nodiscard]] std::uint64_t pstate_bits() const { return sysregs_.pstate_bits(); }
   [[nodiscard]] std::uint64_t icc_igrpen1_el1() const { return icc_igrpen1_el1_; }
   [[nodiscard]] std::uint32_t exception_depth() const { return exception_depth_; }
@@ -49,6 +66,12 @@ public:
   [[nodiscard]] bool irq_masked() const { return sysregs_.irq_masked(); }
   [[nodiscard]] bool save_state(std::ostream& out) const;
   [[nodiscard]] bool load_state(std::istream& in, std::uint32_t version = 3);
+  void signal_event();
+  void notify_external_memory_write(std::uint64_t pa, std::size_t size);
+  void notify_tlbi_vmalle1();
+  void notify_tlbi_vae1(std::uint64_t operand, bool all_asids);
+  void notify_tlbi_aside1(std::uint16_t asid);
+  void notify_ic_ivau();
 
   void perf_flush_tlb_all();
   [[nodiscard]] const PerfCounters& perf_counters() const { return perf_counters_; }
@@ -276,6 +299,7 @@ private:
   void parse_pc_watch_list();
   void save_current_sp_to_bank();
   void load_current_sp_from_bank();
+  [[nodiscard]] std::uint64_t shared_timer_steps() const;
   [[nodiscard]] std::uint16_t compute_irq_threshold() const {
     return std::min<std::uint16_t>(static_cast<std::uint16_t>(icc_pmr_el1_ & 0xFFu), running_priority_);
   }
@@ -387,6 +411,7 @@ private:
   TlbEntry tlb_last_data_{};
   PerfCounters perf_counters_{};
   std::optional<TranslationFault> last_translation_fault_;
+  std::optional<std::uint64_t> last_data_fault_va_;
   std::uint64_t pc_ = 0;
   std::uint64_t steps_ = 0;
   std::uint64_t irq_query_epoch_ = 0;
@@ -395,6 +420,8 @@ private:
   bool irq_query_negative_valid_ = false;
   bool halted_ = false;
   bool predecode_enabled_ = true;
+  std::size_t cpu_index_ = 0;
+  Callbacks callbacks_{};
   std::uint64_t decode_context_epoch_ = 1;
   std::array<DecodePage, kDecodeCachePages> decode_pages_{};
   DecodePage* decode_last_page_ = nullptr;

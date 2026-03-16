@@ -81,6 +81,12 @@ build_asm_prog mmu_pan_user_access
 build_asm_prog mmu_el0_ap_fault
 build_asm_prog mmu_perm_ro_write_abort
 build_asm_prog mmu_xn_fetch_abort
+build_asm_prog mmu_cross_page_load
+build_asm_prog mmu_cross_page_store
+build_asm_prog mmu_cross_page_fault_far_load
+build_asm_prog mmu_cross_page_fault_far_store
+build_asm_prog mmu_cross_page_various
+build_asm_prog mmu_cross_page_pair_fault_far
 build_asm_prog mmu_table_ap_inherit
 build_asm_prog mmu_table_pxn_inherit
 build_asm_prog mmu_tcr_ips_mair_decode
@@ -104,6 +110,7 @@ build_asm_prog ldpsw_pair
 build_asm_prog pair_exclusive
 build_asm_prog adc_sbc_minimal
 build_asm_prog snapshot_resume
+build_asm_prog snapshot_perf_mailbox
 build_asm_prog irq_nested_el1_wfi
 build_asm_prog sp_ccmp_path
 build_asm_prog sp_alias_paths
@@ -115,6 +122,17 @@ build_asm_prog predecode_load_store_min
 build_asm_prog predecode_logic_min
 build_asm_prog pl050_basic
 build_asm_prog ps2_rx_spaced
+build_asm_prog smp_mpidr_boot
+build_asm_prog smp_sev_wfe
+build_asm_prog smp_ldxr_invalidate
+build_asm_prog smp_spinlock_ldaxr_stlxr
+build_asm_prog smp_tlbi_broadcast
+build_asm_prog smp_wfe_monitor_event
+build_asm_prog psci_cpu_on_min
+build_asm_prog smp_gic_sgi
+build_asm_prog smp_timer_ppi
+build_asm_prog smp_timer_rate
+build_asm_prog smp_dc_zva_invalidate
 
 if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
   aarch64-linux-gnu-gcc -nostdlib -static -ffreestanding -fomit-frame-pointer -fno-stack-protector \

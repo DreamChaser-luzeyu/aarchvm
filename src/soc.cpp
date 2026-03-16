@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
@@ -22,6 +23,11 @@ bool in_range(std::uint64_t addr, std::uint64_t base, std::uint64_t size, std::u
 bool env_enabled(const char* name) {
   const char* value = std::getenv(name);
   return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+bool debug_slow_mode_enabled() {
+  static const bool enabled = env_enabled("AARCHVM_DEBUG_SLOW");
+  return enabled;
 }
 
 std::optional<std::uint64_t> env_timer_scale() {
@@ -73,9 +79,39 @@ PerfCounters perf_delta(const PerfCounters& end, const PerfCounters& start) {
   return d;
 }
 
+void perf_accumulate(PerfCounters& dst, const PerfCounters& delta) {
+  dst.steps += delta.steps;
+  dst.bus_reads += delta.bus_reads;
+  dst.bus_writes += delta.bus_writes;
+  dst.bus_read_bytes += delta.bus_read_bytes;
+  dst.bus_write_bytes += delta.bus_write_bytes;
+  dst.bus_find_calls += delta.bus_find_calls;
+  dst.bus_device_reads += delta.bus_device_reads;
+  dst.bus_device_writes += delta.bus_device_writes;
+  dst.ram_fast_reads += delta.ram_fast_reads;
+  dst.ram_fast_writes += delta.ram_fast_writes;
+  dst.ram_fast_read_bytes += delta.ram_fast_read_bytes;
+  dst.ram_fast_write_bytes += delta.ram_fast_write_bytes;
+  dst.translate_calls += delta.translate_calls;
+  dst.tlb_lookups += delta.tlb_lookups;
+  dst.tlb_hits += delta.tlb_hits;
+  dst.tlb_misses += delta.tlb_misses;
+  dst.tlb_inserts += delta.tlb_inserts;
+  dst.tlb_flush_all += delta.tlb_flush_all;
+  dst.tlb_flush_va += delta.tlb_flush_va;
+  dst.page_walks += delta.page_walks;
+  dst.page_walk_desc_reads += delta.page_walk_desc_reads;
+  dst.gic_has_pending += delta.gic_has_pending;
+  dst.gic_acknowledge += delta.gic_acknowledge;
+  dst.gic_recompute += delta.gic_recompute;
+  dst.gic_set_level += delta.gic_set_level;
+  dst.soc_sync_devices += delta.soc_sync_devices;
+  dst.soc_run_chunks += delta.soc_run_chunks;
+}
+
 } // namespace
 
-SoC::SoC()
+SoC::SoC(std::size_t cpu_count)
     : boot_ram_(std::make_shared<Ram>(kBootRamSize)),
       framebuffer_ram_(std::make_shared<Ram>(kFramebufferSize)),
       sdram_(std::make_shared<Ram>(kSdramSize)),
@@ -93,8 +129,11 @@ SoC::SoC()
       })),
       block_mmio_(std::make_shared<BlockMmio>(bus_)),
       gic_(std::make_shared<GicV3>()),
-      timer_(std::make_shared<GenericTimer>()),
-      cpu_(bus_, *gic_, *timer_) {
+      timer_(std::make_shared<GenericTimer>()) {
+  if (cpu_count == 0) {
+    cpu_count = 1;
+  }
+
   framebuffer_dirty_tracker_ = std::make_shared<FramebufferDirtyTracker>(kFramebufferWidth,
                                                                          kFramebufferHeight,
                                                                          kFramebufferStride,
@@ -111,7 +150,38 @@ SoC::SoC()
   bus_.map(kGicBase, kGicSize, gic_);
   bus_.map(kTimerBase, kTimerSize, timer_);
 
-  if (env_enabled("AARCHVM_BUS_FASTPATH") || env_enabled("AARCHVM_RAM_FASTPATH")) {
+  gic_->set_cpu_count(cpu_count);
+  timer_->set_cpu_count(cpu_count);
+
+  cpus_.reserve(cpu_count);
+  cpu_powered_on_.assign(cpu_count, true);
+  for (std::size_t i = 0; i < cpu_count; ++i) {
+    auto cpu = std::make_unique<Cpu>(bus_, *gic_, *timer_);
+    cpu->set_callbacks(Cpu::Callbacks{
+        .sev_broadcast = [this](Cpu& source) { broadcast_event(source); },
+        .memory_write = [this](Cpu& source, std::uint64_t pa, std::size_t size) {
+          on_cpu_memory_write(source, pa, size);
+        },
+        .tlbi_vmalle1_broadcast = [this](Cpu& source) { broadcast_tlbi_vmalle1(source); },
+        .tlbi_vae1_broadcast = [this](Cpu& source, std::uint64_t operand, bool all_asids) {
+          broadcast_tlbi_vae1(source, operand, all_asids);
+        },
+        .tlbi_aside1_broadcast = [this](Cpu& source, std::uint16_t asid) {
+          broadcast_tlbi_aside1(source, asid);
+        },
+        .ic_ivau_broadcast = [this](Cpu& source) { broadcast_ic_ivau(source); },
+        .smccc_call = [this](Cpu& source, bool is_hvc, std::uint16_t imm16) {
+          return handle_smccc(source, is_hvc, imm16);
+        },
+        .time_steps = [this]() { return timer_steps_; },
+    });
+    cpu->set_cpu_index(i);
+    cpu->set_mpidr(cpu_mpidr(i));
+    gic_->set_cpu_affinity(i, cpu_mpidr(i));
+    cpus_.push_back(std::move(cpu));
+  }
+
+  if (!debug_slow_mode_enabled() && (env_enabled("AARCHVM_BUS_FASTPATH") || env_enabled("AARCHVM_RAM_FASTPATH"))) {
     rebuild_fast_path();
   }
 
@@ -123,8 +193,16 @@ SoC::SoC()
   framebuffer_sdl_enabled_ = (fb_env == nullptr) ? true : env_enabled("AARCHVM_FB_SDL");
   uart_->set_tx_observer([this](std::uint8_t byte) { on_uart_tx(byte); });
   timer_->set_cycles_per_step(timer_tick_scale_);
-  cpu_.reset(kBootRamBase);
-  timer_->rebase_to_steps(cpu_.steps());
+
+  for (std::size_t i = 0; i < cpus_.size(); ++i) {
+    cpus_[i]->reset(kBootRamBase);
+    cpus_[i]->set_cpu_index(i);
+    cpus_[i]->set_mpidr(cpu_mpidr(i));
+    gic_->set_cpu_affinity(i, cpu_mpidr(i));
+  }
+  global_steps_ = 0;
+  timer_steps_ = 0;
+  timer_->rebase_to_steps(timer_steps_);
   reset_perf_measurement_state();
 }
 
@@ -141,6 +219,159 @@ void SoC::rebuild_fast_path() {
   bus_.set_fast_path(fast_path_);
 }
 
+void SoC::broadcast_event(Cpu& source) {
+  (void)source;
+  for (auto& cpu : cpus_) {
+    cpu->signal_event();
+  }
+}
+
+void SoC::on_cpu_memory_write(Cpu& source, std::uint64_t pa, std::size_t size) {
+  for (auto& cpu : cpus_) {
+    if (cpu.get() == &source) {
+      continue;
+    }
+    cpu->notify_external_memory_write(pa, size);
+  }
+}
+
+void SoC::broadcast_tlbi_vmalle1(Cpu& source) {
+  for (auto& cpu : cpus_) {
+    if (cpu.get() == &source) {
+      continue;
+    }
+    cpu->notify_tlbi_vmalle1();
+  }
+}
+
+void SoC::broadcast_tlbi_vae1(Cpu& source, std::uint64_t operand, bool all_asids) {
+  for (auto& cpu : cpus_) {
+    if (cpu.get() == &source) {
+      continue;
+    }
+    cpu->notify_tlbi_vae1(operand, all_asids);
+  }
+}
+
+void SoC::broadcast_tlbi_aside1(Cpu& source, std::uint16_t asid) {
+  for (auto& cpu : cpus_) {
+    if (cpu.get() == &source) {
+      continue;
+    }
+    cpu->notify_tlbi_aside1(asid);
+  }
+}
+
+void SoC::broadcast_ic_ivau(Cpu& source) {
+  for (auto& cpu : cpus_) {
+    if (cpu.get() == &source) {
+      continue;
+    }
+    cpu->notify_ic_ivau();
+  }
+}
+
+
+std::optional<std::size_t> SoC::cpu_index_from_mpidr(std::uint64_t mpidr) const {
+  const std::uint64_t aff = mpidr & 0xFF00FFFFFFull;
+  for (std::size_t i = 0; i < cpus_.size(); ++i) {
+    if ((cpus_[i]->mpidr_el1() & 0xFF00FFFFFFull) == aff) {
+      return i;
+    }
+  }
+  return std::nullopt;
+}
+
+bool SoC::handle_smccc(Cpu& source, bool is_hvc, std::uint16_t imm16) {
+  (void)is_hvc;
+  (void)imm16;
+
+  constexpr std::uint64_t kPsciVersion = 0x84000000ull;
+  constexpr std::uint64_t kPsciCpuOff = 0x84000002ull;
+  constexpr std::uint64_t kPsciCpuOn = 0xC4000003ull;
+  constexpr std::uint64_t kPsciAffinityInfo = 0xC4000004ull;
+  constexpr std::uint64_t kPsciMigrateInfoType = 0x84000006ull;
+  constexpr std::uint64_t kPsciSystemOff = 0x84000008ull;
+  constexpr std::uint64_t kPsciSystemReset = 0x84000009ull;
+  constexpr std::uint64_t kPsciFeatures = 0x8400000Aull;
+
+  constexpr std::int64_t kPsciRetSuccess = 0;
+  constexpr std::int64_t kPsciRetNotSupported = -1;
+  constexpr std::int64_t kPsciRetInvalidParams = -2;
+  constexpr std::int64_t kPsciRetAlreadyOn = -4;
+  constexpr std::uint64_t kPsciAffinityOn = 0;
+  constexpr std::uint64_t kPsciAffinityOff = 1;
+  constexpr std::uint64_t kPsciTosMp = 2;
+
+  const std::uint64_t fid = source.x(0);
+  switch (fid) {
+    case kPsciVersion:
+      source.set_x(0, 0x0000000000000002ull);
+      return true;
+    case kPsciFeatures: {
+      const std::uint64_t query = source.x(1);
+      switch (query) {
+        case kPsciVersion:
+        case kPsciCpuOff:
+        case kPsciCpuOn:
+        case kPsciAffinityInfo:
+        case kPsciMigrateInfoType:
+        case kPsciSystemOff:
+        case kPsciSystemReset:
+          source.set_x(0, 0);
+          return true;
+        default:
+          source.set_x(0, static_cast<std::uint64_t>(kPsciRetNotSupported));
+          return true;
+      }
+    }
+    case kPsciCpuOn: {
+      const auto target = cpu_index_from_mpidr(source.x(1));
+      if (!target.has_value() || *target == 0) {
+        source.set_x(0, static_cast<std::uint64_t>(kPsciRetInvalidParams));
+        return true;
+      }
+      if (cpu_powered_on_[*target]) {
+        source.set_x(0, static_cast<std::uint64_t>(kPsciRetAlreadyOn));
+        return true;
+      }
+      cpus_[*target]->reset(source.x(2));
+      cpus_[*target]->set_cpu_index(*target);
+      cpus_[*target]->set_mpidr(cpu_mpidr(*target));
+      cpus_[*target]->set_x(0, source.x(3));
+      cpu_powered_on_[*target] = true;
+      source.set_x(0, static_cast<std::uint64_t>(kPsciRetSuccess));
+      return true;
+    }
+    case kPsciAffinityInfo: {
+      const auto target = cpu_index_from_mpidr(source.x(1));
+      if (!target.has_value()) {
+        source.set_x(0, static_cast<std::uint64_t>(kPsciRetInvalidParams));
+        return true;
+      }
+      source.set_x(0, cpu_powered_on_[*target] ? kPsciAffinityOn : kPsciAffinityOff);
+      return true;
+    }
+    case kPsciMigrateInfoType:
+      source.set_x(0, kPsciTosMp);
+      return true;
+    case kPsciCpuOff:
+      source.set_x(0, static_cast<std::uint64_t>(kPsciRetNotSupported));
+      return true;
+    case kPsciSystemOff:
+    case kPsciSystemReset:
+      request_stop();
+      source.set_x(0, static_cast<std::uint64_t>(kPsciRetSuccess));
+      return true;
+    default:
+      return false;
+  }
+}
+
+std::uint64_t SoC::cpu_mpidr(std::size_t cpu_index) {
+  return 0x0000000080000000ull | static_cast<std::uint64_t>(cpu_index & 0xFFu);
+}
+
 bool SoC::load_image(std::uint64_t addr, const std::vector<std::uint32_t>& words) {
   std::uint64_t offset = 0;
   bool ok = false;
@@ -150,7 +381,9 @@ bool SoC::load_image(std::uint64_t addr, const std::vector<std::uint32_t>& words
     ok = sdram_->load(offset, words);
   }
   if (ok) {
-    cpu_.invalidate_decode_all();
+    for (auto& cpu : cpus_) {
+      cpu->invalidate_decode_all();
+    }
   }
   return ok;
 }
@@ -166,7 +399,9 @@ bool SoC::load_binary(std::uint64_t addr, const std::vector<std::uint8_t>& bytes
     ok = sdram_->load_bytes(offset, bytes);
   }
   if (ok) {
-    cpu_.invalidate_decode_all();
+    for (auto& cpu : cpus_) {
+      cpu->invalidate_decode_all();
+    }
   }
   return ok;
 }
@@ -194,22 +429,33 @@ void SoC::set_framebuffer_sdl_enabled(bool enabled) {
 }
 
 void SoC::reset(std::uint64_t entry_pc) {
-  cpu_.reset(entry_pc);
+  for (std::size_t i = 0; i < cpus_.size(); ++i) {
+    cpus_[i]->reset(entry_pc);
+    cpus_[i]->set_cpu_index(i);
+    cpus_[i]->set_mpidr(cpu_mpidr(i));
+    gic_->set_cpu_affinity(i, cpu_mpidr(i));
+    cpu_powered_on_[i] = (i == 0u) || (secondary_boot_mode_ == SecondaryBootMode::AllStart);
+  }
+  global_steps_ = 0;
+  timer_steps_ = 0;
   timer_->set_cycles_per_step(timer_tick_scale_);
-  timer_->rebase_to_steps(cpu_.steps());
+  timer_->rebase_to_steps(timer_steps_);
+  perf_mailbox_->reset_state();
   reset_perf_measurement_state();
 }
 
 void SoC::set_predecode_enabled(bool enabled) {
-  cpu_.set_predecode_enabled(enabled);
+  for (auto& cpu : cpus_) {
+    cpu->set_predecode_enabled(enabled);
+  }
 }
 
 void SoC::set_sp(std::uint64_t sp) {
-  cpu_.set_sp(sp);
+  primary_cpu().set_sp(sp);
 }
 
 void SoC::set_x(std::uint32_t idx, std::uint64_t value) {
-  cpu_.set_x(idx, value);
+  primary_cpu().set_x(idx, value);
 }
 
 void SoC::inject_uart_rx(std::uint8_t byte) {
@@ -250,6 +496,8 @@ void SoC::perf_begin(std::uint64_t case_id, std::uint64_t arg0, std::uint64_t ar
   perf_session_.case_id = case_id;
   perf_session_.arg0 = arg0;
   perf_session_.arg1 = arg1;
+  perf_session_.accumulated_host_ns = 0;
+  perf_session_.accumulated = {};
   perf_session_.start = collect_perf_counters();
   perf_session_.start_host_ns = host_monotonic_ns();
 }
@@ -261,8 +509,9 @@ PerfResult SoC::perf_end(std::uint64_t case_id, std::uint64_t arg0, std::uint64_
   result.arg1 = arg1;
   if (perf_session_.active) {
     const PerfCounters end = collect_perf_counters();
-    result.host_ns = host_monotonic_ns() - perf_session_.start_host_ns;
-    result.delta = perf_delta(end, perf_session_.start);
+    result.host_ns = perf_session_.accumulated_host_ns + (host_monotonic_ns() - perf_session_.start_host_ns);
+    result.delta = perf_session_.accumulated;
+    perf_accumulate(result.delta, perf_delta(end, perf_session_.start));
   }
   std::cerr << "PERF-RESULT"
             << " case_id=" << result.case_id
@@ -297,12 +546,14 @@ PerfResult SoC::perf_end(std::uint64_t case_id, std::uint64_t arg0, std::uint64_
 }
 
 void SoC::perf_flush_tlb() {
-  cpu_.perf_flush_tlb_all();
+  for (auto& cpu : cpus_) {
+    cpu->perf_flush_tlb_all();
+  }
 }
 
 PerfCounters SoC::collect_perf_counters() const {
   PerfCounters out{};
-  out.steps = cpu_.steps();
+  out.steps = global_steps_;
 
   const auto& bus_perf = bus_.perf_counters();
   out.bus_reads = bus_perf.read_ops;
@@ -321,16 +572,18 @@ PerfCounters SoC::collect_perf_counters() const {
     out.ram_fast_write_bytes = fast_perf.write_bytes;
   }
 
-  const auto& cpu_perf = cpu_.perf_counters();
-  out.translate_calls = cpu_perf.translate_calls;
-  out.tlb_lookups = cpu_perf.tlb_lookups;
-  out.tlb_hits = cpu_perf.tlb_hits;
-  out.tlb_misses = cpu_perf.tlb_misses;
-  out.tlb_inserts = cpu_perf.tlb_inserts;
-  out.tlb_flush_all = cpu_perf.tlb_flush_all;
-  out.tlb_flush_va = cpu_perf.tlb_flush_va;
-  out.page_walks = cpu_perf.page_walks;
-  out.page_walk_desc_reads = cpu_perf.page_walk_desc_reads;
+  for (const auto& cpu : cpus_) {
+    const auto& cpu_perf = cpu->perf_counters();
+    out.translate_calls += cpu_perf.translate_calls;
+    out.tlb_lookups += cpu_perf.tlb_lookups;
+    out.tlb_hits += cpu_perf.tlb_hits;
+    out.tlb_misses += cpu_perf.tlb_misses;
+    out.tlb_inserts += cpu_perf.tlb_inserts;
+    out.tlb_flush_all += cpu_perf.tlb_flush_all;
+    out.tlb_flush_va += cpu_perf.tlb_flush_va;
+    out.page_walks += cpu_perf.page_walks;
+    out.page_walk_desc_reads += cpu_perf.page_walk_desc_reads;
+  }
 
   const auto& gic_perf = gic_->perf_counters();
   out.gic_has_pending = gic_perf.has_pending_calls;
@@ -357,29 +610,27 @@ void SoC::reset_perf_measurement_state() {
   if (fast_path_ != nullptr) {
     fast_path_->reset_perf_counters();
   }
-  cpu_.reset_perf_counters();
+  for (auto& cpu : cpus_) {
+    cpu->reset_perf_counters();
+  }
   gic_->reset_perf_counters();
 }
 
 bool SoC::run(std::size_t max_steps) {
   auto sync_devices = [&]() {
     ++local_perf_counters_.sync_devices;
-    const std::uint64_t steps = cpu_.steps();
+    const std::uint64_t steps = timer_steps_;
     if (!device_sync_valid_ || device_sync_steps_ != steps) {
       timer_->sync_to_steps(steps);
       device_sync_steps_ = steps;
     }
 
-    const bool timer_virt_level = timer_->irq_pending() || timer_->irq_pending_virtual();
-    if (!device_sync_valid_ || timer_virt_level != last_timer_virt_level_) {
-      gic_->set_level(kTimerVirtIntId, timer_virt_level);
-      last_timer_virt_level_ = timer_virt_level;
-    }
+    for (std::size_t cpu = 0; cpu < cpus_.size(); ++cpu) {
+      const bool timer_virt_level = timer_->irq_pending() || timer_->irq_pending_virtual(cpu);
+      gic_->set_level(cpu, kTimerVirtIntId, timer_virt_level);
 
-    const bool timer_phys_level = timer_->irq_pending_physical();
-    if (!device_sync_valid_ || timer_phys_level != last_timer_phys_level_) {
-      gic_->set_level(kTimerPhysIntId, timer_phys_level);
-      last_timer_phys_level_ = timer_phys_level;
+      const bool timer_phys_level = timer_->irq_pending_physical(cpu);
+      gic_->set_level(cpu, kTimerPhysIntId, timer_phys_level);
     }
 
     const bool uart_level = uart_->irq_pending();
@@ -403,35 +654,81 @@ bool SoC::run(std::size_t max_steps) {
 
   static constexpr std::size_t kMaxInternalChunk = 65536;
   std::size_t remaining = max_steps;
+
+  if (cpus_.size() == 1) {
+    Cpu& cpu = primary_cpu();
+    while (remaining > 0 && !stop_requested_) {
+      ++local_perf_counters_.run_chunks;
+      sync_devices();
+
+      std::size_t chunk = std::min<std::size_t>(remaining, kMaxInternalChunk);
+      if (uart_->irq_pending()) {
+        chunk = 1;
+      } else {
+        const std::uint64_t timer_limit = timer_->steps_until_irq(0, timer_steps_, chunk);
+        if (timer_limit == 0u) {
+          chunk = 1;
+        } else {
+          chunk = static_cast<std::size_t>(std::min<std::uint64_t>(chunk, timer_limit));
+        }
+      }
+
+      for (std::size_t i = 0; i < chunk; ++i) {
+        const bool ok = cpu.step();
+        ++global_steps_;
+        ++timer_steps_;
+        if (!ok) {
+          return cpu.halted();
+        }
+        if (stop_requested_) {
+          return true;
+        }
+      }
+      remaining -= chunk;
+    }
+
+    sync_devices();
+    return true;
+  }
+
   while (remaining > 0 && !stop_requested_) {
     ++local_perf_counters_.run_chunks;
     sync_devices();
 
-    std::size_t chunk = std::min<std::size_t>(remaining, kMaxInternalChunk);
-    if (uart_->irq_pending()) {
-      chunk = 1;
-    } else {
-      const std::uint64_t timer_limit = timer_->steps_until_irq(cpu_.steps(), chunk);
-      if (timer_limit == 0u) {
-        chunk = 1;
-      } else {
-        chunk = static_cast<std::size_t>(std::min<std::uint64_t>(chunk, timer_limit));
+    bool any_active = false;
+    for (std::size_t cpu_idx = 0; cpu_idx < cpus_.size(); ++cpu_idx) {
+      auto& cpu = cpus_[cpu_idx];
+      if (remaining == 0 || stop_requested_) {
+        break;
+      }
+      if (!cpu_powered_on_[cpu_idx]) {
+        continue;
+      }
+      if (cpu->halted()) {
+        continue;
+      }
+      any_active = true;
+      const bool ok = cpu->step();
+      ++global_steps_;
+      --remaining;
+      if (!ok && !cpu->halted()) {
+        return false;
+      }
+      if (stop_requested_) {
+        break;
       }
     }
 
-    for (std::size_t i = 0; i < chunk; ++i) {
-      if (!cpu_.step()) {
-        return cpu_.halted();
-      }
-      if (stop_requested_) {
-        return true;
-      }
+    if (!any_active) {
+      break;
     }
-    remaining -= chunk;
+    ++timer_steps_;
+    device_sync_valid_ = false;
   }
 
   sync_devices();
-  return true;
+  return std::all_of(cpus_.begin(), cpus_.end(), [](const auto& cpu) { return cpu->halted(); }) ||
+         remaining == 0 || stop_requested_;
 }
 
 std::optional<std::uint8_t> SoC::read_u8(std::uint64_t addr) const {
@@ -443,19 +740,19 @@ std::optional<std::uint8_t> SoC::read_u8(std::uint64_t addr) const {
 }
 
 std::uint64_t SoC::pc() const {
-  return cpu_.pc();
+  return primary_cpu().pc();
 }
 
 std::uint64_t SoC::steps() const {
-  return cpu_.steps();
+  return global_steps_;
 }
 
 std::uint64_t SoC::x(std::uint32_t idx) const {
-  return cpu_.x(idx);
+  return primary_cpu().x(idx);
 }
 
 std::uint64_t SoC::sp() const {
-  return cpu_.sp();
+  return primary_cpu().sp();
 }
 
 std::uint64_t SoC::uart_tx_count() const {
@@ -499,31 +796,31 @@ std::uint32_t SoC::uart_ris() const {
 }
 
 std::uint64_t SoC::pstate_bits() const {
-  return cpu_.pstate_bits();
+  return primary_cpu().pstate_bits();
 }
 
 std::uint64_t SoC::icc_igrpen1_el1() const {
-  return cpu_.icc_igrpen1_el1();
+  return primary_cpu().icc_igrpen1_el1();
 }
 
 std::uint32_t SoC::exception_depth() const {
-  return cpu_.exception_depth();
+  return primary_cpu().exception_depth();
 }
 
 bool SoC::cpu_waiting_for_interrupt() const {
-  return cpu_.waiting_for_interrupt();
+  return primary_cpu().waiting_for_interrupt();
 }
 
 bool SoC::cpu_waiting_for_event() const {
-  return cpu_.waiting_for_event();
+  return primary_cpu().waiting_for_event();
 }
 
 std::uint64_t SoC::vbar_el1() const {
-  return cpu_.vbar_el1();
+  return primary_cpu().vbar_el1();
 }
 
 bool SoC::irq_masked() const {
-  return cpu_.irq_masked();
+  return primary_cpu().irq_masked();
 }
 
 bool SoC::gic_pending(std::uint32_t intid) const {
@@ -539,37 +836,48 @@ std::uint32_t SoC::gicd_ctlr() const {
 }
 
 std::uint64_t SoC::timer_counter() const {
-  return timer_->counter_at_steps(cpu_.steps());
+  return timer_->counter_at_steps(timer_steps_);
 }
 
 std::uint64_t SoC::timer_cntv_ctl() const {
-  return timer_->read_cntv_ctl_el0(cpu_.steps());
+  return timer_->read_cntv_ctl_el0(0, timer_steps_);
 }
 
 std::uint64_t SoC::timer_cntv_cval() const {
-  return timer_->read_cntv_cval_el0();
+  return timer_->read_cntv_cval_el0(0);
 }
 
 std::uint64_t SoC::timer_cntv_tval() const {
-  return timer_->read_cntv_tval_el0(cpu_.steps());
+  return timer_->read_cntv_tval_el0(0, timer_steps_);
 }
 
 std::uint64_t SoC::timer_cntp_ctl() const {
-  return timer_->read_cntp_ctl_el0(cpu_.steps());
+  return timer_->read_cntp_ctl_el0(0, timer_steps_);
 }
 
 std::uint64_t SoC::timer_cntp_cval() const {
-  return timer_->read_cntp_cval_el0();
+  return timer_->read_cntp_cval_el0(0);
 }
 
 std::uint64_t SoC::timer_cntp_tval() const {
-  return timer_->read_cntp_tval_el0(cpu_.steps());
+  return timer_->read_cntp_tval_el0(0, timer_steps_);
 }
 
 bool SoC::save_snapshot(const std::string& path) const {
-  const_cast<GenericTimer&>(*timer_).sync_to_steps(cpu_.steps());
+  const_cast<GenericTimer&>(*timer_).sync_to_steps(timer_steps_);
   if (stop_requested_) {
-    const_cast<Cpu&>(cpu_).clear_halt();
+    for (auto& cpu : const_cast<SoC*>(this)->cpus_) {
+      cpu->clear_halt();
+    }
+  }
+
+  PerfSession snapshot_perf_session = perf_session_;
+  if (snapshot_perf_session.active) {
+    const PerfCounters current = collect_perf_counters();
+    perf_accumulate(snapshot_perf_session.accumulated, perf_delta(current, perf_session_.start));
+    snapshot_perf_session.accumulated_host_ns += host_monotonic_ns() - perf_session_.start_host_ns;
+    snapshot_perf_session.start = current;
+    snapshot_perf_session.start_host_ns = 0;
   }
 
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -577,7 +885,8 @@ bool SoC::save_snapshot(const std::string& path) const {
     return false;
   }
   static constexpr char kMagic[8] = {'A', 'A', 'R', 'C', 'H', 'S', 'N', 'P'};
-  static constexpr std::uint32_t kVersion = 7;
+  static constexpr std::uint32_t kVersion = 11;
+  const std::uint32_t snapshot_cpu_count = static_cast<std::uint32_t>(cpus_.size());
   out.write(kMagic, sizeof(kMagic));
   if (!out ||
       !snapshot_io::write(out, kVersion) ||
@@ -586,15 +895,37 @@ bool SoC::save_snapshot(const std::string& path) const {
       !snapshot_io::write(out, kSdramBase) ||
       !snapshot_io::write(out, kSdramSize) ||
       !snapshot_io::write(out, timer_tick_scale_) ||
+      !snapshot_io::write(out, snapshot_cpu_count) ||
+      !snapshot_io::write(out, global_steps_) ||
+      !snapshot_io::write(out, timer_steps_) ||
+      !snapshot_io::write(out, static_cast<std::uint32_t>(secondary_boot_mode_ == SecondaryBootMode::PsciOff ? 1u : 0u)) ||
       !boot_ram_->save_state(out) ||
       !sdram_->save_state(out) ||
       !uart_->save_state(out) ||
       !kmi_->save_state(out) ||
       !gic_->save_state(out) ||
       !timer_->save_state(out) ||
-      !cpu_.save_state(out) ||
-      !framebuffer_ram_->save_state(out) ||
-      !block_mmio_->save_state(out)) {
+      !perf_mailbox_->save_state(out)) {
+    return false;
+  }
+  for (const auto& cpu : cpus_) {
+    if (!cpu->save_state(out)) {
+      return false;
+    }
+  }
+  for (bool powered_on : cpu_powered_on_) {
+    if (!snapshot_io::write_bool(out, powered_on)) {
+      return false;
+    }
+  }
+  if (!framebuffer_ram_->save_state(out) ||
+      !block_mmio_->save_state(out) ||
+      !snapshot_io::write_bool(out, snapshot_perf_session.active) ||
+      !snapshot_io::write(out, snapshot_perf_session.case_id) ||
+      !snapshot_io::write(out, snapshot_perf_session.arg0) ||
+      !snapshot_io::write(out, snapshot_perf_session.arg1) ||
+      !snapshot_io::write(out, snapshot_perf_session.accumulated_host_ns) ||
+      !snapshot_io::write(out, snapshot_perf_session.accumulated)) {
     return false;
   }
   return static_cast<bool>(out);
@@ -619,18 +950,79 @@ bool SoC::load_snapshot(const std::string& path) {
       !snapshot_io::read(in, sdram_size) ||
       magic[0] != 'A' || magic[1] != 'A' || magic[2] != 'R' || magic[3] != 'C' ||
       magic[4] != 'H' || magic[5] != 'S' || magic[6] != 'N' || magic[7] != 'P' ||
-      (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7) || boot_ram_base != kBootRamBase || boot_ram_size != kBootRamSize ||
+      (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 &&
+       version != 7 && version != 8 && version != 9 && version != 10 && version != 11) ||
+      boot_ram_base != kBootRamBase || boot_ram_size != kBootRamSize ||
       sdram_base != kSdramBase || sdram_size != kSdramSize ||
-      !snapshot_io::read(in, timer_tick_scale_) ||
-      !boot_ram_->load_state(in) ||
-      !sdram_->load_state(in) ||
-      !uart_->load_state(in) ||
-      (version >= 6 && !kmi_->load_state(in)) ||
-      !gic_->load_state(in, version) ||
-      !timer_->load_state(in, version) ||
-      !cpu_.load_state(in, version)) {
+      !snapshot_io::read(in, timer_tick_scale_)) {
     return false;
   }
+
+  PerfSession restored_perf_session{};
+
+  std::uint32_t snapshot_cpu_count = 1;
+  if (version >= 8) {
+    if (!snapshot_io::read(in, snapshot_cpu_count) || snapshot_cpu_count != cpus_.size() ||
+        !snapshot_io::read(in, global_steps_)) {
+      return false;
+    }
+    if (version >= 10) {
+      if (!snapshot_io::read(in, timer_steps_)) {
+        return false;
+      }
+    } else {
+      timer_steps_ = global_steps_;
+    }
+    if (version >= 9) {
+      std::uint32_t boot_mode = 0;
+      if (!snapshot_io::read(in, boot_mode)) {
+        return false;
+      }
+      secondary_boot_mode_ = (boot_mode != 0u) ? SecondaryBootMode::PsciOff : SecondaryBootMode::AllStart;
+    }
+  } else {
+    if (cpus_.size() != 1) {
+      return false;
+    }
+    global_steps_ = 0;
+    timer_steps_ = 0;
+  }
+
+  if (!boot_ram_->load_state(in) || !sdram_->load_state(in) || !uart_->load_state(in) ||
+      (version >= 6 && !kmi_->load_state(in)) || !gic_->load_state(in, version) ||
+      !timer_->load_state(in, version) ||
+      (version >= 11 && !perf_mailbox_->load_state(in))) {
+    return false;
+  }
+  if (version < 11) {
+    perf_mailbox_->reset_state();
+  }
+
+  if (version >= 8) {
+    for (auto& cpu : cpus_) {
+      if (!cpu->load_state(in, version)) {
+        return false;
+      }
+    }
+    cpu_powered_on_.assign(cpus_.size(), true);
+    if (version >= 9) {
+      for (std::size_t i = 0; i < cpu_powered_on_.size(); ++i) {
+        bool powered_on = true;
+        if (!snapshot_io::read_bool(in, powered_on)) {
+          return false;
+        }
+        cpu_powered_on_[i] = powered_on;
+      }
+    }
+  } else {
+    if (!primary_cpu().load_state(in, version)) {
+      return false;
+    }
+    global_steps_ = primary_cpu().steps();
+    timer_steps_ = global_steps_;
+    cpu_powered_on_.assign(cpus_.size(), true);
+  }
+
   if (version < 6) {
     kmi_->reset();
   }
@@ -642,8 +1034,48 @@ bool SoC::load_snapshot(const std::string& path) {
     framebuffer_ram_->load_bytes(0, std::vector<std::uint8_t>(kFramebufferSize, 0));
     block_mmio_->set_image({});
   }
-  if (fast_path_ != nullptr) {
+  if (version >= 11) {
+    if (!snapshot_io::read_bool(in, restored_perf_session.active) ||
+        !snapshot_io::read(in, restored_perf_session.case_id) ||
+        !snapshot_io::read(in, restored_perf_session.arg0) ||
+        !snapshot_io::read(in, restored_perf_session.arg1) ||
+        !snapshot_io::read(in, restored_perf_session.accumulated_host_ns) ||
+        !snapshot_io::read(in, restored_perf_session.accumulated)) {
+      return false;
+    }
+  }
+
+  for (std::size_t i = 0; i < cpus_.size(); ++i) {
+    cpus_[i]->set_callbacks(Cpu::Callbacks{
+        .sev_broadcast = [this](Cpu& source) { broadcast_event(source); },
+        .memory_write = [this](Cpu& source, std::uint64_t pa, std::size_t size) {
+          on_cpu_memory_write(source, pa, size);
+        },
+        .tlbi_vmalle1_broadcast = [this](Cpu& source) { broadcast_tlbi_vmalle1(source); },
+        .tlbi_vae1_broadcast = [this](Cpu& source, std::uint64_t operand, bool all_asids) {
+          broadcast_tlbi_vae1(source, operand, all_asids);
+        },
+        .tlbi_aside1_broadcast = [this](Cpu& source, std::uint16_t asid) {
+          broadcast_tlbi_aside1(source, asid);
+        },
+        .ic_ivau_broadcast = [this](Cpu& source) { broadcast_ic_ivau(source); },
+        .smccc_call = [this](Cpu& source, bool is_hvc, std::uint16_t imm16) {
+          return handle_smccc(source, is_hvc, imm16);
+        },
+        .time_steps = [this]() { return timer_steps_; },
+    });
+    cpus_[i]->set_cpu_index(i);
+    gic_->set_cpu_affinity(i, cpu_mpidr(i));
+    if (version < 8) {
+      cpus_[i]->set_mpidr(cpu_mpidr(i));
+    }
+  }
+
+  if (!debug_slow_mode_enabled() && fast_path_ != nullptr) {
     rebuild_fast_path();
+  } else if (debug_slow_mode_enabled()) {
+    fast_path_.reset();
+    bus_.set_fast_path(nullptr);
   }
   if (framebuffer_sdl_enabled_) {
     set_framebuffer_sdl_enabled(true);
@@ -655,8 +1087,18 @@ bool SoC::load_snapshot(const std::string& path) {
     timer_tick_scale_ = *scale;
   }
   timer_->set_cycles_per_step(timer_tick_scale_);
-  timer_->rebase_to_steps(cpu_.steps());
+  timer_->rebase_to_steps(timer_steps_);
   reset_perf_measurement_state();
+  if (version >= 11 && restored_perf_session.active) {
+    perf_session_.active = true;
+    perf_session_.case_id = restored_perf_session.case_id;
+    perf_session_.arg0 = restored_perf_session.arg0;
+    perf_session_.arg1 = restored_perf_session.arg1;
+    perf_session_.accumulated_host_ns = restored_perf_session.accumulated_host_ns;
+    perf_session_.accumulated = restored_perf_session.accumulated;
+    perf_session_.start = collect_perf_counters();
+    perf_session_.start_host_ns = host_monotonic_ns();
+  }
   return true;
 }
 

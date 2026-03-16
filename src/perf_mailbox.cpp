@@ -1,5 +1,7 @@
 #include "aarchvm/perf_mailbox.hpp"
 
+#include "aarchvm/snapshot_io.hpp"
+
 namespace aarchvm {
 
 namespace {
@@ -46,6 +48,14 @@ std::uint64_t merge_part(std::uint64_t cur, std::uint64_t value, std::uint64_t o
 } // namespace
 
 PerfMailbox::PerfMailbox(Callbacks callbacks) : callbacks_(std::move(callbacks)) {}
+
+void PerfMailbox::reset_state() {
+  case_id_ = 0;
+  arg0_ = 0;
+  arg1_ = 0;
+  last_status_ = 0;
+  last_result_ = {};
+}
 
 std::uint64_t PerfMailbox::read(std::uint64_t offset, std::size_t size) {
   if (size != 1u && size != 2u && size != 4u && size != 8u) {
@@ -147,6 +157,22 @@ void PerfMailbox::write_reg(std::uint64_t offset, std::uint64_t value) {
 
 void PerfMailbox::publish_result(const PerfResult& result) {
   last_result_ = result;
+}
+
+bool PerfMailbox::save_state(std::ostream& out) const {
+  return snapshot_io::write(out, case_id_) &&
+         snapshot_io::write(out, arg0_) &&
+         snapshot_io::write(out, arg1_) &&
+         snapshot_io::write(out, last_status_) &&
+         snapshot_io::write(out, last_result_);
+}
+
+bool PerfMailbox::load_state(std::istream& in) {
+  return snapshot_io::read(in, case_id_) &&
+         snapshot_io::read(in, arg0_) &&
+         snapshot_io::read(in, arg1_) &&
+         snapshot_io::read(in, last_status_) &&
+         snapshot_io::read(in, last_result_);
 }
 
 } // namespace aarchvm

@@ -9,22 +9,35 @@ FASTPATH="${AARCHVM_BUS_FASTPATH:-1}"
 TIMER_SCALE="${AARCHVM_TIMER_SCALE:-10000}"
 STEPS="${AARCHVM_INTERACTIVE_STEPS:-3000000000}"
 
+print_cmd() {
+  local label="$1"
+  shift
+  printf '%s' "$label"
+  printf ' %q' "$@"
+  printf '\n'
+}
+
 if [[ ! -f "$SNAPSHOT" ]]; then
   echo "missing snapshot: $SNAPSHOT" >&2
   echo "build it first with tests/linux/build_linux_shell_snapshot.sh" >&2
   exit 1
 fi
 
+AARCHVM_CMD=(
+  ./build/aarchvm
+  -snapshot-load "$SNAPSHOT"
+  -steps "$STEPS"
+)
+
 echo "snapshot interactive"
 echo "  snapshot: $SNAPSHOT"
 echo "  fastpath: $FASTPATH"
 echo "  timer:    $TIMER_SCALE"
 echo "  steps:    $STEPS"
+print_cmd 'AARCHVM interactive command:' "${AARCHVM_CMD[@]}"
 echo
 
 env \
   AARCHVM_BUS_FASTPATH="$FASTPATH" \
   AARCHVM_TIMER_SCALE="$TIMER_SCALE" \
-  ./build/aarchvm \
-  -snapshot-load "$SNAPSHOT" \
-  -steps "$STEPS"
+  "${AARCHVM_CMD[@]}"

@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+set -x
+
 cmake --build build -j
 
 tests/arm64/build_tests.sh
@@ -12,6 +14,12 @@ run() {
   local bin="$1"
   local steps="$2"
   ./build/aarchvm -bin "tests/arm64/out/${bin}" -load 0x0 -entry 0x0 -steps "$steps"
+}
+
+run_smp() {
+  local bin="$1"
+  local steps="$2"
+  ./build/aarchvm -smp 2 -bin "tests/arm64/out/${bin}" -load 0x0 -entry 0x0 -steps "$steps"
 }
 
 run instr_legacy_each.bin 3000000
@@ -26,6 +34,12 @@ run mmu_at_tlb_observe.bin 4000000
 run mmu_ttbr_asid_mask.bin 4000000
 run mmu_perm_ro_write_abort.bin 4000000
 run mmu_xn_fetch_abort.bin 4000000
+run mmu_cross_page_load.bin 4000000
+run mmu_cross_page_store.bin 4000000
+run mmu_cross_page_fault_far_load.bin 4000000
+run mmu_cross_page_fault_far_store.bin 4000000
+run mmu_cross_page_various.bin 4000000
+run mmu_cross_page_pair_fault_far.bin 4000000
 run mmu_table_ap_inherit.bin 4000000
 run mmu_table_pxn_inherit.bin 4000000
 run mmu_tcr_ips_mair_decode.bin 4000000
@@ -123,11 +137,31 @@ rm -f "$SNAP"
 test "$(tr -d '\r\n' < tests/arm64/out/snapshot_pre.log)" = 'A'
 test "$(tr -d '\r\n' < tests/arm64/out/snapshot_post.log)" = 'B'
 
+PERF_SNAP=tests/arm64/out/snapshot_perf_mailbox.snap
+PERF_LOG=tests/arm64/out/snapshot_perf_mailbox.log
+rm -f "$PERF_SNAP" "$PERF_LOG"
+./build/aarchvm -bin tests/arm64/out/snapshot_perf_mailbox.bin -load 0x0 -entry 0x0 -steps 2000 -snapshot-save "$PERF_SNAP" > tests/arm64/out/snapshot_perf_mailbox_pre.log
+AARCHVM_UART_RX_SCRIPT='100:0x5a' ./build/aarchvm -snapshot-load "$PERF_SNAP" -steps 200000 > "$PERF_LOG" 2>&1
+test ! -s tests/arm64/out/snapshot_perf_mailbox_pre.log
+grep -q '^P$' "$PERF_LOG"
+grep -q 'PERF-RESULT case_id=4660 arg0=86 arg1=120 ' "$PERF_LOG"
+
 run predecode_dyn_codegen.bin 400000
 run predecode_va_exec_switch.bin 5000000
 run predecode_load_store_min.bin 400000
 run predecode_logic_min.bin 400000
 run pl050_basic.bin 400000
+run_smp smp_mpidr_boot.bin 200000
+run_smp smp_sev_wfe.bin 200000
+run_smp smp_ldxr_invalidate.bin 200000
+run_smp smp_spinlock_ldaxr_stlxr.bin 600000
+run_smp smp_tlbi_broadcast.bin 1200000
+./build/aarchvm -smp 2 -bin tests/arm64/out/smp_wfe_monitor_event.bin -load 0x0 -entry 0x0 -steps 300000 | grep -qx 'M'
+./build/aarchvm -smp 2 -smp-mode psci -bin tests/arm64/out/psci_cpu_on_min.bin -load 0x0 -entry 0x0 -steps 400000 | grep -qx 'P'
+./build/aarchvm -smp 2 -bin tests/arm64/out/smp_gic_sgi.bin -load 0x0 -entry 0x0 -steps 400000 | grep -qx 'G'
+./build/aarchvm -smp 2 -bin tests/arm64/out/smp_timer_ppi.bin -load 0x0 -entry 0x0 -steps 400000 | grep -qx 'T'
+./build/aarchvm -smp 2 -bin tests/arm64/out/smp_timer_rate.bin -load 0x0 -entry 0x0 -steps 400000 | grep -qx 'R'
+./build/aarchvm -smp 2 -bin tests/arm64/out/smp_dc_zva_invalidate.bin -load 0x0 -entry 0x0 -steps 400000 | grep -qx 'D'
 AARCHVM_PS2_RX_SCRIPT='100:0x41,1000:0x42,5000:0x43' ./build/aarchvm -bin tests/arm64/out/ps2_rx_spaced.bin -load 0x0 -entry 0x0 -steps 200000 | grep -qx 'ABCP'
 
 PS2_SNAP=tests/arm64/out/ps2_rx_spaced.snap

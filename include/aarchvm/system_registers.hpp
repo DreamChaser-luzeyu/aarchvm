@@ -56,6 +56,8 @@ public:
   [[nodiscard]] std::uint64_t tcr_el1() const { return tcr_el1_; }
   [[nodiscard]] std::uint64_t mair_el1() const { return mair_el1_; }
   [[nodiscard]] std::uint64_t contextidr_el1() const { return contextidr_el1_; }
+  [[nodiscard]] std::uint64_t mpidr_el1() const { return mpidr_el1_; }
+  void set_mpidr_el1(std::uint64_t value) { mpidr_el1_ = value; }
   [[nodiscard]] std::uint64_t id_aa64pfr0_el1() const { return id_aa64pfr0_el1_; }
   [[nodiscard]] std::uint64_t id_aa64isar0_el1() const { return id_aa64isar0_el1_; }
   [[nodiscard]] std::uint64_t id_aa64mmfr0_el1() const { return id_aa64mmfr0_el1_; }

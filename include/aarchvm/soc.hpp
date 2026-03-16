@@ -25,12 +25,18 @@ namespace aarchvm {
 
 class SoC {
 public:
-  SoC();
+  enum class SecondaryBootMode {
+    AllStart,
+    PsciOff,
+  };
+
+  explicit SoC(std::size_t cpu_count = 1);
 
   bool load_image(std::uint64_t addr, const std::vector<std::uint32_t>& words);
   bool load_binary(std::uint64_t addr, const std::vector<std::uint8_t>& bytes);
   bool load_block_image(const std::vector<std::uint8_t>& bytes);
   void set_framebuffer_sdl_enabled(bool enabled);
+  void set_secondary_boot_mode(SecondaryBootMode mode) { secondary_boot_mode_ = mode; }
   void reset(std::uint64_t entry_pc);
   void set_predecode_enabled(bool enabled);
   void set_sp(std::uint64_t sp);
@@ -43,6 +49,7 @@ public:
   [[nodiscard]] std::optional<std::uint8_t> read_u8(std::uint64_t addr) const;
   [[nodiscard]] std::uint64_t pc() const;
   [[nodiscard]] std::uint64_t steps() const;
+  [[nodiscard]] std::size_t cpu_count() const { return cpus_.size(); }
   [[nodiscard]] std::uint64_t x(std::uint32_t idx) const;
   [[nodiscard]] std::uint64_t sp() const;
   [[nodiscard]] std::uint64_t uart_tx_count() const;
@@ -84,7 +91,7 @@ private:
   static constexpr std::uint32_t kFramebufferHeight = 600;
   static constexpr std::uint32_t kFramebufferStride = kFramebufferWidth * 4u;
   static constexpr std::uint64_t kSdramBase = 0x40000000;
-  static constexpr std::uint64_t kSdramSize = 128ull * 1024ull * 1024ull;
+  static constexpr std::uint64_t kSdramSize = 1024ull * 1024ull * 1024ull;
   static constexpr std::uint64_t kUartBase = 0x09000000;
   static constexpr std::uint64_t kUartSize = 0x1000;
   static constexpr std::uint64_t kKmiBase = 0x09010000;
@@ -110,12 +117,25 @@ private:
   [[nodiscard]] PerfCounters collect_perf_counters() const;
   void reset_perf_measurement_state();
   void rebuild_fast_path();
+  void broadcast_event(Cpu& source);
+  void on_cpu_memory_write(Cpu& source, std::uint64_t pa, std::size_t size);
+  void broadcast_tlbi_vmalle1(Cpu& source);
+  void broadcast_tlbi_vae1(Cpu& source, std::uint64_t operand, bool all_asids);
+  void broadcast_tlbi_aside1(Cpu& source, std::uint16_t asid);
+  void broadcast_ic_ivau(Cpu& source);
+  [[nodiscard]] bool handle_smccc(Cpu& source, bool is_hvc, std::uint16_t imm16);
+  [[nodiscard]] std::optional<std::size_t> cpu_index_from_mpidr(std::uint64_t mpidr) const;
+  [[nodiscard]] Cpu& primary_cpu() { return *cpus_.front(); }
+  [[nodiscard]] const Cpu& primary_cpu() const { return *cpus_.front(); }
+  [[nodiscard]] static std::uint64_t cpu_mpidr(std::size_t cpu_index);
 
   struct PerfSession {
     bool active = false;
     std::uint64_t case_id = 0;
     std::uint64_t arg0 = 0;
     std::uint64_t arg1 = 0;
+    std::uint64_t accumulated_host_ns = 0;
+    PerfCounters accumulated{};
     PerfCounters start{};
     std::uint64_t start_host_ns = 0;
   };
@@ -139,8 +159,12 @@ private:
   std::shared_ptr<FramebufferDirtyTracker> framebuffer_dirty_tracker_;
   std::unique_ptr<FramebufferSdl> framebuffer_sdl_;
   bool framebuffer_sdl_enabled_ = true;
-  Cpu cpu_;
+  std::vector<std::unique_ptr<Cpu>> cpus_;
+  std::vector<bool> cpu_powered_on_;
+  SecondaryBootMode secondary_boot_mode_ = SecondaryBootMode::AllStart;
   std::uint64_t timer_tick_scale_ = 1;
+  std::uint64_t global_steps_ = 0;
+  std::uint64_t timer_steps_ = 0;
   bool stop_requested_ = false;
   PerfSession perf_session_{};
   mutable LocalPerfCounters local_perf_counters_{};

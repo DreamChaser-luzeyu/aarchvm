@@ -1,7 +1,7 @@
 /dts-v1/;
 
 / {
-	model = "aarchvm arm64 linux smoke platform";
+	model = "aarchvm arm64 linux SMP smoke platform";
 	compatible = "aarchvm,arm64-min";
 	#address-cells = <2>;
 	#size-cells = <2>;
@@ -35,7 +35,20 @@
 			device_type = "cpu";
 			compatible = "arm,cortex-a53";
 			reg = <0x0 0x0>;
+			enable-method = "psci";
 		};
+
+		cpu@1 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a53";
+			reg = <0x0 0x1>;
+			enable-method = "psci";
+		};
+	};
+
+	psci {
+		compatible = "arm,psci-0.2";
+		method = "smc";
 	};
 
 	memory@40000000 {
@@ -62,7 +75,7 @@
 	intc: interrupt-controller@8000000 {
 		compatible = "arm,gic-v3";
 		reg = <0x0 0x08000000 0x0 0x00010000>,
-		      <0x0 0x080a0000 0x0 0x00020000>;
+		      <0x0 0x080a0000 0x0 0x00040000>;
 		interrupt-controller;
 		#interrupt-cells = <3>;
 		#address-cells = <2>;

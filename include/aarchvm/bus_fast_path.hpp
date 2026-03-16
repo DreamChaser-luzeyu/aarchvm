@@ -36,7 +36,7 @@ public:
   static constexpr std::uint64_t kFramebufferBase = 0x10000000ull;
   static constexpr std::uint64_t kFramebufferSize = 0x00400000ull;
   static constexpr std::uint64_t kSdramBase = 0x40000000ull;
-  static constexpr std::uint64_t kSdramSize = 128ull * 1024ull * 1024ull;
+  static constexpr std::uint64_t kSdramSize = 1024ull * 1024ull * 1024ull;
   static constexpr std::uint64_t kUartBase = 0x09000000ull;
   static constexpr std::uint64_t kUartSize = 0x1000ull;
   static constexpr std::uint64_t kPerfBase = 0x09020000ull;
