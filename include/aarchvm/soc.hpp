@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -140,6 +141,15 @@ private:
   void advance_guest_time(std::uint64_t executed_instructions, std::size_t active_cpu_count);
   void advance_guest_time_to(std::uint64_t guest_tick);
   void invalidate_device_schedule();
+  struct CpuDispatchState {
+    bool any_powered_on = false;
+    bool all_powered_on_halted = false;
+    std::size_t active_cpu_count = 0;
+    std::size_t runnable_cpu_count = 0;
+    std::size_t first_runnable_cpu = std::numeric_limits<std::size_t>::max();
+  };
+  [[nodiscard]] CpuDispatchState inspect_cpu_dispatch_state() const;
+  [[nodiscard]] bool any_other_cpu_waiting_for_interrupt(std::size_t source_cpu) const;
   [[nodiscard]] std::size_t active_cpu_count() const;
   [[nodiscard]] std::size_t runnable_cpu_count();
   struct ScheduledDeviceEvent {
@@ -217,8 +227,8 @@ private:
   bool device_schedule_valid_ = false;
   bool device_schedule_dirty_ = true;
   std::optional<ScheduledDeviceEvent> next_device_event_;
-  bool last_timer_virt_level_ = false;
-  bool last_timer_phys_level_ = false;
+  std::vector<bool> last_timer_virt_levels_;
+  std::vector<bool> last_timer_phys_levels_;
   bool last_uart_level_ = false;
   bool last_kmi_level_ = false;
   bool runnable_state_dirty_ = false;

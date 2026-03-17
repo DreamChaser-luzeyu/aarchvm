@@ -73,6 +73,13 @@ private:
     std::uint64_t mpidr = 0;
   };
 
+  struct PendingQueryCache {
+    bool valid = false;
+    bool value = false;
+    std::uint8_t pmr = 0xFFu;
+    std::uint64_t epoch = 0;
+  };
+
   [[nodiscard]] std::uint32_t read_dist_reg32(std::uint64_t offset) const;
   [[nodiscard]] std::uint32_t read_redist_reg32(std::uint64_t offset) const;
   void write_dist_reg32(std::uint64_t offset, std::uint32_t value);
@@ -113,6 +120,7 @@ private:
   std::array<bool, kNumSpiIntIds> spi_active_{};
   std::array<bool, kNumSpiIntIds> spi_line_level_{};
   std::array<std::uint8_t, kNumSpiIntIds> spi_priorities_{};
+  mutable std::vector<PendingQueryCache> pending_query_cache_{1};
   std::uint32_t gicd_ctlr_ = 0;
   std::uint64_t state_epoch_ = 1;
   mutable PerfCounters perf_counters_{};

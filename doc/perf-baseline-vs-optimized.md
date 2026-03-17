@@ -1661,3 +1661,274 @@ SMP 总体 `host_ns`：`74643039988 -> 5162441153`，总体提升约 `93.08%`。
 - SMP previous stable：`out/perf-smp-stage2-optimized-results.txt`
 - SMP current stable：`out/perf-smp-stage2b-current-results.txt`
 - `perf report`：`out/perf-stage2b-baseline-aarchvm-only.report`
+
+## 第二十一轮优化对比（日期时间：2026-03-17 17:17）
+
+本轮目标不是继续改 GIC 或 CPU 热路径，而是继续推进事件驱动化演进方案中的第 3 节，对 `SoC::run()` 做一次骨架级重构，然后与修改前的当前主线做 baseline 对比。
+
+### 第二十一轮 baseline
+
+```bash
+env \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=600s \
+  AARCHVM_PERF_LOG=out/perf-ump-socloop-baseline.log \
+  AARCHVM_PERF_RESULTS=out/perf-ump-socloop-baseline-results.txt \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+```bash
+env \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=900s \
+  AARCHVM_PERF_LOG=out/perf-smp-socloop-baseline.log \
+  AARCHVM_PERF_RESULTS=out/perf-smp-socloop-baseline-results.txt \
+  AARCHVM_ARGS='-smp 2 -smp-mode psci' \
+  AARCHVM_LINUX_DTB=dts/aarchvm-linux-smp.dtb \
+  AARCHVM_USERTEST_SNAPSHOT_OUT=out/linux-smp-shell-v1.snap \
+  AARCHVM_USERTEST_SNAPSHOT_LOG=out/linux-smp-shell-v1-build.log \
+  AARCHVM_USERTEST_SNAPSHOT_VERIFY_LOG=out/linux-smp-shell-v1-verify.log \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+### 第二十一轮 current
+
+```bash
+env \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=600s \
+  AARCHVM_PERF_LOG=out/perf-ump-socloop-optimized.log \
+  AARCHVM_PERF_RESULTS=out/perf-ump-socloop-optimized-results.txt \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+```bash
+env \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=900s \
+  AARCHVM_PERF_LOG=out/perf-smp-socloop-optimized.log \
+  AARCHVM_PERF_RESULTS=out/perf-smp-socloop-optimized-results.txt \
+  AARCHVM_ARGS='-smp 2 -smp-mode psci' \
+  AARCHVM_LINUX_DTB=dts/aarchvm-linux-smp.dtb \
+  AARCHVM_USERTEST_SNAPSHOT_OUT=out/linux-smp-shell-v1.snap \
+  AARCHVM_USERTEST_SNAPSHOT_LOG=out/linux-smp-shell-v1-build.log \
+  AARCHVM_USERTEST_SNAPSHOT_VERIFY_LOG=out/linux-smp-shell-v1-verify.log \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+### 第二十一轮 UMP 结果
+
+| case | baseline host_ns | current host_ns | 提升 |
+| --- | ---: | ---: | ---: |
+| `base64-enc-4m` | 3132407331 | 2336432840 | 25.41% |
+| `base64-dec-4m` | 2076042202 | 2652369110 | -27.76% |
+| `fnv1a-16m` | 2589072724 | 3804367167 | -46.94% |
+| `tlb-seq-hot-8m` | 8331507 | 8292219 | 0.47% |
+| `tlb-seq-cold-32m` | 9229355 | 9063779 | 1.79% |
+| `tlb-rand-32m` | 13311150 | 13783123 | -3.55% |
+
+UMP 总体 `host_ns`：`7828394269 -> 8824308238`，总体提升约 `-12.72%`。
+
+UMP 总体调度计数：
+- `sync_devices`：`244726 -> 240701`，下降约 `1.64%`
+- `run_chunks`：`243514 -> 239487`，下降约 `1.65%`
+
+### 第二十一轮 SMP 结果
+
+| case | baseline host_ns | current host_ns | 提升 |
+| --- | ---: | ---: | ---: |
+| `base64-enc-4m` | 1734984620 | 3921930321 | -126.05% |
+| `base64-dec-4m` | 1605436130 | 2261351253 | -40.86% |
+| `fnv1a-16m` | 2128815341 | 3613741269 | -69.75% |
+| `tlb-seq-hot-8m` | 12102345 | 8566374 | 29.22% |
+| `tlb-seq-cold-32m` | 7543165 | 9976493 | -32.26% |
+| `tlb-rand-32m` | 7467628 | 14263029 | -91.00% |
+
+SMP 总体 `host_ns`：`5496349229 -> 9829828739`，总体提升约 `-78.84%`。
+
+SMP 总体调度计数：
+- `sync_devices`：`440825 -> 263879`，下降约 `40.14%`
+- `run_chunks`：`440230 -> 263282`，下降约 `40.20%`
+
+### 第二十一轮复测
+
+为了确认这不是一次性的宿主机抖动，又补做了一轮优化后复测：
+
+```bash
+env \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=600s \
+  AARCHVM_PERF_LOG=out/perf-ump-socloop-rerun.log \
+  AARCHVM_PERF_RESULTS=out/perf-ump-socloop-rerun-results.txt \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+```bash
+env \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=900s \
+  AARCHVM_PERF_LOG=out/perf-smp-socloop-rerun.log \
+  AARCHVM_PERF_RESULTS=out/perf-smp-socloop-rerun-results.txt \
+  AARCHVM_ARGS='-smp 2 -smp-mode psci' \
+  AARCHVM_LINUX_DTB=dts/aarchvm-linux-smp.dtb \
+  AARCHVM_USERTEST_SNAPSHOT_OUT=out/linux-smp-shell-v1.snap \
+  AARCHVM_USERTEST_SNAPSHOT_LOG=out/linux-smp-shell-v1-build.log \
+  AARCHVM_USERTEST_SNAPSHOT_VERIFY_LOG=out/linux-smp-shell-v1-verify.log \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+复测总量级仍然没有回到 baseline：
+- UMP 总体 `host_ns`：`7828394269 -> 9268793347`，总体提升约 `-18.40%`
+- SMP 总体 `host_ns`：`5496349229 -> 8216840784`，总体提升约 `-49.50%`
+
+### 第二十一轮结果解释
+
+- 这轮重构在结构上是成立的：
+  - `SoC::run()` 内部对 active/runnable CPU 的判断被统一到了一个 dispatch scan；
+  - 单核、单 runnable SMP、多 runnable SMP 三类路径开始共用同一套运行窗口计算逻辑；
+  - 单 runnable SMP 路径去掉了一次内层 `ready_to_run()` 重复检查。
+- 但这轮还不能视为性能优化成功：
+  - UMP 和 SMP 的 `sync_devices` / `run_chunks` 计数都下降了，说明主循环确实少做了一部分调度工作；
+  - 但 `host_ns` 没有同步改善，反而在多数组合 case 上明显回退；
+  - 复测仍然保持同样方向的回退，说明这不是单次偶发结果。
+- 目前更合理的判断是：
+  - 这轮改动完成的是“主循环骨架整理”，不是“主循环热点优化”；
+  - 下一步要继续沿第 3 节往下走，应该直接用 `perf`/`gprof` 再盯一次当前主线，定位 `host_ns` 回退究竟落在 `SoC::run()` 自身、`ready_to_run()`/`has_pending()`、还是新的 deadline 判定路径上；
+  - 在找出明确热点前，不应把这一轮描述成性能正收益。
+
+### 第二十一轮原始数据文件
+
+- UMP baseline：`out/perf-ump-socloop-baseline-results.txt`
+- UMP current：`out/perf-ump-socloop-optimized-results.txt`
+- UMP rerun：`out/perf-ump-socloop-rerun-results.txt`
+- SMP baseline：`out/perf-smp-socloop-baseline-results.txt`
+- SMP current：`out/perf-smp-socloop-optimized-results.txt`
+- SMP rerun：`out/perf-smp-socloop-rerun-results.txt`
+
+## 第二十二轮优化对比（日期时间：2026-03-17 20:20）
+
+本轮以第二十一轮结束时的当前主线为 baseline，目标是把上一轮 `SoC::run()` 骨架整理后没有转化成收益的性能回退重新拉回来。由于开工前代码状态与第二十一轮 current 一致，这里直接复用上一轮落盘的 current 结果作为本轮 baseline：
+
+- UMP baseline：`out/perf-ump-socloop-optimized-results.txt`
+- SMP baseline：`out/perf-smp-socloop-optimized-results.txt`
+
+### 本轮优化动作
+
+1. 在 [src/gicv3.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/gicv3.cpp) / [include/aarchvm/gicv3.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/gicv3.hpp) 为 `GicV3::has_pending(cpu, pmr)` 增加 `state_epoch + pmr` 查询缓存，避免 `ready_to_run()`、`WFI/WFE` 唤醒判断、`SoC` 调度扫描在 GIC 状态未变化时反复线性扫描本地中断和 SPI。
+2. 根据中间态 `perf` 结果继续优化 [src/soc.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/soc.cpp)：
+   - `sync_devices()` 中的 timer PPI 改成和 UART/KMI 一样，只在电平变化时才调用 `gic_->set_level()`；
+   - 避免在 guest timer 电平不变时继续制造无意义的 GIC 路径调用和状态扰动。
+
+### 第二十二轮 optimized
+
+```bash
+env \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=600s \
+  AARCHVM_PERF_LOG=out/perf-ump-giccache-timerlvl-optimized.log \
+  AARCHVM_PERF_RESULTS=out/perf-ump-giccache-timerlvl-optimized-results.txt \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+```bash
+env \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=900s \
+  AARCHVM_PERF_LOG=out/perf-smp-giccache-timerlvl-optimized.log \
+  AARCHVM_PERF_RESULTS=out/perf-smp-giccache-timerlvl-optimized-results.txt \
+  AARCHVM_ARGS='-smp 2 -smp-mode psci' \
+  AARCHVM_LINUX_DTB=dts/aarchvm-linux-smp.dtb \
+  AARCHVM_USERTEST_SNAPSHOT_OUT=out/linux-smp-shell-v1.snap \
+  AARCHVM_USERTEST_SNAPSHOT_LOG=out/linux-smp-shell-v1-build.log \
+  AARCHVM_USERTEST_SNAPSHOT_VERIFY_LOG=out/linux-smp-shell-v1-verify.log \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+### 第二十二轮 UMP 结果
+
+| case | baseline host_ns | optimized host_ns | 提升 |
+| --- | ---: | ---: | ---: |
+| `base64-enc-4m` | 2336432840 | 1469315912 | 37.11% |
+| `base64-dec-4m` | 2652369110 | 1200549515 | 54.74% |
+| `fnv1a-16m` | 3804367167 | 1775017049 | 53.34% |
+| `tlb-seq-hot-8m` | 8292219 | 3796505 | 54.22% |
+| `tlb-seq-cold-32m` | 9063779 | 4285321 | 52.72% |
+| `tlb-rand-32m` | 13783123 | 6943279 | 49.62% |
+
+UMP 总体 `host_ns`：`8824308238 -> 4459907581`，总体提升约 `49.46%`。
+
+UMP 调度/GIC 相关计数：
+- `gic_level`：`488650 -> 11514`
+- `sync_devices`：`240701 -> 244305`
+- `run_chunks`：`239487 -> 243092`
+
+解释：
+- 这轮 UMP 的收益主要不是来自减少 chunk 数，而是来自压掉了 GIC 相关的无效查询与无效 `set_level()`；
+- 尤其是 timer PPI 电平去重后，`gic_level` 计数从几十万量级掉到了万级。
+
+### 第二十二轮 SMP 结果
+
+| case | baseline host_ns | optimized host_ns | 提升 |
+| --- | ---: | ---: | ---: |
+| `base64-enc-4m` | 3921930321 | 1566753167 | 60.05% |
+| `base64-dec-4m` | 2261351253 | 1354397954 | 40.11% |
+| `fnv1a-16m` | 3613741269 | 1882194835 | 47.92% |
+| `tlb-seq-hot-8m` | 8566374 | 4789715 | 44.09% |
+| `tlb-seq-cold-32m` | 9976493 | 4666827 | 53.22% |
+| `tlb-rand-32m` | 14263029 | 7451889 | 47.75% |
+
+SMP 总体 `host_ns`：`9829828739 -> 4820254387`，总体提升约 `50.96%`。
+
+SMP 调度/GIC 相关计数：
+- `gic_pending`：`4426377 -> 4723370`
+- `gic_level`：`1063504 -> 16347`
+- `sync_devices`：`263879 -> 262199`
+- `run_chunks`：`263282 -> 261607`
+
+解释：
+- 这轮 SMP 收益的核心同样不是少跑了多少 chunk，而是大幅减少了 GIC 路径里的固定成本；
+- `gic_pending` 总次数没有明显下降，说明 workload 本身仍频繁走“是否有中断”的判断；
+- 但 `gic_level` 从百万级降到万级，表明 timer PPI 的重复 `set_level()` 确实是上一轮残留的明显浪费；
+- 即使对照第二十一轮补做的 pre-change rerun，本轮也仍保持明显提升：
+  - UMP 相对 `out/perf-ump-socloop-rerun-results.txt` 总体提升约 `51.88%`
+  - SMP 相对 `out/perf-smp-socloop-rerun-results.txt` 总体提升约 `41.34%`
+
+### 第二十二轮 perf 热点
+
+补抓当前最终版本的 SMP 热点：
+
+```bash
+timeout 300s bash -lc "printf 'bench_runner\n' | \
+  AARCHVM_BUS_FASTPATH=1 AARCHVM_TIMER_SCALE=1 \
+  perf record -o out/perf-round22-current.data -- \
+  ./build/aarchvm -smp 2 -snapshot-load out/linux-smp-shell-v1.snap \
+    -steps 3000000000 -stop-on-uart 'BENCH-RESULT name=tlb-rand-32m' -fb-sdl off \
+  > out/perf-round22-current-run.log 2>&1"
+perf report --stdio --percent-limit 0.2 --dsos=aarchvm \
+  -i out/perf-round22-current.data > out/perf-round22-current-aarchvm-only.report
+```
+
+当前最主要的热点已经是解释器/访存本体，而不是 GIC 轮询：
+
+- `aarchvm::Cpu::step()` 约 `21.33%`
+- `aarchvm::Cpu::translate_address(...)` 约 `12.67%`
+- `aarchvm::Cpu::lookup_decoded(...)` 约 `8.74%`
+- `aarchvm::Cpu::exec_data_processing(...)` 约 `6.94%`
+- `aarchvm::Cpu::mmu_write_value(...)` 约 `6.17%`
+- `aarchvm::Cpu::exec_load_store(...)` 约 `5.55%`
+- `aarchvm::SoC::run(unsigned long)` 约 `4.76%`
+
+这说明本轮两个低风险优化已经把“上一轮为了重构主循环而引入的 GIC 相关固定成本”基本压回去了，后续再想继续提速，优先级应回到：
+
+1. `translate_address()` / `translate_data_address_fast()` 与 TLB 热路径
+2. `lookup_decoded()` 与预解码缓存结构
+3. `mmu_read_value()` / `mmu_write_value()` 与跨页/快路径判断
+4. `SoC::run()` 自身剩余的 4%~5% 调度成本
+
+### 第二十二轮原始数据文件
+
+- UMP baseline：`out/perf-ump-socloop-optimized-results.txt`
+- SMP baseline：`out/perf-smp-socloop-optimized-results.txt`
+- UMP optimized：`out/perf-ump-giccache-timerlvl-optimized-results.txt`
+- SMP optimized：`out/perf-smp-giccache-timerlvl-optimized-results.txt`
+- 最终热点：`out/perf-round22-current-aarchvm-only.report`

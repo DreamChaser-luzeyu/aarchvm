@@ -168,6 +168,8 @@ SoC::SoC(std::size_t cpu_count)
 
   gic_->set_cpu_count(cpu_count);
   timer_->set_cpu_count(cpu_count);
+  last_timer_virt_levels_.assign(cpu_count, false);
+  last_timer_phys_levels_.assign(cpu_count, false);
 
   cpus_.reserve(cpu_count);
   cpu_powered_on_.assign(cpu_count, true);
@@ -639,28 +641,50 @@ void SoC::invalidate_device_schedule() {
   next_device_event_.reset();
 }
 
-std::size_t SoC::active_cpu_count() const {
-  std::size_t count = 0;
+SoC::CpuDispatchState SoC::inspect_cpu_dispatch_state() const {
+  CpuDispatchState state{};
+  state.all_powered_on_halted = true;
   for (std::size_t i = 0; i < cpus_.size(); ++i) {
-    if (!cpu_powered_on_[i] || cpus_[i]->halted()) {
+    if (!cpu_powered_on_[i]) {
       continue;
     }
-    ++count;
+    state.any_powered_on = true;
+    if (cpus_[i]->halted()) {
+      continue;
+    }
+    state.all_powered_on_halted = false;
+    ++state.active_cpu_count;
+    if (cpus_[i]->ready_to_run()) {
+      if (state.first_runnable_cpu == std::numeric_limits<std::size_t>::max()) {
+        state.first_runnable_cpu = i;
+      }
+      ++state.runnable_cpu_count;
+    }
   }
-  return count;
+  if (!state.any_powered_on) {
+    state.all_powered_on_halted = false;
+  }
+  return state;
+}
+
+bool SoC::any_other_cpu_waiting_for_interrupt(std::size_t source_cpu) const {
+  for (std::size_t i = 0; i < cpus_.size(); ++i) {
+    if (i == source_cpu || !cpu_powered_on_[i] || cpus_[i]->halted()) {
+      continue;
+    }
+    if (cpus_[i]->waiting_for_interrupt()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::size_t SoC::active_cpu_count() const {
+  return inspect_cpu_dispatch_state().active_cpu_count;
 }
 
 std::size_t SoC::runnable_cpu_count() {
-  std::size_t count = 0;
-  for (std::size_t i = 0; i < cpus_.size(); ++i) {
-    if (!cpu_powered_on_[i] || cpus_[i]->halted()) {
-      continue;
-    }
-    if (cpus_[i]->ready_to_run()) {
-      ++count;
-    }
-  }
-  return count;
+  return inspect_cpu_dispatch_state().runnable_cpu_count;
 }
 
 std::optional<SoC::ScheduledDeviceEvent> SoC::next_device_event(std::uint64_t guest_tick) const {
@@ -740,8 +764,8 @@ void SoC::reset_perf_measurement_state() {
   device_schedule_valid_ = false;
   device_schedule_dirty_ = true;
   next_device_event_.reset();
-  last_timer_virt_level_ = false;
-  last_timer_phys_level_ = false;
+  std::fill(last_timer_virt_levels_.begin(), last_timer_virt_levels_.end(), false);
+  std::fill(last_timer_phys_levels_.begin(), last_timer_phys_levels_.end(), false);
   last_uart_level_ = false;
   last_kmi_level_ = false;
   runnable_state_dirty_ = false;
@@ -770,30 +794,6 @@ bool SoC::run(std::size_t max_steps) {
               << " wfe=" << (cpu.waiting_for_event() ? 1 : 0)
               << '\n';
   };
-  const auto all_powered_on_cpus_halted = [&]() {
-    bool any_powered_on = false;
-    for (std::size_t i = 0; i < cpus_.size(); ++i) {
-      if (!cpu_powered_on_[i]) {
-        continue;
-      }
-      any_powered_on = true;
-      if (!cpus_[i]->halted()) {
-        return false;
-      }
-    }
-    return any_powered_on;
-  };
-  const auto any_other_cpu_waiting_for_interrupt = [&](std::size_t source_cpu) {
-    for (std::size_t i = 0; i < cpus_.size(); ++i) {
-      if (i == source_cpu || !cpu_powered_on_[i] || cpus_[i]->halted()) {
-        continue;
-      }
-      if (cpus_[i]->waiting_for_interrupt()) {
-        return true;
-      }
-    }
-    return false;
-  };
   auto sync_devices = [&](bool force_timer_sync = false) {
     ++local_perf_counters_.sync_devices;
     const std::uint64_t guest_ticks = guest_time_ticks();
@@ -804,10 +804,16 @@ bool SoC::run(std::size_t max_steps) {
 
     for (std::size_t cpu = 0; cpu < cpus_.size(); ++cpu) {
       const bool timer_virt_level = timer_->irq_pending() || timer_->irq_pending_virtual(cpu);
-      gic_->set_level(cpu, kTimerVirtIntId, timer_virt_level);
+      if (!device_sync_valid_ || timer_virt_level != last_timer_virt_levels_[cpu]) {
+        gic_->set_level(cpu, kTimerVirtIntId, timer_virt_level);
+        last_timer_virt_levels_[cpu] = timer_virt_level;
+      }
 
       const bool timer_phys_level = timer_->irq_pending_physical(cpu);
-      gic_->set_level(cpu, kTimerPhysIntId, timer_phys_level);
+      if (!device_sync_valid_ || timer_phys_level != last_timer_phys_levels_[cpu]) {
+        gic_->set_level(cpu, kTimerPhysIntId, timer_phys_level);
+        last_timer_phys_levels_[cpu] = timer_phys_level;
+      }
     }
 
     const bool uart_level = uart_->irq_pending();
@@ -899,30 +905,18 @@ bool SoC::run(std::size_t max_steps) {
     sync_devices(true);
     return true;
   };
-  const auto single_core_window = [&](std::size_t budget) {
+  const auto compute_run_window = [&](std::size_t budget,
+                                      std::size_t cpu_divisor,
+                                      bool deadline_sensitive,
+                                      std::uint64_t guest_ticks) {
     static constexpr std::size_t kMaxLegacyInternalChunk = 65536;
-    std::size_t chunk = budget;
-    if (scheduler_mode_ == SchedulerMode::Legacy || !deadline_driven_window_needed()) {
-      return std::max<std::size_t>(1, std::min<std::size_t>(chunk, kMaxLegacyInternalChunk));
-    }
-    const std::uint64_t guest_ticks = guest_time_ticks();
-    if (const auto event = next_device_event(guest_ticks); event.has_value()) {
-      if (event->guest_tick <= guest_ticks) {
-        chunk = 1;
-      } else {
-        const std::uint64_t until_event = event->guest_tick - guest_ticks;
-        chunk = static_cast<std::size_t>(std::min<std::uint64_t>(chunk, until_event));
-      }
-    }
-    return std::max<std::size_t>(1, chunk);
-  };
-  const auto single_runnable_smp_window = [&](std::size_t budget) {
-    static constexpr std::size_t kMaxLegacyInternalChunk = 65536;
-    std::size_t chunk = budget;
+    std::size_t chunk = std::max<std::size_t>(1, (budget + cpu_divisor - 1u) / cpu_divisor);
     if (scheduler_mode_ == SchedulerMode::Legacy) {
       return std::max<std::size_t>(1, std::min<std::size_t>(chunk, kMaxLegacyInternalChunk));
     }
-    const std::uint64_t guest_ticks = guest_time_ticks();
+    if (!deadline_sensitive) {
+      return chunk;
+    }
     if (const auto event = next_device_event(guest_ticks); event.has_value()) {
       if (event->guest_tick <= guest_ticks) {
         chunk = 1;
@@ -932,23 +926,6 @@ bool SoC::run(std::size_t max_steps) {
       }
     }
     return std::max<std::size_t>(1, chunk);
-  };
-  const auto smp_round_window = [&](std::size_t budget, std::size_t runnable_cpus) {
-    static constexpr std::size_t kMaxLegacyInternalChunk = 65536;
-    std::size_t round_budget = std::max<std::size_t>(1, (budget + runnable_cpus - 1u) / runnable_cpus);
-    if (scheduler_mode_ == SchedulerMode::Legacy || !deadline_driven_window_needed()) {
-      return std::max<std::size_t>(1, std::min<std::size_t>(round_budget, kMaxLegacyInternalChunk));
-    }
-    const std::uint64_t guest_ticks = guest_time_ticks();
-    if (const auto event = next_device_event(guest_ticks); event.has_value()) {
-      if (event->guest_tick <= guest_ticks) {
-        round_budget = 1;
-      } else {
-        const std::uint64_t until_event = event->guest_tick - guest_ticks;
-        round_budget = static_cast<std::size_t>(std::min<std::uint64_t>(round_budget, until_event));
-      }
-    }
-    return std::max<std::size_t>(1, round_budget);
   };
 
   std::size_t remaining = max_steps;
@@ -961,7 +938,9 @@ bool SoC::run(std::size_t max_steps) {
         continue;
       }
 
-      std::size_t window = single_core_window(remaining);
+      const std::uint64_t guest_ticks = guest_time_ticks();
+      const bool deadline_sensitive = deadline_driven_window_needed();
+      std::size_t window = compute_run_window(remaining, 1u, deadline_sensitive, guest_ticks);
       while (window > 0 && remaining > 0 && !stop_requested_) {
         ++local_perf_counters_.run_chunks;
         const std::size_t chunk = window;
@@ -1001,40 +980,34 @@ bool SoC::run(std::size_t max_steps) {
   while (remaining > 0 && !stop_requested_) {
     maybe_sync_devices();
 
-    std::size_t runnable_cpus = runnable_cpu_count();
+    const CpuDispatchState dispatch = inspect_cpu_dispatch_state();
+    std::size_t runnable_cpus = dispatch.runnable_cpu_count;
     bool fallback_poll_waiters = false;
     if (runnable_cpus == 0) {
-      if (all_powered_on_cpus_halted()) {
+      if (dispatch.all_powered_on_halted) {
         request_stop();
         break;
       }
       if (fast_forward_to_next_guest_event()) {
         continue;
       }
-      runnable_cpus = active_cpu_count();
+      runnable_cpus = dispatch.active_cpu_count;
       fallback_poll_waiters = true;
     }
     if (runnable_cpus == 0) {
-      if (all_powered_on_cpus_halted()) {
+      if (dispatch.all_powered_on_halted) {
         request_stop();
       }
       break;
     }
 
     if (!fallback_poll_waiters && runnable_cpus == 1) {
-      std::size_t runnable_cpu_idx = cpus_.size();
-      for (std::size_t cpu_idx = 0; cpu_idx < cpus_.size(); ++cpu_idx) {
-        if (!cpu_powered_on_[cpu_idx] || cpus_[cpu_idx]->halted()) {
-          continue;
-        }
-        if (cpus_[cpu_idx]->ready_to_run()) {
-          runnable_cpu_idx = cpu_idx;
-          break;
-        }
-      }
+      const std::size_t runnable_cpu_idx = dispatch.first_runnable_cpu;
       if (runnable_cpu_idx < cpus_.size()) {
         Cpu& cpu = *cpus_[runnable_cpu_idx];
-        std::size_t window = single_runnable_smp_window(remaining);
+        const std::uint64_t guest_ticks = guest_time_ticks();
+        std::size_t window = compute_run_window(remaining, 1u, true, guest_ticks);
+        const bool waiting_irq_peer = any_other_cpu_waiting_for_interrupt(runnable_cpu_idx);
         while (window > 0 && remaining > 0 && !stop_requested_) {
           ++local_perf_counters_.run_chunks;
           const std::size_t chunk = window;
@@ -1042,9 +1015,6 @@ bool SoC::run(std::size_t max_steps) {
           runnable_state_dirty_ = false;
           const std::uint64_t gic_epoch_before = gic_->state_epoch();
           while (executed < chunk) {
-            if (!cpu.ready_to_run()) {
-              break;
-            }
             const bool ok = cpu.step();
             ++global_steps_;
             advance_guest_time(1, 1);
@@ -1063,8 +1033,7 @@ bool SoC::run(std::size_t max_steps) {
             if (device_schedule_dirty_ || runnable_state_dirty_ || cpu.waiting()) {
               break;
             }
-            if (gic_->state_epoch() != gic_epoch_before &&
-                any_other_cpu_waiting_for_interrupt(runnable_cpu_idx)) {
+            if (waiting_irq_peer && gic_->state_epoch() != gic_epoch_before) {
               break;
             }
           }
@@ -1081,7 +1050,9 @@ bool SoC::run(std::size_t max_steps) {
     }
 
     ++local_perf_counters_.run_chunks;
-    const std::size_t round_budget = smp_round_window(remaining, runnable_cpus);
+    const std::uint64_t guest_ticks = guest_time_ticks();
+    const bool deadline_sensitive = deadline_driven_window_needed();
+    const std::size_t round_budget = compute_run_window(remaining, runnable_cpus, deadline_sensitive, guest_ticks);
 
     for (std::size_t round = 0; round < round_budget && remaining > 0 && !stop_requested_; ++round) {
       bool any_active = false;
@@ -1113,7 +1084,7 @@ bool SoC::run(std::size_t max_steps) {
       }
 
       if (!any_active) {
-        if (all_powered_on_cpus_halted()) {
+        if (inspect_cpu_dispatch_state().all_powered_on_halted) {
           request_stop();
         }
         break;

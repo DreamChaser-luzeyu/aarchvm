@@ -99,6 +99,7 @@ GicV3::GicV3() {
 void GicV3::set_cpu_count(std::size_t cpu_count) {
   cpu_count_ = std::max<std::size_t>(1, cpu_count);
   locals_.assign(cpu_count_, LocalCpuState{});
+  pending_query_cache_.assign(cpu_count_, PendingQueryCache{});
   for (auto& local : locals_) {
     local.priorities.fill(kDefaultPriority);
   }
@@ -670,17 +671,32 @@ bool GicV3::has_pending(std::size_t cpu_index) const {
 
 bool GicV3::has_pending(std::size_t cpu_index, std::uint8_t pmr) const {
   ++perf_counters_.has_pending_calls;
+  const std::size_t idx = std::min(cpu_index, locals_.size() - 1u);
+  auto& cache = pending_query_cache_[idx];
+  if (cache.valid && cache.epoch == state_epoch_ && cache.pmr == pmr) {
+    return cache.value;
+  }
+
+  bool pending = false;
   for (std::uint32_t intid = 0; intid < kLocalIntIds; ++intid) {
-    if (local_candidate(cpu_index, intid, pmr)) {
-      return true;
+    if (local_candidate(idx, intid, pmr)) {
+      pending = true;
+      break;
     }
   }
-  for (std::uint32_t intid = kFirstSpiIntId; intid < kNumIntIds; ++intid) {
-    if (spi_candidate(intid, pmr)) {
-      return true;
+  if (!pending) {
+    for (std::uint32_t intid = kFirstSpiIntId; intid < kNumIntIds; ++intid) {
+      if (spi_candidate(intid, pmr)) {
+        pending = true;
+        break;
+      }
     }
   }
-  return false;
+  cache.valid = true;
+  cache.value = pending;
+  cache.pmr = pmr;
+  cache.epoch = state_epoch_;
+  return pending;
 }
 
 bool GicV3::acknowledge(std::size_t cpu_index, std::uint32_t& intid) {
@@ -883,6 +899,9 @@ bool GicV3::load_state(std::istream& in, std::uint32_t version) {
   }
 
   ++state_epoch_;
+  for (auto& cache : pending_query_cache_) {
+    cache = PendingQueryCache{};
+  }
   return true;
 }
 

@@ -64,9 +64,17 @@
 - 降低空转和无意义设备同步开销。
 
 当前状态：
-- 已完成“统一 guest 时间 + 最小 timer deadline 调度 + 旧步进路径 fallback”的第一阶段闭环。
-- 当前默认主线继续使用 `event` 调度，以保证 SMP timer / Linux 路径的程序可见正确性。
-- `AARCHVM_SCHED_MODE=legacy` 仍保留用于对照和定位，但它在 SMP 下会把近期限时器明显延后，不应视作等价语义模式。
+- 已完成一轮 SoC 主循环骨架重构：
+  - 用统一的 dispatch scan 一次性收集 `powered_on / active / runnable / first_runnable` 状态；
+  - 单核、单 runnable SMP、多 runnable SMP 三条路径开始共用同一套运行窗口计算逻辑；
+  - 去掉了单 runnable SMP 路径里重复的 `ready_to_run()` 热路径检查。
+- 这一轮还没有完成“host 输入事件 / host poll deadline / guest deadline”三者统一驱动的完整主循环：
+  - `maybe_sync_devices()` 与 `fast_forward_to_next_guest_event()` 仍然是过渡形态；
+  - 性能测试显示 `sync_devices` / `run_chunks` 计数有所下降，但整体 `host_ns` 仍未形成稳定正收益，因此本节暂不勾选完成。
+- 作为这一节的前置基础，第一阶段已经完成：
+  - 已完成“统一 guest 时间 + 最小 timer deadline 调度 + 旧步进路径 fallback”的第一阶段闭环。
+  - 当前默认主线继续使用 `event` 调度，以保证 SMP timer / Linux 路径的程序可见正确性。
+  - `AARCHVM_SCHED_MODE=legacy` 仍保留用于对照和定位，但它在 SMP 下会把近期限时器明显延后，不应视作等价语义模式。
 
 ### 4. 先把 Generic Timer deadline 化
 

@@ -1,3 +1,79 @@
+# 修改日志 2026-03-17 20:20
+
+## 本轮修改
+
+- 围绕第二十一轮遗留的性能回退，继续优化 [src/gicv3.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/gicv3.cpp) / [include/aarchvm/gicv3.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/gicv3.hpp)：
+  - 为 `GicV3::has_pending(cpu, pmr)` 增加 `state_epoch + pmr` 查询缓存；
+  - 避免 `Cpu::ready_to_run()`、`WFI/WFE` 唤醒判断和 `SoC` 调度扫描在 GIC 状态未变化时反复线性扫描本地中断和 SPI。
+- 继续优化 [src/soc.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/soc.cpp) 的设备同步热路径：
+  - timer PPI 现在和 UART/KMI 一样，仅在电平变化时才调用 `gic_->set_level()`；
+  - 去掉了大量无效的 timer IRQ level 推送，从而显著减少 GIC 相关固定成本。
+- 更新 [doc/perf-baseline-vs-optimized.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/perf-baseline-vs-optimized.md)，追加“第二十二轮优化对比（日期时间：2026-03-17 20:20）”，记录：
+  - 以前一轮 current 结果作为 baseline 的 UMP/SMP 对比；
+  - 各 case 提升比例、总体提升比例；
+  - 最终版本的 `perf` 热点分析。
+
+## 本轮测试
+
+- `cmake --build build -j4`
+- `./build/aarchvm -smp 2 -bin tests/arm64/out/smp_gic_sgi.bin -load 0x0 -entry 0x0 -steps 400000`
+- `./build/aarchvm -smp 2 -bin tests/arm64/out/smp_timer_ppi.bin -load 0x0 -entry 0x0 -steps 400000`
+- `./build/aarchvm -smp 2 -bin tests/arm64/out/smp_timer_rate.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 600s ./tests/arm64/run_all.sh`
+- `timeout 600s ./tests/linux/build_linux_shell_snapshot.sh`
+- `timeout 600s ./tests/linux/run_functional_suite.sh`
+- `timeout 900s ./tests/linux/build_linux_smp_shell_snapshot.sh`
+- `timeout 600s ./tests/linux/run_functional_suite_smp.sh`
+- `env AARCHVM_TIMER_SCALE=1 AARCHVM_PERF_TIMEOUT=600s AARCHVM_PERF_LOG=out/perf-ump-giccache-timerlvl-optimized.log AARCHVM_PERF_RESULTS=out/perf-ump-giccache-timerlvl-optimized-results.txt ./tests/linux/run_algorithm_perf.sh`
+- `env AARCHVM_TIMER_SCALE=1 AARCHVM_PERF_TIMEOUT=900s AARCHVM_PERF_LOG=out/perf-smp-giccache-timerlvl-optimized.log AARCHVM_PERF_RESULTS=out/perf-smp-giccache-timerlvl-optimized-results.txt AARCHVM_ARGS='-smp 2 -smp-mode psci' AARCHVM_LINUX_DTB=dts/aarchvm-linux-smp.dtb AARCHVM_USERTEST_SNAPSHOT_OUT=out/linux-smp-shell-v1.snap AARCHVM_USERTEST_SNAPSHOT_LOG=out/linux-smp-shell-v1-build.log AARCHVM_USERTEST_SNAPSHOT_VERIFY_LOG=out/linux-smp-shell-v1-verify.log ./tests/linux/run_algorithm_perf.sh`
+- `timeout 300s bash -lc "printf 'bench_runner\n' | AARCHVM_BUS_FASTPATH=1 AARCHVM_TIMER_SCALE=1 perf record -o out/perf-round22-current.data -- ./build/aarchvm -smp 2 -snapshot-load out/linux-smp-shell-v1.snap -steps 3000000000 -stop-on-uart 'BENCH-RESULT name=tlb-rand-32m' -fb-sdl off > out/perf-round22-current-run.log 2>&1"`
+- `perf report --stdio --percent-limit 0.2 --dsos=aarchvm -i out/perf-round22-current.data > out/perf-round22-current-aarchvm-only.report`
+
+## 当前结论
+
+- 这轮优化是成功的，并且收益已经明显超过上一轮回退量：
+  - UMP 总体 `host_ns` 从 `8824308238` 降到 `4459907581`，提升约 `49.46%`；
+  - SMP 总体 `host_ns` 从 `9829828739` 降到 `4820254387`，提升约 `50.96%`。
+- 当前主热点已经重新回到解释器和访存本体，而不是 GIC 轮询：
+  - `Cpu::step()`、`translate_address()`、`lookup_decoded()`、`mmu_write_value()`、`exec_load_store()` 是下一步优先级更高的方向；
+  - `GicV3::has_pending()` 已经不再出现在当前 `perf` 热点前列。
+
+# 修改日志 2026-03-17 17:17
+
+## 本轮修改
+
+- 在 [include/aarchvm/soc.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/soc.hpp) / [src/soc.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/soc.cpp) 继续推进事件驱动化演进方案第 3 节，对 `SoC::run()` 做了一轮骨架级重构：
+  - 新增 `CpuDispatchState`，统一收集 `powered_on / active / runnable / first_runnable` 状态；
+  - 将单核、单 runnable SMP、多 runnable SMP 三条路径的运行窗口计算收敛到同一个 `compute_run_window(...)`；
+  - 删除单 runnable SMP 路径里每次内层循环开头的 `ready_to_run()` 重复检查；
+  - 用统一的 dispatch scan 替代多处独立的 active/runnable 统计逻辑，为后续继续向“按原因运行到下一个事件”推进做准备。
+- 更新 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)，补充第 3 节“重构 SoC 主循环”的当前状态，明确这轮完成的是主循环骨架整理，而不是性能闭环。
+- 更新 [doc/perf-baseline-vs-optimized.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/perf-baseline-vs-optimized.md)，追加“第二十一轮优化对比（日期时间：2026-03-17 17:17）”，记录：
+  - 本轮 baseline / current 的 UMP 与 SMP 性能数据；
+  - `sync_devices` / `run_chunks` 计数变化；
+  - 额外一轮复测结果与当前结论。
+
+## 本轮测试
+
+- `timeout 600s ./tests/arm64/run_all.sh`
+- `timeout 600s ./tests/linux/build_linux_shell_snapshot.sh`
+- `timeout 600s ./tests/linux/run_functional_suite.sh`
+- `timeout 900s ./tests/linux/build_linux_smp_shell_snapshot.sh`
+- `timeout 600s ./tests/linux/run_functional_suite_smp.sh`
+- `env AARCHVM_TIMER_SCALE=1 AARCHVM_PERF_TIMEOUT=600s AARCHVM_PERF_LOG=out/perf-ump-socloop-optimized.log AARCHVM_PERF_RESULTS=out/perf-ump-socloop-optimized-results.txt ./tests/linux/run_algorithm_perf.sh`
+- `env AARCHVM_TIMER_SCALE=1 AARCHVM_PERF_TIMEOUT=900s AARCHVM_PERF_LOG=out/perf-smp-socloop-optimized.log AARCHVM_PERF_RESULTS=out/perf-smp-socloop-optimized-results.txt AARCHVM_ARGS='-smp 2 -smp-mode psci' AARCHVM_LINUX_DTB=dts/aarchvm-linux-smp.dtb AARCHVM_USERTEST_SNAPSHOT_OUT=out/linux-smp-shell-v1.snap AARCHVM_USERTEST_SNAPSHOT_LOG=out/linux-smp-shell-v1-build.log AARCHVM_USERTEST_SNAPSHOT_VERIFY_LOG=out/linux-smp-shell-v1-verify.log ./tests/linux/run_algorithm_perf.sh`
+- `env AARCHVM_TIMER_SCALE=1 AARCHVM_PERF_TIMEOUT=600s AARCHVM_PERF_LOG=out/perf-ump-socloop-rerun.log AARCHVM_PERF_RESULTS=out/perf-ump-socloop-rerun-results.txt ./tests/linux/run_algorithm_perf.sh`
+- `env AARCHVM_TIMER_SCALE=1 AARCHVM_PERF_TIMEOUT=900s AARCHVM_PERF_LOG=out/perf-smp-socloop-rerun.log AARCHVM_PERF_RESULTS=out/perf-smp-socloop-rerun-results.txt AARCHVM_ARGS='-smp 2 -smp-mode psci' AARCHVM_LINUX_DTB=dts/aarchvm-linux-smp.dtb AARCHVM_USERTEST_SNAPSHOT_OUT=out/linux-smp-shell-v1.snap AARCHVM_USERTEST_SNAPSHOT_LOG=out/linux-smp-shell-v1-build.log AARCHVM_USERTEST_SNAPSHOT_VERIFY_LOG=out/linux-smp-shell-v1-verify.log ./tests/linux/run_algorithm_perf.sh`
+
+## 当前结论
+
+- 这轮 `SoC` 主循环重构完成了调度骨架整理，代码结构比之前更适合继续向“按事件和 deadline 驱动”推进。
+- 这轮不是性能正收益：
+  - UMP 总体 `host_ns` 从 `7828394269` 变为 `8824308238`，约 `-12.72%`；
+  - SMP 总体 `host_ns` 从 `5496349229` 变为 `9829828739`，约 `-78.84%`；
+  - 复测后仍分别约为 `-18.40%` 与 `-49.50%`，趋势一致。
+- 因此下一步不应继续把这轮结果包装成“优化完成”，而应直接基于当前主线重新做热点分析，确认回退是出在 `SoC::run()` 自身、`ready_to_run()` / `GIC::has_pending()` 还是新的 deadline 判定路径。
+
 # 修改日志 2026-03-17 15:10
 
 ## 本轮修改
