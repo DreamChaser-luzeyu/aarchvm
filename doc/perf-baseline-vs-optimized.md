@@ -1407,3 +1407,257 @@ SMP 总体 `host_ns`：`74575534183 -> 78585706985`，表面上回退约 `5.38%`
 - SMP current default：`out/perf-smp-stage1-final-results.txt`
 - `perf report`：`out/perf-stage1-current-aarchvm-only.report`
 - `gprof`：`out/gprof-stage1-current.txt`
+
+## 第十九轮优化对比（日期时间：2026-03-17 11:48）
+
+这一轮对应事件驱动化第二阶段的最小闭环，不再只停留在 timer deadline：
+- `Cpu` 新增 `ready_to_run()` 判断；
+- `SoC::run()` 在 SMP 下优先只调度真正 runnable 的 CPU，不再让 `WFI/WFE` CPU 在有其他 runnable CPU 时继续每轮 `step()`；
+- 当所有 CPU 都在等待且存在明确的 guest timer deadline 时，SoC 直接把 guest 时间推进到该 deadline，再同步设备并继续执行；
+- 但为了兼容当前 `main.cpp` 仍基于 `soc.steps()` 的 UART/PS2 注入脚本，在“全等待且没有 guest deadline”的场景下，仍保留 polling fallback。
+
+### 第十九轮 baseline
+
+修改前基线：
+
+```bash
+env \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=600s \
+  AARCHVM_PERF_LOG=out/perf-ump-stage2-baseline.log \
+  AARCHVM_PERF_RESULTS=out/perf-ump-stage2-baseline-results.txt \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+```bash
+env \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=900s \
+  AARCHVM_PERF_LOG=out/perf-smp-stage2-baseline.log \
+  AARCHVM_PERF_RESULTS=out/perf-smp-stage2-baseline-results.txt \
+  AARCHVM_ARGS='-smp 2 -smp-mode psci' \
+  AARCHVM_LINUX_DTB=dts/aarchvm-linux-smp.dtb \
+  AARCHVM_USERTEST_SNAPSHOT_OUT=out/linux-smp-shell-v1.snap \
+  AARCHVM_USERTEST_SNAPSHOT_LOG=out/linux-smp-shell-v1-build.log \
+  AARCHVM_USERTEST_SNAPSHOT_VERIFY_LOG=out/linux-smp-shell-v1-verify.log \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+### 第十九轮 optimized
+
+修改后复测：
+
+```bash
+env \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=600s \
+  AARCHVM_PERF_LOG=out/perf-ump-stage2-optimized.log \
+  AARCHVM_PERF_RESULTS=out/perf-ump-stage2-optimized-results.txt \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+```bash
+env \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=900s \
+  AARCHVM_PERF_LOG=out/perf-smp-stage2-optimized.log \
+  AARCHVM_PERF_RESULTS=out/perf-smp-stage2-optimized-results.txt \
+  AARCHVM_ARGS='-smp 2 -smp-mode psci' \
+  AARCHVM_LINUX_DTB=dts/aarchvm-linux-smp.dtb \
+  AARCHVM_USERTEST_SNAPSHOT_OUT=out/linux-smp-shell-v1.snap \
+  AARCHVM_USERTEST_SNAPSHOT_LOG=out/linux-smp-shell-v1-build.log \
+  AARCHVM_USERTEST_SNAPSHOT_VERIFY_LOG=out/linux-smp-shell-v1-verify.log \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+### 第十九轮 UMP 结果
+
+| case | baseline host_ns | optimized host_ns | 提升 | baseline sync_devices | optimized sync_devices |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `base64-enc-4m` | 1643244122 | 2833636706 | -72.44% | 66899 | 66579 |
+| `base64-dec-4m` | 1272518632 | 2117202606 | -66.38% | 74204 | 74140 |
+| `fnv1a-16m` | 2122251192 | 2775322462 | -30.77% | 103033 | 102632 |
+| `tlb-seq-hot-8m` | 8336654 | 3764487 | 54.84% | 5 | 5 |
+| `tlb-seq-cold-32m` | 9912562 | 5912885 | 40.35% | 400 | 401 |
+| `tlb-rand-32m` | 12709174 | 7279445 | 42.72% | 4 | 399 |
+
+UMP 总体 `host_ns`：`5068972336 -> 7743118591`，总体变化约 `-52.76%`。
+
+### 第十九轮 SMP 结果
+
+| case | baseline host_ns | optimized host_ns | 提升 | baseline steps | optimized steps |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `base64-enc-4m` | 24722644092 | 23218329382 | 6.08% | 131855530 | 65932125 |
+| `base64-dec-4m` | 21205610643 | 22641967137 | -6.77% | 145211974 | 72892009 |
+| `fnv1a-16m` | 35532500449 | 28653417118 | 19.36% | 203525770 | 101991408 |
+| `tlb-seq-hot-8m` | 88695736 | 39286122 | 55.71% | 426076 | 213038 |
+| `tlb-seq-cold-32m` | 93485933 | 43017128 | 53.99% | 433574 | 219133 |
+| `tlb-rand-32m` | 103254633 | 47023101 | 54.46% | 466548 | 233274 |
+
+SMP 总体 `host_ns`：`81746191486 -> 74643039988`，总体提升约 `8.69%`。
+
+### 第十九轮结果解释
+
+- 这轮修改达成了事件驱动第二阶段的“部分闭环”：
+  - 只要系统里还有其他 runnable CPU，等待态 CPU 就不会再被一起推进；
+  - 当系统全等待且存在明确 timer deadline 时，可以直接跳到该 deadline。
+- 这解释了为什么 SMP 收益明显：
+  - 多数 case 的 `steps` 基本减半；
+  - `base64-enc-4m`、`fnv1a-16m` 和三类 TLB case 都有清晰改善；
+  - 整体提升约 `8.69%`。
+- 但这轮并没有真正解决 GIC 轮询问题：
+  - SMP 各 case 中的 `gic_pending` 计数几乎没有本质下降；
+  - 当前 `perf` 仍显示 `GicV3::has_pending(...)` 为压倒性热点；
+  - 说明等待态 CPU 虽然不再“执行 guest 指令”，但仍在 SoC 外层被频繁轮询是否有 IRQ。
+- UMP 数据出现了明显分化：
+  - 三个算法 case 变慢，三个 TLB case 变快；
+  - 同时 `sync_devices` 与其他内部计数几乎没有变化，说明这轮逻辑对单核热路径的程序侧工作量影响很小；
+  - 这里的 `host_ns` 更像宿主机环境波动与单核路径中额外调度判断叠加后的混合结果，现阶段不宜过度解读。
+
+### 第十九轮当前热点
+
+当前 SMP `perf` 结果见 `out/perf-stage2-current-aarchvm-only.report`：
+
+- `aarchvm::GicV3::has_pending(unsigned long) const` 约占 `86.89%`
+- `aarchvm::SoC::run(unsigned long)` 约占 `2.22%`
+- `aarchvm::Cpu::step()` 约占 `1.93%`
+- `aarchvm::Cpu::ready_to_run()` 约占 `0.79%`
+
+这说明这轮虽然把“等待态 CPU 继续执行 guest 指令”的成本压下去了，但真正的瓶颈仍是“等待态 CPU 被 SoC 外层频繁查询 IRQ 是否可达”。
+
+结论仍然清楚：
+- 下一步第一优先级依旧是 GIC pending summary / candidate cache；
+- 然后是 line-driven wakeup，而不是继续让 `ready_to_run()` 主动轮询；
+- 在这两点做完之前，`WFI/WFE` 还不能算彻底事件化。
+
+### 第十九轮原始数据文件
+
+- UMP baseline：`out/perf-ump-stage2-baseline-results.txt`
+- UMP optimized：`out/perf-ump-stage2-optimized-results.txt`
+- SMP baseline：`out/perf-smp-stage2-baseline-results.txt`
+- SMP optimized：`out/perf-smp-stage2-optimized-results.txt`
+- `perf report`：`out/perf-stage2-current-aarchvm-only.report`
+
+## 第二十轮优化对比（日期时间：2026-03-17 13:18）
+
+这一轮记录的是第二阶段当前稳定主线，而不是未合并的实验分支：
+- 主线保留了“单 runnable CPU 长突发执行 + `runnable_state_dirty_` 唤醒重调度”的实现；
+- 未保留“多个 runnable CPU 的小量子轮转”原型，因为它会回归 `smp_timer_ppi` / `smp_timer_rate` 的可观察顺序；
+- 同时修正了 `tests/linux/run_algorithm_perf.sh`，让它在 `AARCHVM_ARGS` 含 `-smp` 时自动改用 `build_linux_smp_shell_snapshot.sh`，避免错误沿用单核 snapshot 步数。
+
+### 第二十轮 baseline
+
+对照上一轮文档中的稳定数据：
+
+```bash
+env \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=600s \
+  AARCHVM_PERF_LOG=out/perf-ump-stage2-optimized.log \
+  AARCHVM_PERF_RESULTS=out/perf-ump-stage2-optimized-results.txt \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+```bash
+env \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=900s \
+  AARCHVM_PERF_LOG=out/perf-smp-stage2-optimized.log \
+  AARCHVM_PERF_RESULTS=out/perf-smp-stage2-optimized-results.txt \
+  AARCHVM_ARGS='-smp 2 -smp-mode psci' \
+  AARCHVM_LINUX_DTB=dts/aarchvm-linux-smp.dtb \
+  AARCHVM_USERTEST_SNAPSHOT_OUT=out/linux-smp-shell-v1.snap \
+  AARCHVM_USERTEST_SNAPSHOT_LOG=out/linux-smp-shell-v1-build.log \
+  AARCHVM_USERTEST_SNAPSHOT_VERIFY_LOG=out/linux-smp-shell-v1-verify.log \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+### 第二十轮 current stable
+
+```bash
+env \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=900s \
+  AARCHVM_PERF_LOG=out/perf-smp-stage2b-current.log \
+  AARCHVM_PERF_RESULTS=out/perf-smp-stage2b-current-results.txt \
+  AARCHVM_ARGS='-smp 2 -smp-mode psci' \
+  AARCHVM_LINUX_DTB=dts/aarchvm-linux-smp.dtb \
+  AARCHVM_USERTEST_SNAPSHOT_OUT=out/linux-smp-shell-v1.snap \
+  AARCHVM_USERTEST_SNAPSHOT_LOG=out/linux-smp-shell-v1-build.log \
+  AARCHVM_USERTEST_SNAPSHOT_VERIFY_LOG=out/linux-smp-shell-v1-verify.log \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+UMP 当前主线数据沿用本轮之前已落盘的：
+
+```bash
+env \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=600s \
+  AARCHVM_PERF_LOG=out/perf-ump-stage2b-optimized.log \
+  AARCHVM_PERF_RESULTS=out/perf-ump-stage2b-optimized-results.txt \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+### 第二十轮 UMP 结果
+
+| case | previous host_ns | current host_ns | 提升 |
+| --- | ---: | ---: | ---: |
+| `base64-enc-4m` | 2833636706 | 1503656596 | 46.94% |
+| `base64-dec-4m` | 2117202606 | 2152981933 | -1.69% |
+| `fnv1a-16m` | 2775322462 | 2437023803 | 12.19% |
+| `tlb-seq-hot-8m` | 3764487 | 10459988 | -177.86% |
+| `tlb-seq-cold-32m` | 5912885 | 11902213 | -101.29% |
+| `tlb-rand-32m` | 7279445 | 17687688 | -142.98% |
+
+UMP 总体 `host_ns`：`7743118591 -> 6133712221`，总体提升约 `20.78%`。
+
+### 第二十轮 SMP 结果
+
+| case | previous host_ns | current host_ns | 提升 | previous gic_pending | current gic_pending |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `base64-enc-4m` | 23218329382 | 1650375750 | 92.89% | 65719689 | 1147746 |
+| `base64-dec-4m` | 22641967137 | 1432653083 | 93.67% | 72608553 | 1141874 |
+| `fnv1a-16m` | 28653417118 | 2051867592 | 92.84% | 101603922 | 1753717 |
+| `tlb-seq-hot-8m` | 39286122 | 12461220 | 68.28% | 213041 | 794 |
+| `tlb-seq-cold-32m` | 43017128 | 7677575 | 82.15% | 219531 | 2 |
+| `tlb-rand-32m` | 47023101 | 7405933 | 84.25% | 233673 | 794 |
+
+SMP 总体 `host_ns`：`74643039988 -> 5162441153`，总体提升约 `93.08%`。
+
+### 第二十轮结果解释
+
+- 这部分收益并不是来自“多个 runnable CPU 的量子调度”，而是来自当前已经稳定合入的两点：
+  - 单 runnable CPU 直接走长突发执行；
+  - `SEV` / 外部写 / `PSCI_CPU_ON` 会通过 `runnable_state_dirty_` 尽快打断长突发，避免错误地把其他核饿太久。
+- 对 SMP 的收益非常大，因为当前常见 Linux 算法 workload 基本都是“一个 CPU 真正在跑、另一个 CPU 大多处于 idle/wait”：
+  - 这类场景下，旧路径会把等待态 CPU 也带进高频调度和 `has_pending()` 轮询；
+  - 当前稳定实现把这部分额外成本基本压掉了。
+- UMP 的数据仍然是混合的：
+  - 三个算法 case 有正收益；
+  - 三个 TLB case 出现明显回退；
+  - 当前更像是调度结构变化后，宿主机采样噪声与极短 case 固定成本被放大的混合结果，不能简单外推成“UMP 热路径全面更快”。
+
+### 第二十轮当前热点
+
+当前 SMP `perf` 结果见 `out/perf-stage2b-baseline-aarchvm-only.report`：
+
+- `aarchvm::Cpu::step()` 约占 `17.39%`
+- `aarchvm::GicV3::has_pending(unsigned long) const` 约占 `12.51%`
+- `aarchvm::Cpu::translate_address(...)` 约占 `9.91%`
+- `aarchvm::Cpu::lookup_decoded(...)` 约占 `8.83%`
+- `aarchvm::SoC::run(unsigned long)` 约占 `5.59%`
+- `aarchvm::Cpu::ready_to_run()` 约占 `2.78%`
+
+这说明当前稳定第二阶段已经把热点形态彻底改了：
+- `GicV3::has_pending(...)` 不再是压倒性第一热点；
+- 主热点重新回到解释执行本身、地址翻译、预解码查找和 load/store 路径；
+- 但 `has_pending()` 与 `ready_to_run()` 加起来仍有可见占比，因此第 7 节 GIC pending summary / candidate cache 仍然是合理的下一优先级。
+
+### 第二十轮原始数据文件
+
+- UMP previous stable：`out/perf-ump-stage2-optimized-results.txt`
+- UMP current stable：`out/perf-ump-stage2b-optimized-results.txt`
+- SMP previous stable：`out/perf-smp-stage2-optimized-results.txt`
+- SMP current stable：`out/perf-smp-stage2b-current-results.txt`
+- `perf report`：`out/perf-stage2b-baseline-aarchvm-only.report`

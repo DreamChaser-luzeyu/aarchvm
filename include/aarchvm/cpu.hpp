@@ -62,10 +62,12 @@ public:
   [[nodiscard]] std::uint32_t exception_depth() const { return exception_depth_; }
   [[nodiscard]] bool waiting_for_interrupt() const { return waiting_for_interrupt_; }
   [[nodiscard]] bool waiting_for_event() const { return waiting_for_event_; }
+  [[nodiscard]] bool waiting() const { return waiting_for_interrupt_ || waiting_for_event_; }
   [[nodiscard]] std::uint64_t vbar_el1() const { return sysregs_.vbar_el1(); }
   [[nodiscard]] bool irq_masked() const { return sysregs_.irq_masked(); }
   [[nodiscard]] bool save_state(std::ostream& out) const;
   [[nodiscard]] bool load_state(std::istream& in, std::uint32_t version = 3);
+  bool ready_to_run();
   void signal_event();
   void notify_external_memory_write(std::uint64_t pa, std::size_t size);
   void notify_tlbi_vmalle1();
@@ -278,6 +280,14 @@ private:
   void invalidate_ram_page_caches();
   [[nodiscard]] bool mmu_read_value(std::uint64_t va, std::size_t size, std::uint64_t* out);
   [[nodiscard]] bool mmu_write_value(std::uint64_t va, std::uint64_t value, std::size_t size);
+  void clear_exclusive_monitor();
+  [[nodiscard]] bool capture_exclusive_phys_addrs(std::uint64_t va,
+                                                  std::size_t size,
+                                                  bool write,
+                                                  std::array<std::uint64_t, 16>* out_pas);
+  void set_exclusive_monitor(std::uint64_t va, std::size_t size);
+  [[nodiscard]] bool check_exclusive_monitor(std::uint64_t va, std::size_t size, bool* matched);
+  [[nodiscard]] bool exclusive_monitor_overlaps(std::uint64_t pa, std::size_t size) const;
   [[nodiscard]] DecodedInsn decode_insn(std::uint32_t insn) const;
   [[nodiscard]] const DecodedInsn* lookup_decoded(std::uint64_t va, std::uint64_t pa, std::uint32_t insn);
   bool exec_decoded_add_sub_imm(const DecodedInsn& decoded);
@@ -295,6 +305,7 @@ private:
   [[nodiscard]] bool fp_asimd_traps_enabled_for_current_el() const;
   [[nodiscard]] bool insn_uses_fp_asimd(std::uint32_t insn) const;
   void trap_fp_asimd_access();
+  bool irq_wakeup_ready();
   void on_code_write(std::uint64_t va, std::uint64_t pa, std::size_t size);
   void parse_pc_watch_list();
   void save_current_sp_to_bank();
@@ -407,6 +418,8 @@ private:
   bool exclusive_valid_ = false;
   std::uint64_t exclusive_addr_ = 0;
   std::uint8_t exclusive_size_ = 0;
+  std::uint8_t exclusive_pa_count_ = 0;
+  std::array<std::uint64_t, 16> exclusive_phys_addrs_{};
   std::array<std::array<TlbEntry, kTlbWays>, kTlbSets> tlb_entries_{};
   std::array<std::uint8_t, kTlbSets> tlb_next_replace_{};
   TlbEntry tlb_last_fetch_{};

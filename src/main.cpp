@@ -443,6 +443,14 @@ int main(int argc, char** argv) {
   } else if (const char* stop_on_uart = std::getenv("AARCHVM_STOP_ON_UART"); stop_on_uart != nullptr) {
     soc.set_stop_on_uart_pattern(std::string(stop_on_uart));
   }
+  const char* uart_tx_match = std::getenv("AARCHVM_UART_TX_MATCH");
+  const char* uart_tx_reply = std::getenv("AARCHVM_UART_TX_REPLY");
+  if (uart_tx_match != nullptr && uart_tx_reply != nullptr) {
+    soc.set_uart_tx_match_reply(std::string(uart_tx_match), std::string(uart_tx_reply));
+  } else if ((uart_tx_match != nullptr) != (uart_tx_reply != nullptr)) {
+    std::cerr << "Ignoring partial UART auto-reply config: set both AARCHVM_UART_TX_MATCH and "
+                 "AARCHVM_UART_TX_REPLY\n";
+  }
 
   if (opt.snapshot_load_path.has_value()) {
     if (!soc.load_snapshot(*opt.snapshot_load_path)) {

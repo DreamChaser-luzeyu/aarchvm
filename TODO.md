@@ -95,6 +95,15 @@
 预期收益：
 - 这是 SMP 性能提升最大的低风险步骤之一。
 
+当前状态：
+- 已完成这一步的最小闭环：
+  - 当某些 CPU 处于 `WFI/WFE`，且系统里仍有其他 runnable CPU 时，等待态 CPU 已不再参与每轮 `cpu.step()`；
+  - 当所有 CPU 都在等待，且存在明确的 guest timer deadline 时，SoC 已可直接把 guest 时间推进到该 deadline，再同步设备并唤醒相应 CPU。
+- 仍未完全完成“真正停车”：
+  - 当所有 CPU 都在等待、且当前没有 guest 侧 deadline 时，仍会保留旧的 polling fallback；
+  - 这样做是为了兼容当前 `main.cpp` 基于 `soc.steps()` 的 UART/PS2 注入脚本，避免 shell/自动化输入在 guest 空闲时永远等不到注入时刻。
+- 因此，后续要想把这一节彻底勾完，必须继续推进第 10 节的 `main` 层事件化，以及第 7 节的 GIC 增量唤醒路径。
+
 ### 6. SMP 调度从“每核一步”升级为“量子 + deadline”
 
 目标：
@@ -108,6 +117,14 @@
 
 预期收益：
 - 提高 SMP 性能，并减少 guest 时间模型与真实执行量脱节的问题。
+
+当前状态：
+- 这一轮虽然还没有真正引入“小量子 + 公平性”调度器，但已经迈出第一步：
+  - SMP 主循环现在会优先只调度 `ready_to_run()` 的 CPU，而不是无差别让等待态 CPU 一起走每轮 `step()`；
+  - 这已经足以显著压缩“一个 CPU 在跑 workload、另一个 CPU 只是 idle/wait”的额外执行量。
+- 当只有一个 CPU runnable 时，主线已经稳定复用长突发执行逻辑；这部分对应的性能收益已经进入当前默认实现。
+- 做过一次“多个 CPU runnable 时的小量子 + 轮转公平”原型，但它会改变 `smp_timer_ppi` / `smp_timer_rate` 这类裸机 SMP timer 用例中的可观察执行顺序，因此已经回退，没有并入主线。
+- 但当前实现仍未把 `WFI` CPU 变成真正的 line-driven wakeup，`GicV3::has_pending(...)` 依旧是主热点，因此这一节的大头工作仍在第 7 节。
 
 ### 7. GIC 改为增量更新而非轮询扫描
 

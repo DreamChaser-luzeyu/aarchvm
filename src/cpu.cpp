@@ -721,9 +721,7 @@ bool Cpu::mmu_write_value(std::uint64_t va, std::uint64_t value, std::size_t siz
       return false;
     }
     on_code_write(va, pa, size);
-    exclusive_valid_ = false;
-    exclusive_addr_ = 0;
-    exclusive_size_ = 0;
+    clear_exclusive_monitor();
     if (callbacks_.memory_write) {
       callbacks_.memory_write(*this, pa, size);
     }
@@ -756,10 +754,77 @@ bool Cpu::mmu_write_value(std::uint64_t va, std::uint64_t value, std::size_t siz
       callbacks_.memory_write(*this, pas[i], 1u);
     }
   }
+  clear_exclusive_monitor();
+  return true;
+}
+
+void Cpu::clear_exclusive_monitor() {
   exclusive_valid_ = false;
   exclusive_addr_ = 0;
   exclusive_size_ = 0;
+  exclusive_pa_count_ = 0;
+  exclusive_phys_addrs_.fill(0);
+}
+
+bool Cpu::capture_exclusive_phys_addrs(std::uint64_t va,
+                                       std::size_t size,
+                                       bool write,
+                                       std::array<std::uint64_t, 16>* out_pas) {
+  if (out_pas == nullptr || size == 0u || size > out_pas->size()) {
+    return false;
+  }
+  out_pas->fill(0);
+  for (std::size_t i = 0; i < size; ++i) {
+    std::uint64_t pa = 0;
+    if (!translate_data_address_fast(va + i, write, &pa)) {
+      last_data_fault_va_ = va + i;
+      return false;
+    }
+    (*out_pas)[i] = pa;
+  }
   return true;
+}
+
+void Cpu::set_exclusive_monitor(std::uint64_t va, std::size_t size) {
+  clear_exclusive_monitor();
+  if (!capture_exclusive_phys_addrs(va, size, false, &exclusive_phys_addrs_)) {
+    return;
+  }
+  exclusive_valid_ = true;
+  exclusive_addr_ = va;
+  exclusive_size_ = static_cast<std::uint8_t>(size);
+  exclusive_pa_count_ = static_cast<std::uint8_t>(size);
+}
+
+bool Cpu::check_exclusive_monitor(std::uint64_t va, std::size_t size, bool* matched) {
+  if (matched == nullptr) {
+    return false;
+  }
+  *matched = false;
+  if (!exclusive_valid_ || exclusive_size_ != size || exclusive_pa_count_ != size) {
+    return true;
+  }
+  std::array<std::uint64_t, 16> current_pas{};
+  if (!capture_exclusive_phys_addrs(va, size, true, &current_pas)) {
+    return false;
+  }
+  *matched = std::equal(current_pas.begin(),
+                        current_pas.begin() + static_cast<std::ptrdiff_t>(size),
+                        exclusive_phys_addrs_.begin());
+  return true;
+}
+
+bool Cpu::exclusive_monitor_overlaps(std::uint64_t pa, std::size_t size) const {
+  if (!exclusive_valid_ || size == 0u) {
+    return false;
+  }
+  const std::size_t count = std::min<std::size_t>(exclusive_pa_count_, exclusive_phys_addrs_.size());
+  for (std::size_t i = 0; i < count; ++i) {
+    if (ranges_overlap(exclusive_phys_addrs_[i], 1u, pa, size)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 Cpu::DecodedInsn Cpu::decode_insn(std::uint32_t insn) const {
@@ -1595,9 +1660,7 @@ void Cpu::reset(std::uint64_t pc) {
   icc_igrpen1_el1_ = 0;
   icc_ap0r_el1_.fill(0);
   icc_ap1r_el1_.fill(0);
-  exclusive_valid_ = false;
-  exclusive_addr_ = 0;
-  exclusive_size_ = 0;
+  clear_exclusive_monitor();
   tlb_flush_all();
   invalidate_decode_all();
   invalidate_ram_page_caches();
@@ -1619,10 +1682,8 @@ void Cpu::signal_event() {
 void Cpu::notify_external_memory_write(std::uint64_t pa, std::size_t size) {
   invalidate_decode_pa(pa, size);
   event_register_ = true;
-  if (exclusive_valid_ && ranges_overlap(exclusive_addr_, exclusive_size_, pa, size)) {
-    exclusive_valid_ = false;
-    exclusive_addr_ = 0;
-    exclusive_size_ = 0;
+  if (exclusive_monitor_overlaps(pa, size)) {
+    clear_exclusive_monitor();
   }
 }
 
@@ -1727,6 +1788,42 @@ void Cpu::perf_flush_tlb_all() {
   invalidate_decode_all();
 }
 
+bool Cpu::irq_wakeup_ready() {
+  if (sysregs_.irq_masked() || icc_igrpen1_el1_ == 0) {
+    return false;
+  }
+  const std::uint16_t irq_threshold = irq_delivery_threshold_;
+  const std::uint64_t irq_epoch = gic_.state_epoch();
+  if (irq_query_negative_valid_ &&
+      irq_query_epoch_ == irq_epoch &&
+      irq_query_threshold_ == irq_threshold) {
+    return false;
+  }
+  if (!gic_.has_pending(cpu_index_, static_cast<std::uint8_t>(irq_threshold & 0xFFu))) {
+    irq_query_epoch_ = irq_epoch;
+    irq_query_threshold_ = irq_threshold;
+    irq_query_negative_valid_ = true;
+    return false;
+  }
+  return true;
+}
+
+bool Cpu::ready_to_run() {
+  if (halted_) {
+    return false;
+  }
+  if (!waiting_for_interrupt_ && !waiting_for_event_) {
+    return true;
+  }
+  if (waiting_for_interrupt_) {
+    return gic_.has_pending(cpu_index_);
+  }
+  if (event_register_) {
+    return true;
+  }
+  return irq_wakeup_ready();
+}
+
 bool Cpu::step() {
   if (halted_) {
     return false;
@@ -1750,7 +1847,7 @@ bool Cpu::step() {
     if (event_register_) {
       event_register_ = false;
       waiting_for_event_ = false;
-    } else if (should_try_irq() && try_take_irq()) {
+    } else if (irq_wakeup_ready() && should_try_irq() && try_take_irq()) {
       waiting_for_event_ = false;
       ++steps_;
       return true;
@@ -2817,9 +2914,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
 
   // CLREX <imm4>
   if ((insn & 0xFFFFF0FFu) == 0xD503305Fu) {
-    exclusive_valid_ = false;
-    exclusive_addr_ = 0;
-    exclusive_size_ = 0;
+    clear_exclusive_monitor();
     return true;
   }
 
@@ -2931,9 +3026,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
         callbacks_.memory_write(*this, result.pa, 8u);
       }
     }
-    exclusive_valid_ = false;
-    exclusive_addr_ = 0;
-    exclusive_size_ = 0;
+    clear_exclusive_monitor();
     return true;
   }
 
@@ -6304,9 +6397,7 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       } else {
         set_reg32(rt, static_cast<std::uint32_t>(*value));
       }
-      exclusive_valid_ = true;
-      exclusive_addr_ = addr;
-      exclusive_size_ = static_cast<std::uint8_t>(size);
+      set_exclusive_monitor(addr, size);
       return true;
     }
   }
@@ -6327,10 +6418,13 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     if (size != 0u) {
       const std::uint32_t rs = (insn >> 16) & 0x1Fu;
       const std::uint64_t addr = sp_or_reg(rn);
-      const bool match = exclusive_valid_ && exclusive_addr_ == addr && exclusive_size_ == size;
-      exclusive_valid_ = false;
-      exclusive_addr_ = 0;
-      exclusive_size_ = 0;
+      bool match = false;
+      if (!check_exclusive_monitor(addr, size, &match)) {
+        clear_exclusive_monitor();
+        data_abort(addr);
+        return true;
+      }
+      clear_exclusive_monitor();
       if (!match) {
         set_reg32(rs, 1u);
         return true;
@@ -6521,17 +6615,18 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
         }
         set_reg(rt, *v1);
         set_reg(rt2, *v2);
-        exclusive_valid_ = true;
-        exclusive_addr_ = addr;
-        exclusive_size_ = 16u;
+        set_exclusive_monitor(addr, 16u);
         return true;
       }
 
       const std::uint32_t rs = (insn >> 16) & 0x1Fu;
-      const bool match = exclusive_valid_ && exclusive_addr_ == addr && exclusive_size_ == 16u;
-      exclusive_valid_ = false;
-      exclusive_addr_ = 0;
-      exclusive_size_ = 0;
+      bool match = false;
+      if (!check_exclusive_monitor(addr, 16u, &match)) {
+        clear_exclusive_monitor();
+        data_abort(addr);
+        return true;
+      }
+      clear_exclusive_monitor();
       if (!match) {
         set_reg32(rs, 1u);
         return true;
@@ -7742,7 +7837,9 @@ bool Cpu::save_state(std::ostream& out) const {
       !snapshot_io::write_array(out, icc_ap1r_el1_) ||
       !snapshot_io::write_bool(out, exclusive_valid_) ||
       !snapshot_io::write(out, exclusive_addr_) ||
-      !snapshot_io::write(out, exclusive_size_)) {
+      !snapshot_io::write(out, exclusive_size_) ||
+      !snapshot_io::write(out, exclusive_pa_count_) ||
+      !snapshot_io::write_array(out, exclusive_phys_addrs_)) {
     return false;
   }
   std::uint64_t tlb_size = 0;
@@ -7896,6 +7993,7 @@ bool Cpu::load_state(std::istream& in, std::uint32_t version) {
     running_priority_ = 0x100;
   }
   refresh_irq_threshold_cache();
+  clear_exclusive_monitor();
   if (!snapshot_io::read(in, icc_ctlr_el1_) ||
       !snapshot_io::read(in, icc_sre_el1_) ||
       !snapshot_io::read(in, icc_bpr1_el1_) ||
@@ -7906,6 +8004,18 @@ bool Cpu::load_state(std::istream& in, std::uint32_t version) {
       !snapshot_io::read(in, exclusive_addr_) ||
       !snapshot_io::read(in, exclusive_size_)) {
     return false;
+  }
+  if (version >= 14) {
+    if (!snapshot_io::read(in, exclusive_pa_count_) ||
+        !snapshot_io::read_array(in, exclusive_phys_addrs_) ||
+        exclusive_pa_count_ > exclusive_phys_addrs_.size()) {
+      return false;
+    }
+    if (!exclusive_valid_) {
+      clear_exclusive_monitor();
+    }
+  } else {
+    clear_exclusive_monitor();
   }
   std::uint64_t tlb_size = 0;
   if (!snapshot_io::read(in, tlb_size) || tlb_size > (1ull << 20)) {

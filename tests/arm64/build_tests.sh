@@ -121,6 +121,7 @@ build_asm_prog sp_ccmp_path
 build_asm_prog sp_alias_paths
 build_asm_prog addsub_shift_more
 build_asm_prog uart_irq_rx_spaced
+build_asm_prog uart_tx_match_reply
 build_asm_prog predecode_dyn_codegen
 build_asm_prog predecode_va_exec_switch
 build_asm_prog predecode_load_store_min
@@ -130,6 +131,7 @@ build_asm_prog ps2_rx_spaced
 build_asm_prog smp_mpidr_boot
 build_asm_prog smp_sev_wfe
 build_asm_prog smp_ldxr_invalidate
+build_asm_prog smp_ldxr_invalidate_mmu
 build_asm_prog smp_spinlock_ldaxr_stlxr
 build_asm_prog smp_tlbi_broadcast
 build_asm_prog smp_wfe_monitor_event

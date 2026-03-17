@@ -245,18 +245,24 @@ void SoC::rebuild_fast_path() {
 
 void SoC::broadcast_event(Cpu& source) {
   (void)source;
+  bool woke_waiter = false;
   for (auto& cpu : cpus_) {
+    woke_waiter |= cpu->waiting_for_event();
     cpu->signal_event();
   }
+  runnable_state_dirty_ = runnable_state_dirty_ || woke_waiter;
 }
 
 void SoC::on_cpu_memory_write(Cpu& source, std::uint64_t pa, std::size_t size) {
+  bool woke_waiter = false;
   for (auto& cpu : cpus_) {
     if (cpu.get() == &source) {
       continue;
     }
+    woke_waiter |= cpu->waiting_for_event();
     cpu->notify_external_memory_write(pa, size);
   }
+  runnable_state_dirty_ = runnable_state_dirty_ || woke_waiter;
 }
 
 void SoC::broadcast_tlbi_vmalle1(Cpu& source) {
@@ -364,6 +370,7 @@ bool SoC::handle_smccc(Cpu& source, bool is_hvc, std::uint16_t imm16) {
       cpus_[*target]->set_mpidr(cpu_mpidr(*target));
       cpus_[*target]->set_x(0, source.x(3));
       cpu_powered_on_[*target] = true;
+      runnable_state_dirty_ = true;
       source.set_x(0, static_cast<std::uint64_t>(kPsciRetSuccess));
       return true;
     }
@@ -466,6 +473,9 @@ void SoC::reset(std::uint64_t entry_pc) {
   timer_->rebase_to_steps(guest_time_ticks());
   perf_mailbox_->reset_state();
   reset_perf_measurement_state();
+  stop_on_uart_window_.clear();
+  uart_tx_match_window_.clear();
+  uart_tx_match_reply_armed_ = !uart_tx_match_pattern_.empty() && !uart_tx_match_reply_text_.empty();
 }
 
 void SoC::set_predecode_enabled(bool enabled) {
@@ -500,16 +510,38 @@ void SoC::set_stop_on_uart_pattern(std::string pattern) {
   stop_on_uart_window_.clear();
 }
 
+void SoC::set_uart_tx_match_reply(std::string pattern, std::string reply_text) {
+  uart_tx_match_pattern_ = std::move(pattern);
+  uart_tx_match_reply_text_ = std::move(reply_text);
+  uart_tx_match_window_.clear();
+  uart_tx_match_reply_armed_ = !uart_tx_match_pattern_.empty() && !uart_tx_match_reply_text_.empty();
+}
+
 void SoC::on_uart_tx(std::uint8_t byte) {
-  if (stop_on_uart_pattern_.empty()) {
+  if (!stop_on_uart_pattern_.empty()) {
+    stop_on_uart_window_.push_back(static_cast<char>(byte));
+    if (stop_on_uart_window_.size() > stop_on_uart_pattern_.size()) {
+      stop_on_uart_window_.erase(0, stop_on_uart_window_.size() - stop_on_uart_pattern_.size());
+    }
+    if (stop_on_uart_window_ == stop_on_uart_pattern_) {
+      request_stop();
+    }
+  }
+
+  if (!uart_tx_match_reply_armed_) {
     return;
   }
-  stop_on_uart_window_.push_back(static_cast<char>(byte));
-  if (stop_on_uart_window_.size() > stop_on_uart_pattern_.size()) {
-    stop_on_uart_window_.erase(0, stop_on_uart_window_.size() - stop_on_uart_pattern_.size());
+  uart_tx_match_window_.push_back(static_cast<char>(byte));
+  if (uart_tx_match_window_.size() > uart_tx_match_pattern_.size()) {
+    uart_tx_match_window_.erase(0, uart_tx_match_window_.size() - uart_tx_match_pattern_.size());
   }
-  if (stop_on_uart_window_ == stop_on_uart_pattern_) {
-    request_stop();
+  if (uart_tx_match_window_ != uart_tx_match_pattern_) {
+    return;
+  }
+
+  uart_tx_match_reply_armed_ = false;
+  for (unsigned char ch : uart_tx_match_reply_text_) {
+    inject_uart_rx(static_cast<std::uint8_t>(ch));
   }
 }
 
@@ -592,6 +624,14 @@ void SoC::advance_guest_time(std::uint64_t executed_instructions, std::size_t ac
   guest_time_fp_ += (rem * kGuestTimeFracOne) / active;
 }
 
+void SoC::advance_guest_time_to(std::uint64_t guest_tick) {
+  const std::uint64_t target_fp = guest_tick << kGuestTimeFracBits;
+  if (target_fp <= guest_time_fp_) {
+    return;
+  }
+  guest_time_fp_ = target_fp;
+}
+
 void SoC::invalidate_device_schedule() {
   device_sync_valid_ = false;
   device_schedule_valid_ = false;
@@ -606,6 +646,19 @@ std::size_t SoC::active_cpu_count() const {
       continue;
     }
     ++count;
+  }
+  return count;
+}
+
+std::size_t SoC::runnable_cpu_count() {
+  std::size_t count = 0;
+  for (std::size_t i = 0; i < cpus_.size(); ++i) {
+    if (!cpu_powered_on_[i] || cpus_[i]->halted()) {
+      continue;
+    }
+    if (cpus_[i]->ready_to_run()) {
+      ++count;
+    }
   }
   return count;
 }
@@ -691,6 +744,7 @@ void SoC::reset_perf_measurement_state() {
   last_timer_phys_level_ = false;
   last_uart_level_ = false;
   last_kmi_level_ = false;
+  runnable_state_dirty_ = false;
   bus_.reset_perf_counters();
   if (fast_path_ != nullptr) {
     fast_path_->reset_perf_counters();
@@ -728,6 +782,17 @@ bool SoC::run(std::size_t max_steps) {
       }
     }
     return any_powered_on;
+  };
+  const auto any_other_cpu_waiting_for_interrupt = [&](std::size_t source_cpu) {
+    for (std::size_t i = 0; i < cpus_.size(); ++i) {
+      if (i == source_cpu || !cpu_powered_on_[i] || cpus_[i]->halted()) {
+        continue;
+      }
+      if (cpus_[i]->waiting_for_interrupt()) {
+        return true;
+      }
+    }
+    return false;
   };
   auto sync_devices = [&](bool force_timer_sync = false) {
     ++local_perf_counters_.sync_devices;
@@ -820,6 +885,20 @@ bool SoC::run(std::size_t max_steps) {
       sync_devices(true);
     }
   };
+  const auto fast_forward_to_next_guest_event = [&]() {
+    if (scheduler_mode_ == SchedulerMode::Legacy) {
+      return false;
+    }
+    const std::uint64_t guest_ticks = guest_time_ticks();
+    const auto event = next_device_event(guest_ticks);
+    if (!event.has_value() || event->guest_tick <= guest_ticks) {
+      return false;
+    }
+    advance_guest_time_to(event->guest_tick);
+    device_sync_valid_ = false;
+    sync_devices(true);
+    return true;
+  };
   const auto single_core_window = [&](std::size_t budget) {
     static constexpr std::size_t kMaxLegacyInternalChunk = 65536;
     std::size_t chunk = budget;
@@ -837,11 +916,26 @@ bool SoC::run(std::size_t max_steps) {
     }
     return std::max<std::size_t>(1, chunk);
   };
+  const auto single_runnable_smp_window = [&](std::size_t budget) {
+    static constexpr std::size_t kMaxLegacyInternalChunk = 65536;
+    std::size_t chunk = budget;
+    if (scheduler_mode_ == SchedulerMode::Legacy) {
+      return std::max<std::size_t>(1, std::min<std::size_t>(chunk, kMaxLegacyInternalChunk));
+    }
+    const std::uint64_t guest_ticks = guest_time_ticks();
+    if (const auto event = next_device_event(guest_ticks); event.has_value()) {
+      if (event->guest_tick <= guest_ticks) {
+        chunk = 1;
+      } else {
+        const std::uint64_t until_event = event->guest_tick - guest_ticks;
+        chunk = static_cast<std::size_t>(std::min<std::uint64_t>(chunk, until_event));
+      }
+    }
+    return std::max<std::size_t>(1, chunk);
+  };
   const auto smp_round_window = [&](std::size_t budget, std::size_t runnable_cpus) {
     static constexpr std::size_t kMaxLegacyInternalChunk = 65536;
-    const std::size_t max_rounds_by_budget =
-        std::max<std::size_t>(1, (budget + runnable_cpus - 1u) / runnable_cpus);
-    std::size_t round_budget = max_rounds_by_budget;
+    std::size_t round_budget = std::max<std::size_t>(1, (budget + runnable_cpus - 1u) / runnable_cpus);
     if (scheduler_mode_ == SchedulerMode::Legacy || !deadline_driven_window_needed()) {
       return std::max<std::size_t>(1, std::min<std::size_t>(round_budget, kMaxLegacyInternalChunk));
     }
@@ -863,6 +957,9 @@ bool SoC::run(std::size_t max_steps) {
     Cpu& cpu = primary_cpu();
     while (remaining > 0 && !stop_requested_) {
       maybe_sync_devices();
+      if (!cpu.ready_to_run() && fast_forward_to_next_guest_event()) {
+        continue;
+      }
 
       std::size_t window = single_core_window(remaining);
       while (window > 0 && remaining > 0 && !stop_requested_) {
@@ -904,12 +1001,83 @@ bool SoC::run(std::size_t max_steps) {
   while (remaining > 0 && !stop_requested_) {
     maybe_sync_devices();
 
-    const std::size_t runnable_cpus = active_cpu_count();
+    std::size_t runnable_cpus = runnable_cpu_count();
+    bool fallback_poll_waiters = false;
+    if (runnable_cpus == 0) {
+      if (all_powered_on_cpus_halted()) {
+        request_stop();
+        break;
+      }
+      if (fast_forward_to_next_guest_event()) {
+        continue;
+      }
+      runnable_cpus = active_cpu_count();
+      fallback_poll_waiters = true;
+    }
     if (runnable_cpus == 0) {
       if (all_powered_on_cpus_halted()) {
         request_stop();
       }
       break;
+    }
+
+    if (!fallback_poll_waiters && runnable_cpus == 1) {
+      std::size_t runnable_cpu_idx = cpus_.size();
+      for (std::size_t cpu_idx = 0; cpu_idx < cpus_.size(); ++cpu_idx) {
+        if (!cpu_powered_on_[cpu_idx] || cpus_[cpu_idx]->halted()) {
+          continue;
+        }
+        if (cpus_[cpu_idx]->ready_to_run()) {
+          runnable_cpu_idx = cpu_idx;
+          break;
+        }
+      }
+      if (runnable_cpu_idx < cpus_.size()) {
+        Cpu& cpu = *cpus_[runnable_cpu_idx];
+        std::size_t window = single_runnable_smp_window(remaining);
+        while (window > 0 && remaining > 0 && !stop_requested_) {
+          ++local_perf_counters_.run_chunks;
+          const std::size_t chunk = window;
+          std::size_t executed = 0;
+          runnable_state_dirty_ = false;
+          const std::uint64_t gic_epoch_before = gic_->state_epoch();
+          while (executed < chunk) {
+            if (!cpu.ready_to_run()) {
+              break;
+            }
+            const bool ok = cpu.step();
+            ++global_steps_;
+            advance_guest_time(1, 1);
+            ++executed;
+            --remaining;
+            if (!ok) {
+              if (cpu.halted()) {
+                log_cpu_halt(cpu);
+                break;
+              }
+              return false;
+            }
+            if (stop_requested_) {
+              return true;
+            }
+            if (device_schedule_dirty_ || runnable_state_dirty_ || cpu.waiting()) {
+              break;
+            }
+            if (gic_->state_epoch() != gic_epoch_before &&
+                any_other_cpu_waiting_for_interrupt(runnable_cpu_idx)) {
+              break;
+            }
+          }
+          window -= std::min(window, executed);
+          if (device_schedule_dirty_ || runnable_state_dirty_ || cpu.waiting() || cpu.halted()) {
+            break;
+          }
+          if (executed == 0) {
+            break;
+          }
+        }
+        continue;
+      }
     }
 
     ++local_perf_counters_.run_chunks;
@@ -925,6 +1093,9 @@ bool SoC::run(std::size_t max_steps) {
           break;
         }
         if (!cpu_powered_on_[cpu_idx] || cpu->halted()) {
+          continue;
+        }
+        if (!fallback_poll_waiters && !cpu->ready_to_run()) {
           continue;
         }
         any_active = true;
@@ -1162,7 +1333,7 @@ bool SoC::save_snapshot(const std::string& path) const {
     return false;
   }
   static constexpr char kMagic[8] = {'A', 'A', 'R', 'C', 'H', 'S', 'N', 'P'};
-  static constexpr std::uint32_t kVersion = 13;
+  static constexpr std::uint32_t kVersion = 14;
   const std::uint32_t snapshot_cpu_count = static_cast<std::uint32_t>(cpus_.size());
   out.write(kMagic, sizeof(kMagic));
   if (!out ||
@@ -1229,7 +1400,7 @@ bool SoC::load_snapshot(const std::string& path) {
       magic[4] != 'H' || magic[5] != 'S' || magic[6] != 'N' || magic[7] != 'P' ||
       (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 &&
        version != 7 && version != 8 && version != 9 && version != 10 && version != 11 && version != 12 &&
-       version != 13) ||
+       version != 13 && version != 14) ||
       boot_ram_base != kBootRamBase || boot_ram_size != kBootRamSize ||
       sdram_base != kSdramBase || sdram_size != kSdramSize ||
       !snapshot_io::read(in, timer_tick_scale_)) {
@@ -1366,6 +1537,8 @@ bool SoC::load_snapshot(const std::string& path) {
   }
   stop_requested_ = false;
   stop_on_uart_window_.clear();
+  uart_tx_match_window_.clear();
+  uart_tx_match_reply_armed_ = !uart_tx_match_pattern_.empty() && !uart_tx_match_reply_text_.empty();
   device_sync_valid_ = false;
   if (const auto scale = env_timer_scale(); scale.has_value()) {
     timer_tick_scale_ = *scale;

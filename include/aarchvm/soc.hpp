@@ -44,6 +44,7 @@ public:
   void inject_uart_rx(std::uint8_t byte);
   void inject_ps2_rx(std::uint8_t byte);
   void set_stop_on_uart_pattern(std::string pattern);
+  void set_uart_tx_match_reply(std::string pattern, std::string reply_text);
   bool run(std::size_t max_steps);
   [[nodiscard]] bool stop_requested() const { return stop_requested_; }
   [[nodiscard]] std::optional<std::uint8_t> read_u8(std::uint64_t addr) const;
@@ -137,8 +138,10 @@ private:
   void reset_perf_measurement_state();
   [[nodiscard]] std::uint64_t guest_time_ticks() const;
   void advance_guest_time(std::uint64_t executed_instructions, std::size_t active_cpu_count);
+  void advance_guest_time_to(std::uint64_t guest_tick);
   void invalidate_device_schedule();
   [[nodiscard]] std::size_t active_cpu_count() const;
+  [[nodiscard]] std::size_t runnable_cpu_count();
   struct ScheduledDeviceEvent {
     enum class Type : std::uint8_t {
       TimerDeadline,
@@ -205,6 +208,10 @@ private:
   mutable LocalPerfCounters local_perf_counters_{};
   std::string stop_on_uart_pattern_;
   std::string stop_on_uart_window_;
+  std::string uart_tx_match_pattern_;
+  std::string uart_tx_match_window_;
+  std::string uart_tx_match_reply_text_;
+  bool uart_tx_match_reply_armed_ = false;
   bool device_sync_valid_ = false;
   std::uint64_t device_sync_guest_ticks_ = 0;
   bool device_schedule_valid_ = false;
@@ -214,6 +221,7 @@ private:
   bool last_timer_phys_level_ = false;
   bool last_uart_level_ = false;
   bool last_kmi_level_ = false;
+  bool runnable_state_dirty_ = false;
 };
 
 } // namespace aarchvm

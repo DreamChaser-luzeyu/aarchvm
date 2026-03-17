@@ -127,6 +127,7 @@ run sp_ccmp_path.bin 200000
 run sp_alias_paths.bin 300000
 run addsub_shift_more.bin 300000
 AARCHVM_UART_RX_SCRIPT='100:0x41,1000:0x42,5000:0x43' ./build/aarchvm -bin tests/arm64/out/uart_irq_rx_spaced.bin -load 0x0 -entry 0x0 -steps 200000 | grep -qx 'ABCP'
+test "$(AARCHVM_UART_TX_MATCH='=> ' AARCHVM_UART_TX_REPLY=$'A\n' ./build/aarchvm -bin tests/arm64/out/uart_tx_match_reply.bin -load 0x0 -entry 0x0 -steps 200000 | tr -d '\r\n')" = '=> P'
 
 UART_IRQ_SNAP=tests/arm64/out/uart_irq_rx_spaced.snap
 rm -f "$UART_IRQ_SNAP"
@@ -159,6 +160,7 @@ run pl050_basic.bin 400000
 run_smp smp_mpidr_boot.bin 200000
 run_smp smp_sev_wfe.bin 200000
 run_smp smp_ldxr_invalidate.bin 200000
+./build/aarchvm -smp 2 -bin tests/arm64/out/smp_ldxr_invalidate_mmu.bin -load 0x0 -entry 0x0 -steps 1200000 | grep -qx 'V'
 run_smp smp_spinlock_ldaxr_stlxr.bin 600000
 run_smp smp_tlbi_broadcast.bin 1200000
 ./build/aarchvm -smp 2 -bin tests/arm64/out/smp_wfe_monitor_event.bin -load 0x0 -entry 0x0 -steps 300000 | grep -qx 'M'

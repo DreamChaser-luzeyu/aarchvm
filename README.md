@@ -10,6 +10,7 @@ It currently boots U-Boot, hands off to Linux, reaches an interactive BusyBox sh
 - Linux boot path validated through U-Boot -> Linux `Image` -> BusyBox shell
 - Minimal MMU/TLB, Generic Timer, synchronous exception, and GICv3 paths sufficient for the current Linux bring-up
 - PL011 UART console
+- Host-side UART prompt matching with one-shot auto-reply, so U-Boot boot scripts can be automated without replacing interactive stdin
 - QEMU-style interactive serial escape `Ctrl+A, x` to stop the emulator, still honoring end-of-run snapshot save
 - SDL-backed simple framebuffer path usable by U-Boot and Linux `simpledrm` / `fbcon`
 - PL050 PS/2 keyboard path usable by Linux `ambakmi` + `atkbd`
