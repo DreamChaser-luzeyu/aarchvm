@@ -1,3 +1,152 @@
+# 修改日志 2026-03-17 03:55
+
+## 本轮修改
+
+- 完成事件驱动化第一阶段的收尾整理，确认当前主线默认使用 `AARCHVM_SCHED_MODE=event`，同时保留 `legacy` 作为对照 / fallback 模式。
+- 在 [src/soc.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/soc.cpp) 将 SoC 外层调度恢复为“默认走事件模式、显式切换才走旧步进模式”的结构，并保留：
+  - 统一 `guest_time`；
+  - timer deadline 驱动；
+  - 设备状态变化导致的调度失效；
+  - 旧固定步数路径用于 debug / A-B 对照。
+- 更新 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)，明确第一阶段已完成的闭环范围，以及当前默认必须保持 `event` 的原因。
+- 更新 [doc/README.en.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/README.en.md) 与 [doc/README.zh.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/README.zh.md)，补充 `AARCHVM_SCHED_MODE=event|legacy` 的使用说明与语义差异。
+- 在 [doc/perf-baseline-vs-optimized.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/perf-baseline-vs-optimized.md) 追加“第十八轮：事件驱动第一阶段复核”，记录：
+  - 同版本 `legacy` 对照与当前默认 `event` 的 UMP/SMP 数据；
+  - 当前 `perf` / `gprof` 热点；
+  - 为什么 `legacy` 虽然局部更快，但不能作为 SMP 语义等价模式。
+
+## 本轮测试
+
+- `timeout 600s ./tests/arm64/run_all.sh`
+- `timeout 360s ./tests/linux/build_linux_shell_snapshot.sh`
+- `AARCHVM_FUNCTIONAL_TIMEOUT=360s ./tests/linux/run_functional_suite.sh`
+- `timeout 900s ./tests/linux/build_linux_smp_shell_snapshot.sh`
+- `AARCHVM_SMP_FUNCTIONAL_TIMEOUT=240s ./tests/linux/run_functional_suite_smp.sh`
+- `env AARCHVM_TIMER_SCALE=1 AARCHVM_PERF_TIMEOUT=600s AARCHVM_PERF_LOG=out/perf-ump-stage1-final.log AARCHVM_PERF_RESULTS=out/perf-ump-stage1-final-results.txt ./tests/linux/run_algorithm_perf.sh`
+- `env AARCHVM_TIMER_SCALE=1 AARCHVM_PERF_TIMEOUT=900s AARCHVM_PERF_LOG=out/perf-smp-stage1-final.log AARCHVM_PERF_RESULTS=out/perf-smp-stage1-final-results.txt AARCHVM_ARGS='-smp 2 -smp-mode psci' AARCHVM_LINUX_DTB=dts/aarchvm-linux-smp.dtb AARCHVM_USERTEST_SNAPSHOT_OUT=out/linux-smp-shell-v1.snap AARCHVM_USERTEST_SNAPSHOT_LOG=out/linux-smp-shell-v1-build.log AARCHVM_USERTEST_SNAPSHOT_VERIFY_LOG=out/linux-smp-shell-v1-verify.log ./tests/linux/run_algorithm_perf.sh`
+- `timeout 300s bash -lc "printf 'bench_runner\n' | AARCHVM_BUS_FASTPATH=1 AARCHVM_TIMER_SCALE=1 perf record -o out/perf-stage1-current.data -- ./build/aarchvm -smp 2 -snapshot-load out/linux-smp-shell-v1.snap -steps 3000000000 -stop-on-uart 'BENCH-RESULT name=tlb-rand-32m' -fb-sdl off > out/perf-stage1-current-run.log 2>&1"`
+- `perf report --stdio --percent-limit 0.1 --dsos=aarchvm -i out/perf-stage1-current.data > out/perf-stage1-current-aarchvm-only.report`
+- `cmake --build build-gprof -j4`
+- `timeout 300s bash -lc "cd out && printf 'bench_runner\n' | AARCHVM_BUS_FASTPATH=1 AARCHVM_TIMER_SCALE=1 ../build-gprof/aarchvm -smp 2 -snapshot-load linux-smp-shell-v1.snap -steps 3000000000 -stop-on-uart 'BENCH-RESULT name=tlb-rand-32m' -fb-sdl off > gprof-stage1-current-run.log 2>&1"`
+- `gprof build-gprof/aarchvm out/gmon.out > out/gprof-stage1-current.txt`
+
+## 当前结论
+
+- 事件驱动化第一阶段已经形成可保留的正确性闭环，但还不是最终性能形态。
+- 当前默认必须保持 `event`，因为 `legacy` 在 SMP 下会把近期限时器递送推迟到大 chunk 之后，`tests/arm64/smp_timer_rate.bin` 已能稳定证明这一点。
+- 当前最主要热点仍是 `GicV3::has_pending(...)`，说明下一阶段的性能突破点已经明确落在 `WFI` 真正停车、GIC pending summary / candidate cache、IRQ line-driven wakeup，而不是继续优先做 decode/MMU 微优化。
+
+# 修改日志 2026-03-17 01:05
+
+## 本轮修改
+
+- 基于当前代码重新执行了一轮 SMP Linux 算法性能测试，结果写入：
+  - `out/perf-smp-current.log`
+  - `out/perf-smp-current-results.txt`
+- 基于 SMP shell snapshot 重新执行了一轮当前代码的热点分析：
+  - `perf data`：`out/perf-smp-current.data`
+  - `perf report`：`out/perf-smp-current.report`
+  - `perf report (aarchvm only)`：`out/perf-smp-current-aarchvm-only.report`
+  - `gprof`：`out/gprof-smp-current.txt`
+- 根据本轮 SMP `perf` / `gprof` 结果，更新 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)：
+  - 新增“基于 2026-03-17 SMP 热点复测的近期优先级”小节；
+  - 明确将 `WFI` 真正停车、GIC per-CPU pending summary / candidate cache、IRQ line-driven wakeup 作为下一轮性能优化的第一优先级；
+  - 明确在 `GicV3::has_pending(...)` 不再是压倒性热点之前，不应继续优先投入 decode/MMU/load-store 微优化。
+
+## 本轮测试
+
+- `env AARCHVM_TIMER_SCALE=1 AARCHVM_PERF_TIMEOUT=900s AARCHVM_PERF_LOG=out/perf-smp-current.log AARCHVM_PERF_RESULTS=out/perf-smp-current-results.txt AARCHVM_ARGS='-smp 2 -smp-mode psci' AARCHVM_LINUX_DTB=dts/aarchvm-linux-smp.dtb AARCHVM_USERTEST_SNAPSHOT_OUT=out/linux-smp-perf-shell.snap AARCHVM_USERTEST_SNAPSHOT_LOG=out/linux-smp-perf-shell-build.log AARCHVM_USERTEST_SNAPSHOT_VERIFY_LOG=out/linux-smp-perf-shell-verify.log ./tests/linux/run_algorithm_perf.sh`
+- `timeout 300s bash -lc "printf 'bench_runner\n' | AARCHVM_BUS_FASTPATH=1 AARCHVM_TIMER_SCALE=1 perf record -o out/perf-smp-current.data -- ./build/aarchvm -smp 2 -snapshot-load out/linux-smp-perf-shell.snap -steps 3000000000 -stop-on-uart 'BENCH-RESULT name=tlb-rand-32m' -fb-sdl off > out/perf-smp-current-run.log 2>&1"`
+- `perf report --stdio -i out/perf-smp-current.data > out/perf-smp-current.report`
+- `perf report --stdio --percent-limit 0.1 --dsos=aarchvm -i out/perf-smp-current.data > out/perf-smp-current-aarchvm-only.report`
+- `cmake --build build-gprof -j4`
+- `timeout 300s bash -lc "cd out && printf 'bench_runner\n' | AARCHVM_BUS_FASTPATH=1 AARCHVM_TIMER_SCALE=1 ../build-gprof/aarchvm -smp 2 -snapshot-load linux-smp-perf-shell.snap -steps 3000000000 -stop-on-uart 'BENCH-RESULT name=tlb-rand-32m' -fb-sdl off > gprof-smp-current-run.log 2>&1"`
+- `gprof build-gprof/aarchvm out/gmon.out > out/gprof-smp-current.txt`
+
+# 修改日志 2026-03-17 00:50
+
+## 本轮修改
+
+- 继续细化 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md) 中的 RISC-V RV64IMAC 支持方案，不再只停留在阶段划分，而是补充了可直接拆任务的设计细节。
+- 新增“建议的代码拆分与落点”小节，明确：
+  - 先引入最小公共 CPU 接口；
+  - 当前 `Cpu` 先逻辑上视作 `ArmCpu`；
+  - 将通用机器层与 Arm/RISC-V 专用平台层拆开；
+  - 快照格式建议拆成 common header + arch tag + machine/device/per-hart blobs。
+- 新增“建议的首个 RISC-V 机器模型”小节，给出首版建议地址图与设备复用策略：
+  - DRAM `0x8000_0000`
+  - UART `0x1000_0000`
+  - ACLINT/CLINT `0x0200_0000`
+  - PLIC `0x0c00_0000`
+  - framebuffer / block / perf mailbox 放入独立高地址 MMIO 区
+- 新增“Linux 路径的推荐启动策略”小节，明确推荐先走“内建极小 M-mode firmware/SBI shim + 直接启动 Linux”的最短路径，而不是先做 U-Boot on RISC-V。
+- 新增“需要优先保证正确的语义点”小节，明确将 `LR/SC`、`FENCE/FENCE.I`、misaligned access、precise trap、多 hart `SFENCE.VMA` / `remote_fence_i` 行为列为早期必须重点覆盖的正确性项。
+
+## 本轮测试
+
+- 本轮仅更新设计文档，未运行测试。
+
+# 修改日志 2026-03-17 00:45
+
+## 本轮修改
+
+- 修正 [doc/perf-baseline-vs-optimized.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/perf-baseline-vs-optimized.md) 的条目顺序。
+- 将误插在 `Release 相对 Debug 的性能提升` 小节中的“第七轮优化对比（日期时间：2026-03-17 00:34）”整体移动到文档末尾，恢复性能记录按追加顺序排列。
+- 恢复 `Release 相对 Debug 的性能提升` 小节内部表格与结论的连续性，避免最新条目打断旧条目内容。
+
+## 本轮测试
+
+- 本轮仅调整文档结构，未运行测试。
+
+# 修改日志 2026-03-17 00:34
+
+## 本轮修改
+
+- 在 [src/soc.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/soc.cpp) 完成事件驱动演进方案第 1 阶段与第 2 阶段的最小闭环接线：
+  - SoC 现在维护独立的固定点 `guest_time_fp_`，guest timer/sysreg 读写统一从 guest 时间取值，不再直接等同于旧的 `timer_steps_ * scale`。
+  - snapshot 继续保存并恢复统一 guest 时间；旧版本快照会兼容性地恢复到新的时间表示。
+  - SoC 增加最小设备计划缓存，支持按 `(deadline, event_type)` 查询下一设备事件；当前先让 generic timer 成为第一个真正基于 deadline 的设备。
+  - SMP 主循环不再“每轮一同步设备”，而是会先计算下一个 timer deadline，再批量执行多个 round，只有到事件边界或设备状态变化时才重新 `sync_devices()`。
+- 为保证这条最小事件调度路径不破坏行为正确性，补齐了设备状态变化回调：
+  - [include/aarchvm/generic_timer.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/generic_timer.hpp) / [src/generic_timer.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/generic_timer.cpp) 新增 timer 状态变化 observer，在 `CNTV/CNTP` 控制和比较值变化时通知 SoC 失效当前设备计划。
+  - [include/aarchvm/uart_pl011.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/uart_pl011.hpp) / [src/uart_pl011.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/uart_pl011.cpp) 新增 UART 状态变化 observer，guest 读空 RX FIFO、修改 mask/enable 后会立即打断当前批次并重新同步 IRQ 线。
+  - [include/aarchvm/pl050_kmi.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/pl050_kmi.hpp) / [src/pl050_kmi.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/pl050_kmi.cpp) 对 KMI 做了同类 observer 接线，避免输入 FIFO/控制位变化在事件批次里被延迟太久。
+- Linux 脚本继续统一默认 `AARCHVM_TIMER_SCALE=1`，确保 UMP/SMP、`ttyAMA0`/`tty1` 等路径都在统一 guest 时间模型下回归。
+- 更新 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)，把“统一 guest 时间”和“引入最小事件调度器”中已完成的子任务勾选出来。
+- 更新 [doc/perf-baseline-vs-optimized.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/perf-baseline-vs-optimized.md)，补充本轮 baseline/optimized 的 UMP 与 SMP 性能数据、命令、提升百分比与结果分析。
+
+## 本轮测试
+
+- `cmake --build build -j4`：通过。
+- `timeout 600s ./tests/arm64/run_all.sh`：通过。
+- `timeout 360s ./tests/linux/build_linux_shell_snapshot.sh`：通过，prompt steps 为 `400173355`。
+- `timeout 240s ./tests/linux/run_functional_suite.sh`：通过。
+- `timeout 900s ./tests/linux/build_linux_smp_shell_snapshot.sh`：通过，prompt steps 为 `739614800`。
+- `timeout 240s ./tests/linux/run_functional_suite_smp.sh`：通过。
+- `timeout 600s env AARCHVM_TIMER_SCALE=1 AARCHVM_PERF_TIMEOUT=600s AARCHVM_PERF_LOG=out/perf-ump-optimized.log AARCHVM_PERF_RESULTS=out/perf-ump-optimized.txt ./tests/linux/run_algorithm_perf.sh`：通过。
+- `timeout 900s env AARCHVM_TIMER_SCALE=1 AARCHVM_PERF_TIMEOUT=900s AARCHVM_PERF_LOG=out/perf-smp-optimized.log AARCHVM_PERF_RESULTS=out/perf-smp-optimized.txt AARCHVM_ARGS='-smp 2 -smp-mode psci' AARCHVM_LINUX_DTB=dts/aarchvm-linux-smp.dtb AARCHVM_USERTEST_SNAPSHOT_OUT=out/linux-smp-perf-shell.snap AARCHVM_USERTEST_SNAPSHOT_LOG=out/linux-smp-perf-shell-build.log AARCHVM_USERTEST_SNAPSHOT_VERIFY_LOG=out/linux-smp-perf-shell-verify.log ./tests/linux/run_algorithm_perf.sh`：通过。
+
+## 当前结论
+
+- 这一轮已经把“统一 guest 时间 + timer deadline 化 + 最小事件计划缓存”完整接进了主线，并且在现有单测、UMP Linux、SMP Linux 回归下没有引入行为回退。
+- 结构性收益主要体现在 SMP：`sync_devices` / `run_chunks` 从数千万级降到数万甚至个位数，`base64-dec-4m`、`fnv1a-16m`、三类 TLB case 的端到端 `host_ns` 都出现了可观改善。
+- UMP 的端到端收益还不稳定，说明当前这一轮事件调度主要解决了 SMP 的外层轮询成本；如果后续继续推进事件驱动化，下一步应优先完成 GIC/UART/KMI 更彻底的状态变化驱动和主循环“运行到下一个原因”的窗口计算。
+
+# 修改日志 2026-03-16 23:27
+
+## 本轮修改
+
+- 继续整理 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)，把事件驱动演进方案中各阶段的具体任务改成 Markdown 复选框，便于后续逐项推进和勾选完成状态。
+- 保留了原有的阶段划分、目标、预期收益和实施顺序，只把可执行的小任务显式改造成可追踪的 checklist。
+
+## 本轮测试
+
+- 文档修改，未运行单元测试或回归测试。
+
+## 当前结论
+
+- 事件驱动方案现在已经不仅是说明文档，也可以直接作为后续实施计划使用。
+
 # 修改日志 2026-03-16 22:40
 
 ## 本轮修改
@@ -626,6 +775,7 @@
   - `tests/linux/build_linux_smp_shell_snapshot.sh` 在当前仓库状态下未能在默认 `4.5e9` steps 预算内走到 shell prompt，构建日志停在内核早期启动并以 `SUMMARY: steps=4500000000` 结束，因此本轮未完成基于该脚本的 SMP Linux 回归闭环。
 
 # 修改日志 2026-03-16 14:40
+
 
 ## 本轮修改
 

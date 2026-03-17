@@ -243,6 +243,9 @@ void UartPl011::update_interrupt_state() {
   if (uart_enabled && rx_enabled && !rx_fifo_.empty()) {
     ris_ |= (kRxRis | kRtRis);
   }
+  if (state_change_observer_) {
+    state_change_observer_();
+  }
 }
 
 } // namespace aarchvm

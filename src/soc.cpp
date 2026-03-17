@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <utility>
 
 #include "aarchvm/snapshot_io.hpp"
@@ -40,6 +41,21 @@ std::optional<std::uint64_t> env_timer_scale() {
     return std::nullopt;
   }
   return static_cast<std::uint64_t>(scale);
+}
+
+std::optional<bool> env_scheduler_mode_is_legacy() {
+  const char* mode_env = std::getenv("AARCHVM_SCHED_MODE");
+  if (mode_env == nullptr || *mode_env == '\0') {
+    return std::nullopt;
+  }
+  const std::string mode(mode_env);
+  if (mode == "legacy") {
+    return true;
+  }
+  if (mode == "event") {
+    return false;
+  }
+  return std::nullopt;
 }
 
 std::uint64_t host_monotonic_ns() {
@@ -173,7 +189,7 @@ SoC::SoC(std::size_t cpu_count)
         .smccc_call = [this](Cpu& source, bool is_hvc, std::uint16_t imm16) {
           return handle_smccc(source, is_hvc, imm16);
         },
-        .time_steps = [this]() { return timer_steps_; },
+        .time_steps = [this]() { return guest_time_ticks(); },
     });
     cpu->set_cpu_index(i);
     cpu->set_mpidr(cpu_mpidr(i));
@@ -188,10 +204,18 @@ SoC::SoC(std::size_t cpu_count)
   if (const auto scale = env_timer_scale(); scale.has_value()) {
     timer_tick_scale_ = *scale;
   }
+  if (const auto legacy = env_scheduler_mode_is_legacy(); legacy.has_value()) {
+    scheduler_mode_ = *legacy ? SchedulerMode::Legacy : SchedulerMode::EventDriven;
+  } else {
+    scheduler_mode_ = SchedulerMode::EventDriven;
+  }
 
   const char* fb_env = std::getenv("AARCHVM_FB_SDL");
   framebuffer_sdl_enabled_ = (fb_env == nullptr) ? true : env_enabled("AARCHVM_FB_SDL");
   uart_->set_tx_observer([this](std::uint8_t byte) { on_uart_tx(byte); });
+  uart_->set_state_change_observer([this]() { invalidate_device_schedule(); });
+  kmi_->set_state_change_observer([this]() { invalidate_device_schedule(); });
+  timer_->set_state_change_observer([this]() { invalidate_device_schedule(); });
   timer_->set_cycles_per_step(timer_tick_scale_);
 
   for (std::size_t i = 0; i < cpus_.size(); ++i) {
@@ -201,8 +225,8 @@ SoC::SoC(std::size_t cpu_count)
     gic_->set_cpu_affinity(i, cpu_mpidr(i));
   }
   global_steps_ = 0;
-  timer_steps_ = 0;
-  timer_->rebase_to_steps(timer_steps_);
+  guest_time_fp_ = 0;
+  timer_->rebase_to_steps(guest_time_ticks());
   reset_perf_measurement_state();
 }
 
@@ -437,9 +461,9 @@ void SoC::reset(std::uint64_t entry_pc) {
     cpu_powered_on_[i] = (i == 0u) || (secondary_boot_mode_ == SecondaryBootMode::AllStart);
   }
   global_steps_ = 0;
-  timer_steps_ = 0;
+  guest_time_fp_ = 0;
   timer_->set_cycles_per_step(timer_tick_scale_);
-  timer_->rebase_to_steps(timer_steps_);
+  timer_->rebase_to_steps(guest_time_ticks());
   perf_mailbox_->reset_state();
   reset_perf_measurement_state();
 }
@@ -463,10 +487,12 @@ void SoC::inject_uart_rx(std::uint8_t byte) {
   if (uart_->irq_pending()) {
     gic_->set_pending(kUartIntId);
   }
+  invalidate_device_schedule();
 }
 
 void SoC::inject_ps2_rx(std::uint8_t byte) {
   kmi_->inject_rx(byte);
+  invalidate_device_schedule();
 }
 
 void SoC::set_stop_on_uart_pattern(std::string pattern) {
@@ -551,6 +577,62 @@ void SoC::perf_flush_tlb() {
   }
 }
 
+std::uint64_t SoC::guest_time_ticks() const {
+  return guest_time_fp_ >> kGuestTimeFracBits;
+}
+
+void SoC::advance_guest_time(std::uint64_t executed_instructions, std::size_t active_cpu_count) {
+  if (executed_instructions == 0 || active_cpu_count == 0) {
+    return;
+  }
+  const std::uint64_t active = static_cast<std::uint64_t>(active_cpu_count);
+  const std::uint64_t whole = executed_instructions / active;
+  const std::uint64_t rem = executed_instructions % active;
+  guest_time_fp_ += whole * kGuestTimeFracOne;
+  guest_time_fp_ += (rem * kGuestTimeFracOne) / active;
+}
+
+void SoC::invalidate_device_schedule() {
+  device_sync_valid_ = false;
+  device_schedule_valid_ = false;
+  device_schedule_dirty_ = true;
+  next_device_event_.reset();
+}
+
+std::size_t SoC::active_cpu_count() const {
+  std::size_t count = 0;
+  for (std::size_t i = 0; i < cpus_.size(); ++i) {
+    if (!cpu_powered_on_[i] || cpus_[i]->halted()) {
+      continue;
+    }
+    ++count;
+  }
+  return count;
+}
+
+std::optional<SoC::ScheduledDeviceEvent> SoC::next_device_event(std::uint64_t guest_tick) const {
+  if (device_schedule_valid_ && !device_schedule_dirty_) {
+    if (!next_device_event_.has_value() || next_device_event_->guest_tick >= guest_tick) {
+      return next_device_event_;
+    }
+  }
+
+  auto& self = *const_cast<SoC*>(this);
+  self.device_schedule_valid_ = true;
+  self.device_schedule_dirty_ = false;
+  self.next_device_event_.reset();
+
+  constexpr std::uint64_t kNoDeadline = std::numeric_limits<std::uint64_t>::max() / 4u;
+  const std::uint64_t timer_steps = timer_->steps_until_irq(guest_tick, kNoDeadline);
+  if (timer_steps != kNoDeadline) {
+    self.next_device_event_ = ScheduledDeviceEvent{
+        .type = ScheduledDeviceEvent::Type::TimerDeadline,
+        .guest_tick = guest_tick + timer_steps,
+    };
+  }
+  return self.next_device_event_;
+}
+
 PerfCounters SoC::collect_perf_counters() const {
   PerfCounters out{};
   out.steps = global_steps_;
@@ -601,7 +683,10 @@ void SoC::reset_perf_measurement_state() {
   perf_session_ = {};
   local_perf_counters_ = {};
   device_sync_valid_ = false;
-  device_sync_steps_ = 0;
+  device_sync_guest_ticks_ = 0;
+  device_schedule_valid_ = false;
+  device_schedule_dirty_ = true;
+  next_device_event_.reset();
   last_timer_virt_level_ = false;
   last_timer_phys_level_ = false;
   last_uart_level_ = false;
@@ -644,12 +729,12 @@ bool SoC::run(std::size_t max_steps) {
     }
     return any_powered_on;
   };
-  auto sync_devices = [&]() {
+  auto sync_devices = [&](bool force_timer_sync = false) {
     ++local_perf_counters_.sync_devices;
-    const std::uint64_t steps = timer_steps_;
-    if (!device_sync_valid_ || device_sync_steps_ != steps) {
-      timer_->sync_to_steps(steps);
-      device_sync_steps_ = steps;
+    const std::uint64_t guest_ticks = guest_time_ticks();
+    if (force_timer_sync || !device_sync_valid_ || device_sync_guest_ticks_ != guest_ticks) {
+      timer_->sync_to_steps(guest_ticks);
+      device_sync_guest_ticks_ = guest_ticks;
     }
 
     for (std::size_t cpu = 0; cpu < cpus_.size(); ++cpu) {
@@ -673,98 +758,204 @@ bool SoC::run(std::size_t max_steps) {
     }
 
     if (framebuffer_sdl_ != nullptr) {
-      framebuffer_sdl_->present(steps);
+      framebuffer_sdl_->present(guest_ticks);
     }
 
     device_sync_valid_ = true;
+    device_schedule_valid_ = false;
+    device_schedule_dirty_ = false;
+    next_device_event_.reset();
+  };
+  const auto event_due_now = [&](std::uint64_t guest_ticks) {
+    if (!device_sync_valid_ || device_schedule_dirty_) {
+      return true;
+    }
+    const auto event = next_device_event(guest_ticks);
+    return event.has_value() && event->guest_tick <= guest_ticks;
+  };
+  const auto deadline_driven_window_needed = [&]() {
+    constexpr std::uint64_t kShortDeadlineWindow = 256;
+    if (scheduler_mode_ == SchedulerMode::Legacy) {
+      return false;
+    }
+    bool any_powered_on = false;
+    bool all_waiting = true;
+    for (std::size_t i = 0; i < cpus_.size(); ++i) {
+      if (!cpu_powered_on_[i] || cpus_[i]->halted()) {
+        continue;
+      }
+      any_powered_on = true;
+      if (!cpus_[i]->waiting_for_interrupt() && !cpus_[i]->waiting_for_event()) {
+        all_waiting = false;
+      }
+    }
+    if (!any_powered_on) {
+      return false;
+    }
+    if (all_waiting) {
+      return true;
+    }
+
+    const std::uint64_t guest_ticks = guest_time_ticks();
+    const auto event = next_device_event(guest_ticks);
+    if (!event.has_value()) {
+      return false;
+    }
+    if (event->guest_tick <= guest_ticks) {
+      return true;
+    }
+    return (event->guest_tick - guest_ticks) <= kShortDeadlineWindow;
+  };
+  const auto maybe_sync_devices = [&]() {
+    if (scheduler_mode_ == SchedulerMode::Legacy) {
+      sync_devices(true);
+      return;
+    }
+    if (!deadline_driven_window_needed()) {
+      sync_devices(true);
+      return;
+    }
+    const std::uint64_t guest_ticks = guest_time_ticks();
+    if (!device_sync_valid_ || device_schedule_dirty_ || event_due_now(guest_ticks)) {
+      sync_devices(true);
+    }
+  };
+  const auto single_core_window = [&](std::size_t budget) {
+    static constexpr std::size_t kMaxLegacyInternalChunk = 65536;
+    std::size_t chunk = budget;
+    if (scheduler_mode_ == SchedulerMode::Legacy || !deadline_driven_window_needed()) {
+      return std::max<std::size_t>(1, std::min<std::size_t>(chunk, kMaxLegacyInternalChunk));
+    }
+    const std::uint64_t guest_ticks = guest_time_ticks();
+    if (const auto event = next_device_event(guest_ticks); event.has_value()) {
+      if (event->guest_tick <= guest_ticks) {
+        chunk = 1;
+      } else {
+        const std::uint64_t until_event = event->guest_tick - guest_ticks;
+        chunk = static_cast<std::size_t>(std::min<std::uint64_t>(chunk, until_event));
+      }
+    }
+    return std::max<std::size_t>(1, chunk);
+  };
+  const auto smp_round_window = [&](std::size_t budget, std::size_t runnable_cpus) {
+    static constexpr std::size_t kMaxLegacyInternalChunk = 65536;
+    const std::size_t max_rounds_by_budget =
+        std::max<std::size_t>(1, (budget + runnable_cpus - 1u) / runnable_cpus);
+    std::size_t round_budget = max_rounds_by_budget;
+    if (scheduler_mode_ == SchedulerMode::Legacy || !deadline_driven_window_needed()) {
+      return std::max<std::size_t>(1, std::min<std::size_t>(round_budget, kMaxLegacyInternalChunk));
+    }
+    const std::uint64_t guest_ticks = guest_time_ticks();
+    if (const auto event = next_device_event(guest_ticks); event.has_value()) {
+      if (event->guest_tick <= guest_ticks) {
+        round_budget = 1;
+      } else {
+        const std::uint64_t until_event = event->guest_tick - guest_ticks;
+        round_budget = static_cast<std::size_t>(std::min<std::uint64_t>(round_budget, until_event));
+      }
+    }
+    return std::max<std::size_t>(1, round_budget);
   };
 
-  static constexpr std::size_t kMaxInternalChunk = 65536;
   std::size_t remaining = max_steps;
 
   if (cpus_.size() == 1) {
     Cpu& cpu = primary_cpu();
     while (remaining > 0 && !stop_requested_) {
-      ++local_perf_counters_.run_chunks;
-      sync_devices();
+      maybe_sync_devices();
 
-      std::size_t chunk = std::min<std::size_t>(remaining, kMaxInternalChunk);
-      if (uart_->irq_pending()) {
-        chunk = 1;
-      } else {
-        const std::uint64_t timer_limit = timer_->steps_until_irq(0, timer_steps_, chunk);
-        if (timer_limit == 0u) {
-          chunk = 1;
-        } else {
-          chunk = static_cast<std::size_t>(std::min<std::uint64_t>(chunk, timer_limit));
-        }
-      }
-
-      for (std::size_t i = 0; i < chunk; ++i) {
-        const bool ok = cpu.step();
-        ++global_steps_;
-        ++timer_steps_;
-        if (!ok) {
-          if (cpu.halted()) {
-            log_cpu_halt(cpu);
-            request_stop();
+      std::size_t window = single_core_window(remaining);
+      while (window > 0 && remaining > 0 && !stop_requested_) {
+        ++local_perf_counters_.run_chunks;
+        const std::size_t chunk = window;
+        std::size_t executed = 0;
+        while (executed < chunk) {
+          const bool ok = cpu.step();
+          ++global_steps_;
+          advance_guest_time(1, 1);
+          ++executed;
+          if (!ok) {
+            if (cpu.halted()) {
+              log_cpu_halt(cpu);
+              request_stop();
+              return true;
+            }
+            return false;
+          }
+          if (stop_requested_) {
             return true;
           }
-          return false;
+          if (device_schedule_dirty_) {
+            break;
+          }
         }
-        if (stop_requested_) {
-          return true;
+        remaining -= executed;
+        window -= std::min(window, executed);
+        if (device_schedule_dirty_) {
+          break;
         }
       }
-      remaining -= chunk;
     }
 
-    sync_devices();
+    sync_devices(true);
     return true;
   }
 
   while (remaining > 0 && !stop_requested_) {
-    ++local_perf_counters_.run_chunks;
-    sync_devices();
+    maybe_sync_devices();
 
-    bool any_active = false;
-    for (std::size_t cpu_idx = 0; cpu_idx < cpus_.size(); ++cpu_idx) {
-      auto& cpu = cpus_[cpu_idx];
-      if (remaining == 0 || stop_requested_) {
-        break;
-      }
-      if (!cpu_powered_on_[cpu_idx]) {
-        continue;
-      }
-      if (cpu->halted()) {
-        continue;
-      }
-      any_active = true;
-      const bool ok = cpu->step();
-      ++global_steps_;
-      --remaining;
-      if (!ok && cpu->halted()) {
-        log_cpu_halt(*cpu);
-      }
-      if (!ok && !cpu->halted()) {
-        return false;
-      }
-      if (stop_requested_) {
-        break;
-      }
-    }
-
-    if (!any_active) {
+    const std::size_t runnable_cpus = active_cpu_count();
+    if (runnable_cpus == 0) {
       if (all_powered_on_cpus_halted()) {
         request_stop();
       }
       break;
     }
-    ++timer_steps_;
-    device_sync_valid_ = false;
+
+    ++local_perf_counters_.run_chunks;
+    const std::size_t round_budget = smp_round_window(remaining, runnable_cpus);
+
+    for (std::size_t round = 0; round < round_budget && remaining > 0 && !stop_requested_; ++round) {
+      bool any_active = false;
+      std::size_t round_active_cpu_count = 0;
+      std::uint64_t executed_in_round = 0;
+      for (std::size_t cpu_idx = 0; cpu_idx < cpus_.size(); ++cpu_idx) {
+        auto& cpu = cpus_[cpu_idx];
+        if (remaining == 0 || stop_requested_) {
+          break;
+        }
+        if (!cpu_powered_on_[cpu_idx] || cpu->halted()) {
+          continue;
+        }
+        any_active = true;
+        ++round_active_cpu_count;
+        const bool ok = cpu->step();
+        ++global_steps_;
+        ++executed_in_round;
+        --remaining;
+        if (!ok && cpu->halted()) {
+          log_cpu_halt(*cpu);
+        }
+        if (!ok && !cpu->halted()) {
+          return false;
+        }
+      }
+
+      if (!any_active) {
+        if (all_powered_on_cpus_halted()) {
+          request_stop();
+        }
+        break;
+      }
+
+      advance_guest_time(executed_in_round, round_active_cpu_count);
+      if (device_schedule_dirty_) {
+        break;
+      }
+    }
   }
 
-  sync_devices();
+  sync_devices(true);
   return std::all_of(cpus_.begin(), cpus_.end(), [](const auto& cpu) { return cpu->halted(); }) ||
          remaining == 0 || stop_requested_;
 }
@@ -922,11 +1113,11 @@ std::uint32_t SoC::gicd_ctlr() const {
 }
 
 std::uint64_t SoC::timer_counter() const {
-  return timer_->counter_at_steps(timer_steps_);
+  return timer_->counter_at_steps(guest_time_ticks());
 }
 
 std::uint64_t SoC::timer_cntv_ctl() const {
-  return timer_->read_cntv_ctl_el0(0, timer_steps_);
+  return timer_->read_cntv_ctl_el0(0, guest_time_ticks());
 }
 
 std::uint64_t SoC::timer_cntv_cval() const {
@@ -934,11 +1125,11 @@ std::uint64_t SoC::timer_cntv_cval() const {
 }
 
 std::uint64_t SoC::timer_cntv_tval() const {
-  return timer_->read_cntv_tval_el0(0, timer_steps_);
+  return timer_->read_cntv_tval_el0(0, guest_time_ticks());
 }
 
 std::uint64_t SoC::timer_cntp_ctl() const {
-  return timer_->read_cntp_ctl_el0(0, timer_steps_);
+  return timer_->read_cntp_ctl_el0(0, guest_time_ticks());
 }
 
 std::uint64_t SoC::timer_cntp_cval() const {
@@ -946,11 +1137,11 @@ std::uint64_t SoC::timer_cntp_cval() const {
 }
 
 std::uint64_t SoC::timer_cntp_tval() const {
-  return timer_->read_cntp_tval_el0(0, timer_steps_);
+  return timer_->read_cntp_tval_el0(0, guest_time_ticks());
 }
 
 bool SoC::save_snapshot(const std::string& path) const {
-  const_cast<GenericTimer&>(*timer_).sync_to_steps(timer_steps_);
+  const_cast<GenericTimer&>(*timer_).sync_to_steps(guest_time_ticks());
   if (stop_requested_) {
     for (auto& cpu : const_cast<SoC*>(this)->cpus_) {
       cpu->clear_halt();
@@ -971,7 +1162,7 @@ bool SoC::save_snapshot(const std::string& path) const {
     return false;
   }
   static constexpr char kMagic[8] = {'A', 'A', 'R', 'C', 'H', 'S', 'N', 'P'};
-  static constexpr std::uint32_t kVersion = 12;
+  static constexpr std::uint32_t kVersion = 13;
   const std::uint32_t snapshot_cpu_count = static_cast<std::uint32_t>(cpus_.size());
   out.write(kMagic, sizeof(kMagic));
   if (!out ||
@@ -983,7 +1174,7 @@ bool SoC::save_snapshot(const std::string& path) const {
       !snapshot_io::write(out, timer_tick_scale_) ||
       !snapshot_io::write(out, snapshot_cpu_count) ||
       !snapshot_io::write(out, global_steps_) ||
-      !snapshot_io::write(out, timer_steps_) ||
+      !snapshot_io::write(out, guest_time_fp_) ||
       !snapshot_io::write(out, static_cast<std::uint32_t>(secondary_boot_mode_ == SecondaryBootMode::PsciOff ? 1u : 0u)) ||
       !boot_ram_->save_state(out) ||
       !sdram_->save_state(out) ||
@@ -1037,7 +1228,8 @@ bool SoC::load_snapshot(const std::string& path) {
       magic[0] != 'A' || magic[1] != 'A' || magic[2] != 'R' || magic[3] != 'C' ||
       magic[4] != 'H' || magic[5] != 'S' || magic[6] != 'N' || magic[7] != 'P' ||
       (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 &&
-       version != 7 && version != 8 && version != 9 && version != 10 && version != 11 && version != 12) ||
+       version != 7 && version != 8 && version != 9 && version != 10 && version != 11 && version != 12 &&
+       version != 13) ||
       boot_ram_base != kBootRamBase || boot_ram_size != kBootRamSize ||
       sdram_base != kSdramBase || sdram_size != kSdramSize ||
       !snapshot_io::read(in, timer_tick_scale_)) {
@@ -1052,12 +1244,18 @@ bool SoC::load_snapshot(const std::string& path) {
         !snapshot_io::read(in, global_steps_)) {
       return false;
     }
-    if (version >= 10) {
-      if (!snapshot_io::read(in, timer_steps_)) {
+    if (version >= 13) {
+      if (!snapshot_io::read(in, guest_time_fp_)) {
         return false;
       }
+    } else if (version >= 10) {
+      std::uint64_t guest_ticks = 0;
+      if (!snapshot_io::read(in, guest_ticks)) {
+        return false;
+      }
+      guest_time_fp_ = guest_ticks << kGuestTimeFracBits;
     } else {
-      timer_steps_ = global_steps_;
+      guest_time_fp_ = global_steps_ << kGuestTimeFracBits;
     }
     if (version >= 9) {
       std::uint32_t boot_mode = 0;
@@ -1071,7 +1269,7 @@ bool SoC::load_snapshot(const std::string& path) {
       return false;
     }
     global_steps_ = 0;
-    timer_steps_ = 0;
+    guest_time_fp_ = 0;
   }
 
   if (!boot_ram_->load_state(in) || !sdram_->load_state(in) || !uart_->load_state(in) ||
@@ -1105,7 +1303,7 @@ bool SoC::load_snapshot(const std::string& path) {
       return false;
     }
     global_steps_ = primary_cpu().steps();
-    timer_steps_ = global_steps_;
+    guest_time_fp_ = global_steps_ << kGuestTimeFracBits;
     cpu_powered_on_.assign(cpus_.size(), true);
   }
 
@@ -1148,7 +1346,7 @@ bool SoC::load_snapshot(const std::string& path) {
         .smccc_call = [this](Cpu& source, bool is_hvc, std::uint16_t imm16) {
           return handle_smccc(source, is_hvc, imm16);
         },
-        .time_steps = [this]() { return timer_steps_; },
+        .time_steps = [this]() { return guest_time_ticks(); },
     });
     cpus_[i]->set_cpu_index(i);
     gic_->set_cpu_affinity(i, cpu_mpidr(i));
@@ -1173,7 +1371,7 @@ bool SoC::load_snapshot(const std::string& path) {
     timer_tick_scale_ = *scale;
   }
   timer_->set_cycles_per_step(timer_tick_scale_);
-  timer_->rebase_to_steps(timer_steps_);
+  timer_->rebase_to_steps(guest_time_ticks());
   reset_perf_measurement_state();
   if (version >= 11 && restored_perf_session.active) {
     perf_session_.active = true;

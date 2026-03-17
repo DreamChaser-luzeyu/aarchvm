@@ -28,6 +28,7 @@ public:
   [[nodiscard]] std::uint32_t imsc() const { return imsc_; }
   [[nodiscard]] std::uint32_t ris() const { return ris_; }
   void set_tx_observer(std::function<void(std::uint8_t)> observer) { tx_observer_ = std::move(observer); }
+  void set_state_change_observer(std::function<void()> observer) { state_change_observer_ = std::move(observer); }
 
   [[nodiscard]] bool save_state(std::ostream& out) const;
   [[nodiscard]] bool load_state(std::istream& in);
@@ -53,6 +54,7 @@ private:
   std::unordered_set<std::uint64_t> traced_read_offsets_;
   std::unordered_set<std::uint64_t> traced_write_offsets_;
   std::function<void(std::uint8_t)> tx_observer_;
+  std::function<void()> state_change_observer_;
 };
 
 } // namespace aarchvm

@@ -422,6 +422,7 @@ The current implementation supports these commonly used mechanisms:
 - `AARCHVM_PS2_RX_SCRIPT`: inject bytes into the PS/2 keyboard device at selected step counts for KMI / keyboard testing.
 - `AARCHVM_BUS_FASTPATH=1`: enable the bus fast path.
 - `AARCHVM_TIMER_SCALE=<n>`: scale virtual timer progression to accelerate Linux boot and regression runs.
+- `AARCHVM_SCHED_MODE=event|legacy`: choose the SoC outer scheduler. `event` is the default and is the semantically correct mode for the current SMP/Linux timer paths. `legacy` keeps the older fixed-step fallback and is useful for debugging or A/B measurement, but it can delay near-term SMP timer delivery and should not be treated as behavior-equivalent.
 - For the current instruction-count time model, 2-core Linux runs that keep the shell on `console=ttyAMA0,115200` should use `AARCHVM_TIMER_SCALE=1`. A higher value such as `10` is still fine for the `tty1` / framebuffer GUI path, but it can push SMP serial boot far enough in guest virtual time to trip Linux RCU / `stop_machine` watchdog paths before the shell is reached.
 - `AARCHVM_STDIN_RX_GAP=<steps>`: pace bytes from non-interactive stdin before they reach UART, useful for scripted serial sessions and bulk command injection.
 - `AARCHVM_DEBUG_SLOW=1`: force a conservative debug execution mode. This disables instruction predecode, disables the SoC bus fast path, and disables the CPU RAM direct read/write fast path so regressions can be checked without those host-side shortcuts.

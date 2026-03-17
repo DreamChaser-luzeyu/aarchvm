@@ -166,6 +166,9 @@ void Pl050Kmi::update_irq_state() {
   if ((cr_ & kCrEn) == 0u) {
     rx_fifo_.clear();
   }
+  if (state_change_observer_) {
+    state_change_observer_();
+  }
 }
 
 void Pl050Kmi::queue_response(std::uint8_t byte) {

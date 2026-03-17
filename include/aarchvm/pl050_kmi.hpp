@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <iosfwd>
 #include <vector>
 
@@ -17,6 +18,7 @@ public:
   void inject_rx(std::uint8_t byte);
   [[nodiscard]] bool irq_pending() const;
   void reset();
+  void set_state_change_observer(std::function<void()> observer) { state_change_observer_ = std::move(observer); }
 
   [[nodiscard]] bool save_state(std::ostream& out) const;
   [[nodiscard]] bool load_state(std::istream& in);
@@ -42,6 +44,7 @@ private:
   std::uint8_t scan_set_ = 2;
   bool scanning_enabled_ = true;
   PendingCommand pending_command_ = PendingCommand::None;
+  std::function<void()> state_change_observer_;
 };
 
 } // namespace aarchvm

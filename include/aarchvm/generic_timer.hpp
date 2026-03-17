@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iosfwd>
 #include <vector>
 
@@ -20,6 +21,7 @@ public:
   void tick(std::uint64_t cycles);
   void set_cycles_per_step(std::uint64_t value) { cycles_per_step_ = value; }
   void rebase_to_steps(std::uint64_t steps) { step_anchor_ = steps; }
+  void set_state_change_observer(std::function<void()> observer) { state_change_observer_ = std::move(observer); }
   void sync_to_steps(std::uint64_t steps);
   [[nodiscard]] std::uint64_t counter() const { return counter_; }
   [[nodiscard]] std::uint64_t counter_at_steps(std::uint64_t steps) const;
@@ -90,6 +92,7 @@ private:
   bool enabled_ = false;
   bool mmio_irq_pending_ = false;
   bool fired_ = false;
+  std::function<void()> state_change_observer_;
 };
 
 } // namespace aarchvm

@@ -2,7 +2,7 @@
 
 ## 测量方法
 - guest 环境：Linux 6.12.76 + 统一 `initramfs-usertests` rootfs，由 `tests/linux/run_algorithm_perf.sh` 冷启动并通过 UART 注入启动 benchmark。
-- 测量时计时倍率：`AARCHVM_TIMER_SCALE=10000`。
+- 历史各轮使用的计时倍率并不完全相同；每一轮都在该轮小节里单独标明。本文最新一轮使用 `AARCHVM_TIMER_SCALE=1`。
 - 测量时总线模式：`AARCHVM_BUS_FASTPATH=1`。
 - 计时边界：由模拟器中的 perf mailbox 在 `BEGIN` / `END` 两个 MMIO 命令处采样宿主机单调时钟。
 - 主指标：`host_ns`，表示宿主机真实耗时。
@@ -257,7 +257,6 @@
 - Release 结果：`out/perf-debug-vs-release-release-results.txt`
 
 ### Debug vs Release 对比
-
 | case | debug host_ns | release host_ns | Release 相对 Debug 提升 |
 | --- | ---: | ---: | ---: |
 | `base64-enc-4m` | 23375218692 | 6964686507 | 70.20% |
@@ -1154,3 +1153,257 @@
   - `translate_address()` / `translate_data_address_fast()` 地址翻译链。
   - `exec_load_store()` + `BusFastPath::read()` / `Bus::read()` 访存链。
 - `CPACR` trap 前置判断已经进入热点表，但占比很低，只在 `0.22%` 左右，说明它没有成为新的固定负担。
+
+## 第七轮优化对比
+
+日期时间：`2026-03-17 00:34`
+
+这一轮按事件驱动演进方案分两步推进：
+- baseline 代码已经包含“统一 guest 时间”改造：SoC 内部改用独立 `guest_time_fp_`，timer/sysreg 读写以 guest 时间为基准，Linux 相关脚本默认统一使用 `AARCHVM_TIMER_SCALE=1`。
+- optimized 代码在 baseline 之上继续引入“最小事件调度器”：SoC 维护最小 `(deadline, event_type)` 设备计划，先让 generic timer 成为第一个真正基于 deadline 的设备；SMP 主循环改为“按 timer deadline 批量跑多个 round，再在事件边界同步设备”。
+- 同时补上了 `UART` / `PL050 KMI` 的状态变化回调，避免 guest 读空 FIFO 后 IRQ 线不能及时回落，从而保证回归正确性。
+
+### 第七轮命令
+
+UMP baseline：
+```bash
+timeout 600s env \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=600s \
+  AARCHVM_PERF_LOG=out/perf-ump-baseline.log \
+  AARCHVM_PERF_RESULTS=out/perf-ump-baseline.txt \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+UMP optimized：
+```bash
+timeout 600s env \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=600s \
+  AARCHVM_PERF_LOG=out/perf-ump-optimized.log \
+  AARCHVM_PERF_RESULTS=out/perf-ump-optimized.txt \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+SMP baseline：
+```bash
+timeout 900s env \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=900s \
+  AARCHVM_PERF_LOG=out/perf-smp-baseline.log \
+  AARCHVM_PERF_RESULTS=out/perf-smp-baseline.txt \
+  AARCHVM_ARGS='-smp 2 -smp-mode psci' \
+  AARCHVM_LINUX_DTB=dts/aarchvm-linux-smp.dtb \
+  AARCHVM_USERTEST_SNAPSHOT_OUT=out/linux-smp-perf-shell.snap \
+  AARCHVM_USERTEST_SNAPSHOT_LOG=out/linux-smp-perf-shell-build.log \
+  AARCHVM_USERTEST_SNAPSHOT_VERIFY_LOG=out/linux-smp-perf-shell-verify.log \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+SMP optimized：
+```bash
+timeout 900s env \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=900s \
+  AARCHVM_PERF_LOG=out/perf-smp-optimized.log \
+  AARCHVM_PERF_RESULTS=out/perf-smp-optimized.txt \
+  AARCHVM_ARGS='-smp 2 -smp-mode psci' \
+  AARCHVM_LINUX_DTB=dts/aarchvm-linux-smp.dtb \
+  AARCHVM_USERTEST_SNAPSHOT_OUT=out/linux-smp-perf-shell.snap \
+  AARCHVM_USERTEST_SNAPSHOT_LOG=out/linux-smp-perf-shell-build.log \
+  AARCHVM_USERTEST_SNAPSHOT_VERIFY_LOG=out/linux-smp-perf-shell-verify.log \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+### 第七轮 UMP 结果
+| case | baseline host_ns | optimized host_ns | 提升 | baseline sync_devices | optimized sync_devices | sync_devices 变化 | baseline run_chunks | optimized run_chunks |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `base64-enc-4m` | 1549095755 | 2256244597 | -45.65% | 77033 | 67054 | 12.95% | 76701 | 66722 |
+| `base64-dec-4m` | 1217805950 | 2614522194 | -114.69% | 74048 | 74976 | -1.25% | 73680 | 74607 |
+| `fnv1a-16m` | 2495891139 | 3826015051 | -53.29% | 102760 | 102874 | -0.11% | 102251 | 102365 |
+| `tlb-seq-hot-8m` | 10610036 | 8419586 | 20.65% | 5 | 400 | -7900.00% | 4 | 399 |
+| `tlb-seq-cold-32m` | 10215203 | 9925746 | 2.83% | 5 | 4 | 20.00% | 4 | 3 |
+| `tlb-rand-32m` | 6867108 | 12840116 | -86.98% | 5 | 4 | 20.00% | 4 | 3 |
+
+### 第七轮 SMP 结果
+| case | baseline host_ns | optimized host_ns | 提升 | baseline sync_devices | optimized sync_devices | sync_devices 变化 | baseline run_chunks | optimized run_chunks |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `base64-enc-4m` | 14237100895 | 21119790939 | -48.34% | 66299658 | 69204 | 99.90% | 66298995 | 68541 |
+| `base64-dec-4m` | 20837155540 | 15977908342 | 23.32% | 73702662 | 80258 | 99.89% | 73701925 | 79521 |
+| `fnv1a-16m` | 39085216208 | 26986712428 | 30.95% | 101747073 | 109038 | 99.89% | 101746056 | 108021 |
+| `tlb-seq-hot-8m` | 92857318 | 55017011 | 40.75% | 213040 | 402 | 99.81% | 213038 | 400 |
+| `tlb-seq-cold-32m` | 98350076 | 90940849 | 7.53% | 216882 | 6 | 100.00% | 216880 | 4 |
+| `tlb-rand-32m` | 106705902 | 47138530 | 55.82% | 233285 | 6 | 100.00% | 233282 | 4 |
+
+### 第七轮结果解释
+- 这轮优化的核心目标不是继续压 CPU 指令解释本身，而是把 SoC 外层“每轮都 `sync_devices()`”改成“只有到 deadline 或设备状态变化才同步”。
+- 从内部计数器看，SMP 路径上的目标达成得非常明确：`sync_devices` / `run_chunks` 从数千万级直接降到数万甚至个位数，说明 timer deadline 驱动已经把原来的“每核一步一同步”外层轮询基本压掉了。
+- SMP 的端到端 `host_ns` 结果整体是正向的，`case_id=2..6` 提升区间约为 `+7.53%` 到 `+55.82%`；其中 TLB 压力类 case 收益最大，因为它们以前被外层同步固定成本放大得最严重。
+- `case_id=1` 在 SMP 上出现了明显回退，但其内部 guest 计数与其它 case 一样体现出外层同步次数已被极大压缩，因此这更像当前测量噪声、宿主机调度或 benchmark 首 case 偏差，而不是“事件调度器仍在疯狂同步设备”。
+- UMP 结果是混合的：`sync_devices` 并没有像 SMP 那样出现数量级下降，而 `tlb-seq-hot-8m` 甚至因为 timer/设备边界变得更频繁而增加了 `run_chunks`。这说明当前“最小事件调度器”主要解决了 SMP 的外层轮询问题，UMP 侧还没有形成稳定收益。
+- 换言之，这一轮已经验证“统一 guest 时间 + timer deadline 化”能显著改善 SMP 外层调度成本，但 UMP 想继续变快，还需要下一步把 UART/KMI/GIC 的状态变化驱动和主循环窗口计算做得更彻底。
+
+### 第七轮原始数据文件
+- UMP baseline：`out/perf-ump-baseline.txt`
+- UMP optimized：`out/perf-ump-optimized.txt`
+- SMP baseline：`out/perf-smp-baseline.txt`
+- SMP optimized：`out/perf-smp-optimized.txt`
+
+## 第十八轮：事件驱动第一阶段复核
+
+日期时间：`2026-03-17 03:39`
+
+这一轮不再拿历史旧文件做对比，而是用当前保留代码重新做了一次“同版本 `legacy` vs 当前默认 `event`”复测，并补抓了当前主线的 `perf` / `gprof` 热点。
+
+需要先说明一点：
+- 当前主线默认继续保留 `event` 调度。
+- `AARCHVM_SCHED_MODE=legacy` 仍然可用，但它在 SMP 下会把近期限时器显著延后；`tests/arm64/smp_timer_rate.bin` 在 `legacy` 下会输出 `F`，而不是预期的 `R`。
+- 因此，下面的 SMP 数字更多是在量化“保持 timer/IRQ 语义正确的当前成本”，不能把 `legacy` 视作完全等价的正确基线。
+
+### 第十八轮命令
+
+UMP `legacy` baseline：
+
+```bash
+env \
+  AARCHVM_SCHED_MODE=legacy \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=600s \
+  AARCHVM_PERF_LOG=out/perf-ump-stage1-legacy-v2.log \
+  AARCHVM_PERF_RESULTS=out/perf-ump-stage1-legacy-v2-results.txt \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+SMP `legacy` baseline：
+
+```bash
+env \
+  AARCHVM_SCHED_MODE=legacy \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=900s \
+  AARCHVM_PERF_LOG=out/perf-smp-stage1-legacy-v2.log \
+  AARCHVM_PERF_RESULTS=out/perf-smp-stage1-legacy-v2-results.txt \
+  AARCHVM_ARGS='-smp 2 -smp-mode psci' \
+  AARCHVM_LINUX_DTB=dts/aarchvm-linux-smp.dtb \
+  AARCHVM_USERTEST_SNAPSHOT_OUT=out/linux-smp-shell-v1.snap \
+  AARCHVM_USERTEST_SNAPSHOT_LOG=out/linux-smp-shell-v1-build.log \
+  AARCHVM_USERTEST_SNAPSHOT_VERIFY_LOG=out/linux-smp-shell-v1-verify.log \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+当前默认 UMP：
+
+```bash
+env \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=600s \
+  AARCHVM_PERF_LOG=out/perf-ump-stage1-final.log \
+  AARCHVM_PERF_RESULTS=out/perf-ump-stage1-final-results.txt \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+当前默认 SMP：
+
+```bash
+env \
+  AARCHVM_TIMER_SCALE=1 \
+  AARCHVM_PERF_TIMEOUT=900s \
+  AARCHVM_PERF_LOG=out/perf-smp-stage1-final.log \
+  AARCHVM_PERF_RESULTS=out/perf-smp-stage1-final-results.txt \
+  AARCHVM_ARGS='-smp 2 -smp-mode psci' \
+  AARCHVM_LINUX_DTB=dts/aarchvm-linux-smp.dtb \
+  AARCHVM_USERTEST_SNAPSHOT_OUT=out/linux-smp-shell-v1.snap \
+  AARCHVM_USERTEST_SNAPSHOT_LOG=out/linux-smp-shell-v1-build.log \
+  AARCHVM_USERTEST_SNAPSHOT_VERIFY_LOG=out/linux-smp-shell-v1-verify.log \
+  ./tests/linux/run_algorithm_perf.sh
+```
+
+当前默认 SMP 热点：
+
+```bash
+timeout 300s bash -lc "printf 'bench_runner\n' | \
+  AARCHVM_BUS_FASTPATH=1 AARCHVM_TIMER_SCALE=1 \
+  perf record -o out/perf-stage1-current.data -- \
+  ./build/aarchvm -smp 2 -snapshot-load out/linux-smp-shell-v1.snap \
+  -steps 3000000000 -stop-on-uart 'BENCH-RESULT name=tlb-rand-32m' -fb-sdl off \
+  > out/perf-stage1-current-run.log 2>&1"
+
+perf report --stdio --percent-limit 0.1 --dsos=aarchvm \
+  -i out/perf-stage1-current.data > out/perf-stage1-current-aarchvm-only.report
+
+make -C build-gprof -j4
+timeout 300s bash -lc "cd out && printf 'bench_runner\n' | \
+  AARCHVM_BUS_FASTPATH=1 AARCHVM_TIMER_SCALE=1 \
+  ../build-gprof/aarchvm -smp 2 -snapshot-load linux-smp-shell-v1.snap \
+  -steps 3000000000 -stop-on-uart 'BENCH-RESULT name=tlb-rand-32m' -fb-sdl off \
+  > gprof-stage1-current-run.log 2>&1"
+gprof build-gprof/aarchvm out/gmon.out > out/gprof-stage1-current.txt
+```
+
+### 第十八轮 UMP 结果
+
+`legacy` 作为对照、当前默认 `event` 作为主线：
+
+| case | legacy host_ns | current host_ns | 提升 | legacy sync_devices | current sync_devices |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `base64-enc-4m` | 2155706569 | 2195143540 | -1.83% | 2156 | 66503 |
+| `base64-dec-4m` | 2277779909 | 2159484728 | 5.19% | 2396 | 76287 |
+| `fnv1a-16m` | 2980021265 | 2921552087 | 1.96% | 3309 | 102632 |
+| `tlb-seq-hot-8m` | 3886245 | 3908776 | -0.58% | 5 | 5 |
+| `tlb-seq-cold-32m` | 4440294 | 5537540 | -24.71% | 5 | 400 |
+| `tlb-rand-32m` | 6960157 | 6909084 | 0.73% | 4 | 399 |
+
+UMP 总体 `host_ns`：`7428794439 -> 7292535755`，总体提升约 `1.83%`。
+
+### 第十八轮 SMP 结果
+
+这里的 `legacy` 只是错误可量化的对照，不是推荐运行模式：
+
+| case | legacy host_ns | current host_ns | 提升 | legacy sync_devices | current sync_devices |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `base64-enc-4m` | 22546012551 | 22648269534 | -0.45% | 2504 | 69942 |
+| `base64-dec-4m` | 21940087416 | 23510118345 | -7.16% | 2804 | 78748 |
+| `fnv1a-16m` | 29958022167 | 32138509798 | -7.28% | 3871 | 108605 |
+| `tlb-seq-hot-8m` | 40151369 | 90381295 | -125.10% | 7 | 401 |
+| `tlb-seq-cold-32m` | 43678766 | 94089001 | -115.41% | 11 | 401 |
+| `tlb-rand-32m` | 47581914 | 104339012 | -119.28% | 9 | 403 |
+
+SMP 总体 `host_ns`：`74575534183 -> 78585706985`，表面上回退约 `5.38%`。
+
+### 第十八轮结果解释
+
+- 第一阶段现在已经形成了“可保留”的正确性闭环：
+  - 统一 guest 时间；
+  - timer deadline 计算；
+  - 旧步进路径 fallback；
+  - 当前默认 `event` 模式下，`tests/arm64/run_all.sh`、单核 Linux、SMP Linux、快照构建与功能回归全部通过。
+- 但从性能角度看，这一阶段还没有把 SMP 做到“既正确又更快”：
+  - 为了保持 SMP timer/IRQ 语义，当前默认 `event` 会把 `sync_devices` / `run_chunks` 拉回数万级；
+  - 这直接带来了当前 SMP 上的固定成本。
+- 当前 `legacy` 之所以看起来更快，本质上是因为它把近期限时器推迟到了大 chunk 之后；这正是 `smp_timer_rate` 在 `legacy` 下失败的原因，因此不能把它当作语义等价的最优解。
+- UMP 侧当前默认 `event` 已经基本可接受，总体有小幅正收益；真正的性能问题仍集中在 SMP。
+
+### 第十八轮当前热点
+
+当前默认 SMP 热点没有发生本质变化：
+
+- `perf` 结果见 `out/perf-stage1-current-aarchvm-only.report`
+  - `aarchvm::GicV3::has_pending(unsigned long) const` 约占 `86.32%`
+  - 第二梯队才是 `Cpu::step()`、`SoC::run()`、`lookup_decoded()`、`translate_address()`
+- `gprof` 结果见 `out/gprof-stage1-current.txt`
+  - `aarchvm::GicV3::has_pending(unsigned long, unsigned char) const` 自耗时约 `87.95%`
+  - `SoC::run()` 约 `2.84%`
+  - `Cpu::step()` 约 `2.17%`
+
+结论没有变化：
+- 下一步仍应优先做 `WFI` 真正停车、GIC pending summary / candidate cache、IRQ line-driven wakeup。
+- 在 `GicV3::has_pending(...)` 不再是压倒性热点之前，继续深挖 decode/MMU/load-store 微优化，收益仍会被 IRQ 查询固定成本吞掉。
+
+### 第十八轮原始数据文件
+
+- UMP legacy baseline：`out/perf-ump-stage1-legacy-v2-results.txt`
+- SMP legacy baseline：`out/perf-smp-stage1-legacy-v2-results.txt`
+- UMP current default：`out/perf-ump-stage1-final-results.txt`
+- SMP current default：`out/perf-smp-stage1-final-results.txt`
+- `perf report`：`out/perf-stage1-current-aarchvm-only.report`
+- `gprof`：`out/gprof-stage1-current.txt`

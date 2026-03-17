@@ -79,6 +79,9 @@ void GenericTimer::write(std::uint64_t offset, std::uint64_t value, std::size_t 
     compare_ = value;
     fired_ = false;
     update_irq_state();
+    if (state_change_observer_) {
+      state_change_observer_();
+    }
   } else if (offset == 0x10) {
     enabled_ = (value & 1u) != 0;
     if (!enabled_) {
@@ -88,6 +91,9 @@ void GenericTimer::write(std::uint64_t offset, std::uint64_t value, std::size_t 
       mmio_irq_pending_ = false;
     }
     update_irq_state();
+    if (state_change_observer_) {
+      state_change_observer_();
+    }
   }
 }
 
@@ -220,6 +226,9 @@ void GenericTimer::write_cntv_ctl_el0(std::size_t cpu_index, std::uint64_t steps
   write_ctl(cntv, value);
   trace_timer("TIMER-V-CTL", cpu_index, counter_, value, cntv.cval);
   update_irq_state();
+  if (state_change_observer_) {
+    state_change_observer_();
+  }
 }
 
 std::uint64_t GenericTimer::read_cntv_cval_el0(std::size_t cpu_index) const {
@@ -232,6 +241,9 @@ void GenericTimer::write_cntv_cval_el0(std::size_t cpu_index, std::uint64_t step
   write_cval(cntv, value);
   trace_timer("TIMER-V-CVAL", cpu_index, counter_, value, 0);
   update_irq_state();
+  if (state_change_observer_) {
+    state_change_observer_();
+  }
 }
 
 std::uint64_t GenericTimer::read_cntv_tval_el0(std::size_t cpu_index, std::uint64_t steps) const {
@@ -244,6 +256,9 @@ void GenericTimer::write_cntv_tval_el0(std::size_t cpu_index, std::uint64_t step
   write_tval(cntv, counter_, value);
   trace_timer("TIMER-V-TVAL", cpu_index, counter_, value, cntv.cval);
   update_irq_state();
+  if (state_change_observer_) {
+    state_change_observer_();
+  }
 }
 
 std::uint64_t GenericTimer::read_cntp_ctl_el0(std::size_t cpu_index, std::uint64_t steps) const {
@@ -256,6 +271,9 @@ void GenericTimer::write_cntp_ctl_el0(std::size_t cpu_index, std::uint64_t steps
   write_ctl(cntp, value);
   trace_timer("TIMER-P-CTL", cpu_index, counter_, value, cntp.cval);
   update_irq_state();
+  if (state_change_observer_) {
+    state_change_observer_();
+  }
 }
 
 std::uint64_t GenericTimer::read_cntp_cval_el0(std::size_t cpu_index) const {
@@ -268,6 +286,9 @@ void GenericTimer::write_cntp_cval_el0(std::size_t cpu_index, std::uint64_t step
   write_cval(cntp, value);
   trace_timer("TIMER-P-CVAL", cpu_index, counter_, value, 0);
   update_irq_state();
+  if (state_change_observer_) {
+    state_change_observer_();
+  }
 }
 
 std::uint64_t GenericTimer::read_cntp_tval_el0(std::size_t cpu_index, std::uint64_t steps) const {
@@ -280,6 +301,9 @@ void GenericTimer::write_cntp_tval_el0(std::size_t cpu_index, std::uint64_t step
   write_tval(cntp, counter_, value);
   trace_timer("TIMER-P-TVAL", cpu_index, counter_, value, cntp.cval);
   update_irq_state();
+  if (state_change_observer_) {
+    state_change_observer_();
+  }
 }
 
 void GenericTimer::update_irq_state() {

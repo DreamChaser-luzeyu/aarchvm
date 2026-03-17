@@ -95,6 +95,13 @@ public:
   [[nodiscard]] bool load_snapshot(const std::string& path);
 
 private:
+  enum class SchedulerMode : std::uint8_t {
+    Legacy,
+    EventDriven,
+  };
+
+  static constexpr std::uint32_t kGuestTimeFracBits = 16;
+  static constexpr std::uint64_t kGuestTimeFracOne = 1ull << kGuestTimeFracBits;
   static constexpr std::uint64_t kBootRamBase = 0x00000000;
   static constexpr std::uint64_t kBootRamSize = 128ull * 1024ull * 1024ull;
   static constexpr std::uint64_t kFramebufferBase = 0x10000000;
@@ -128,6 +135,19 @@ private:
   void perf_flush_tlb();
   [[nodiscard]] PerfCounters collect_perf_counters() const;
   void reset_perf_measurement_state();
+  [[nodiscard]] std::uint64_t guest_time_ticks() const;
+  void advance_guest_time(std::uint64_t executed_instructions, std::size_t active_cpu_count);
+  void invalidate_device_schedule();
+  [[nodiscard]] std::size_t active_cpu_count() const;
+  struct ScheduledDeviceEvent {
+    enum class Type : std::uint8_t {
+      TimerDeadline,
+    };
+
+    Type type = Type::TimerDeadline;
+    std::uint64_t guest_tick = 0;
+  };
+  [[nodiscard]] std::optional<ScheduledDeviceEvent> next_device_event(std::uint64_t guest_tick) const;
   void rebuild_fast_path();
   void broadcast_event(Cpu& source);
   void on_cpu_memory_write(Cpu& source, std::uint64_t pa, std::size_t size);
@@ -176,16 +196,20 @@ private:
   std::vector<std::unique_ptr<Cpu>> cpus_;
   std::vector<bool> cpu_powered_on_;
   SecondaryBootMode secondary_boot_mode_ = SecondaryBootMode::AllStart;
+  SchedulerMode scheduler_mode_ = SchedulerMode::EventDriven;
   std::uint64_t timer_tick_scale_ = 1;
   std::uint64_t global_steps_ = 0;
-  std::uint64_t timer_steps_ = 0;
+  std::uint64_t guest_time_fp_ = 0;
   bool stop_requested_ = false;
   PerfSession perf_session_{};
   mutable LocalPerfCounters local_perf_counters_{};
   std::string stop_on_uart_pattern_;
   std::string stop_on_uart_window_;
   bool device_sync_valid_ = false;
-  std::uint64_t device_sync_steps_ = 0;
+  std::uint64_t device_sync_guest_ticks_ = 0;
+  bool device_schedule_valid_ = false;
+  bool device_schedule_dirty_ = true;
+  std::optional<ScheduledDeviceEvent> next_device_event_;
   bool last_timer_virt_level_ = false;
   bool last_timer_phys_level_ = false;
   bool last_uart_level_ = false;
