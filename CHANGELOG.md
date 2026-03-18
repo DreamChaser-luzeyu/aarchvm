@@ -1,3 +1,77 @@
+# 修改日志 2026-03-17 23:03
+
+## 本轮修改
+
+- 调整 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md) 的文档结构：
+  - 将新补充的“下一步性能优化方案”和“迈向 JIT 的后续改进方案”从“事件驱动化演进方案”下拆出；
+  - 为其新增独立的顶级标题“性能优化与 JIT 路线”。
+- 本轮只调整规划文档结构，不改动方案内容本身。
+
+## 本轮测试
+
+- 未运行单元测试或回归测试。
+- 本轮仅为 TODO / CHANGELOG 文档结构调整。
+
+## 当前结论
+
+- `TODO.md` 现在的层级更清晰：
+  - “事件驱动化演进方案”继续聚焦调度/guest 时间/设备事件；
+  - “性能优化与 JIT 路线”单独承载后续性能与执行引擎演进规划。
+
+# 修改日志 2026-03-17 21:15
+
+## 本轮修改
+
+- 重新阅读当前 `Cpu` / `SoC` / `GIC` / decode cache / MMU 热路径代码，并将基于现状实现的下一阶段性能优化方案补充进 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)。
+- 在 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md) 中新增了两部分内容：
+  - “基于当前代码形态的下一步性能优化方案”；
+  - “迈向 JIT 的后续改进方案”。
+- 新增内容聚焦于当前真实代码结构中的热点与演进约束，例如：
+  - `WFI/WFE` 等待态停车与 line-driven 唤醒；
+  - `SoC::run()` 的 dispatch/deadline 增量化；
+  - `translate_data_address_fast()` 的 TLB hit 热路径压缩；
+  - `lookup_decoded()` 的 hit/miss 路径拆分；
+  - 从 block cache / block executor 逐步迈向 selective native JIT 的路线。
+
+## 本轮测试
+
+- 未运行单元测试或回归测试。
+- 本轮仅为代码阅读后的 TODO / 规划文档更新。
+
+## 当前结论
+
+- 当前代码下一步最值得做的性能优化，不是继续盲目扩大 predecode 覆盖率，而是先继续压：
+  - 等待态 CPU 的 IRQ 轮询；
+  - `SoC::run()` 的 dispatch/deadline 固定成本；
+  - `translate_data_address_fast()` / `lookup_decoded()` / 跨页访存三条热链。
+- JIT 的更稳妥路线不是直接上原生代码生成，而是先完成：
+  - block cache
+  - block executor
+  - 统一失效/守卫模型
+  - 再进入 selective native JIT。
+
+# 修改日志 2026-03-17 21:11
+
+## 本轮修改
+
+- 基于 [doc/perf-baseline-vs-optimized.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/perf-baseline-vs-optimized.md) 中已有性能数据，重新整理性能趋势图输出：
+  - 不再分别绘制“前项/后项”两组对比线；
+  - 改为仅保留每轮最终结果对应的单条趋势线；
+  - 生成 [doc/perf-ump-trend.svg](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/perf-ump-trend.svg) 与 [doc/perf-smp-trend.svg](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/perf-smp-trend.svg) 两张最终图。
+- UMP 趋势图从文档中最早有数据的第一轮开始绘制；SMP 趋势图则从文档中第一次出现 SMP 数据的轮次开始绘制。
+- 保留图中 `7P` / `7E` 标记，用于区分文档中两个不同含义的“第七轮”。
+
+## 本轮测试
+
+- 未运行代码或回归测试。
+- 只校对了生成后的 SVG 与数据来源的一致性。
+
+## 当前结论
+
+- 当前 `doc/` 下已经有两张最终版趋势图，可直接引用：
+  - [doc/perf-ump-trend.svg](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/perf-ump-trend.svg)
+  - [doc/perf-smp-trend.svg](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/perf-smp-trend.svg)
+
 # 修改日志 2026-03-17 20:20
 
 ## 本轮修改

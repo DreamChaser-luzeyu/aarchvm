@@ -294,6 +294,213 @@
     - SMP `gprof`
   - 只有在 `has_pending()` 不再是压倒性热点后，才继续做 decode/MMU/load-store 的细化优化。
 
+## 性能优化与 JIT 路线
+
+### 1. 基于当前代码形态的下一步性能优化方案
+
+目标：
+- 基于当前 `Cpu::step()` / `lookup_decoded()` / `translate_data_address_fast()` / `SoC::run()` 的实现形态，继续压缩真正还在热路径里的固定成本。
+- 避免重复尝试已经证伪的方向，例如“单条取指侧 RAM 页缓存”这类局部指标变好、但端到端明显退化的方案。
+
+现状判断：
+- 从代码上看，当前热点已经不是单一的一层，而是三段串联：
+  - `SoC::run()` 里的 runnable/waiting 判定、guest deadline 判定、设备同步边界；
+  - `Cpu::step()` 中的取指后主分发与 `lookup_decoded()` 命中路径；
+  - `translate_data_address_fast()` / `mmu_read_value()` / `mmu_write_value()` 的访存热链。
+- 其中还有几处很具体的结构性信号：
+  - `ready_to_run()` / `step()` 的等待态路径仍会直接调用 `gic_.has_pending()`；
+  - `translate_data_address_fast()` 在 TLB hit 后仍会重建一个临时 `TranslationResult` 再走 `access_permitted()`；
+  - `mmu_read_value()` / `mmu_write_value()` 的跨页路径仍是逐字节循环；
+  - `lookup_decoded()` 现在已经是 direct-mapped + raw compare，但“命中探测”和“miss 填充”仍混在一个入口里。
+
+建议顺序：
+
+- [ ] P0: 先把等待态 CPU 从 `gic_.has_pending()` 主动轮询里摘掉
+  - 目标：`waiting_for_interrupt_` / `waiting_for_event_` CPU 不再在 `ready_to_run()` / `step()` 里高频主动问 GIC。
+  - 方案：
+    - 让 SoC 维护显式的 `runnable / waiting_irq / waiting_event / halted / powered_off` 位图或计数摘要；
+    - CPU 状态改变时增量更新，而不是每轮重新扫再问 GIC；
+    - `WFI` CPU 仅在明确的 IRQ 可达事件、`SEV`、`PSCI CPU_ON`、外部注入等场景下回到 runnable 集合。
+  - 理由：这是当前代码里最容易继续吞掉 SMP 性能的路径。
+
+- [ ] P1: 让 `SoC::run()` 的 dispatch state 与 device deadline 真正增量化
+  - 目标：减少 `inspect_cpu_dispatch_state()`、`deadline_driven_window_needed()`、`next_device_event()` 这类在外层循环里反复全量计算的成本。
+  - 方案：
+    - 为 CPU 电源态 / halt / wait / runnable 维护 dirty bit 与摘要；
+    - 为设备调度维护真正的 cached next-deadline 结构，而不是频繁把 `device_schedule_valid_` 整体打脏后重算；
+    - 将 `sync_devices()` 继续收缩到“状态变化”和“deadline 到期”两类触发。
+  - 预期收益：把事件驱动从“结构已成形”推进到“外层主循环固定成本真正下降”。
+
+- [ ] P2: 压缩 TLB hit 权限检查的固定成本
+  - 目标：让 `translate_data_address_fast()` / `translate_address()` 在 TLB hit 时更接近“几次整数判断 + 地址合成”。
+  - 方案：
+    - 在 `TlbEntry` 中预存更直接的权限/执行检查位，避免 hit 后临时拼装完整 `TranslationResult`；
+    - 将 `access_permitted()` 的 hit 热路径拆成一个更扁平的内联 helper；
+    - 保留 page walk / miss 路径上的完整 `TranslationResult`，只压缩 hit 路径。
+  - 设计约束：不要为了这一点破坏异常信息完整性；fault 细节仍由 miss/slow path 负责。
+
+- [ ] P3: 将 `lookup_decoded()` 拆成“纯命中探测”与“慢路径填充”
+  - 目标：命中时尽量只做 tag/raw/valid 检查，不顺带背负 miss 填充逻辑。
+  - 方案：
+    - 新增类似 `probe_decoded(va, pa, raw)` 的纯命中接口；
+    - miss 时再走单独的 `fill_decoded_slot(...)`；
+    - 继续保留当前 direct-mapped page 设计，不重新引入已经失败过的顺序流预测。
+  - 预期收益：减少 `Cpu::step()` 命中常见 case 时的分支和写流量。
+
+- [ ] P4: 为 `mmu_read_value()` / `mmu_write_value()` 增加 2-page split 快路径
+  - 目标：去掉当前跨页访存逐字节循环的高固定成本，尤其是 `8B` / `16B` 临界跨页情形。
+  - 方案：
+    - 保留单页 `1/2/4/8` RAM 快路径；
+    - 跨页时优先识别“只跨两个页”的常见情况，拆成两段而不是逐字节；
+    - 两段都落在 RAM 时，直接走两次 RAM fast read/write，而不是每字节 `bus_.read/write`。
+  - 设计约束：要保留当前精确 fault 行为，不能把 faulting byte 的可观察语义改坏。
+
+- [ ] P5: 在 P2/P3/P4 之后，再重新评估 predecode 覆盖面
+  - 目标：避免在 `lookup_decoded()` / MMU hit 路径还偏重时，继续盲目扩大 decoded 覆盖率。
+  - 推荐方向：
+    - 优先补更多“窄而专”的 load/store hot forms；
+    - 避免回到 generic decoded load/store 大分派；
+    - 不重新启用已经验证收益不稳的“顺序页流缓存”试验。
+
+- [ ] P6: 维持一套明确的“该做 / 暂不做”边界
+  - 当前不优先：
+    - 单条取指 RAM 旁路重试；
+    - 为单个 benchmark 特化的地址或指令快路径；
+    - 在事件驱动和等待态模型未稳定前提前上原生 JIT。
+  - 当前应优先：
+    - 等待态/IRQ 唤醒模型；
+    - dispatch/deadline 增量化；
+    - TLB hit / decoded hit / 跨页访存三条热链的固定成本压缩。
+
+### 2. 迈向 JIT 的后续改进方案
+
+目标：
+- 保留现有解释器与慢路径，沿“predecode -> block cache -> block executor -> selective native JIT”渐进推进。
+- 先让 JIT 的前置条件稳定，再引入真正的本地代码生成，避免收益被调度/同步失真吞掉。
+
+设计原则：
+- [ ] JIT 不是下一步立刻落地的第一优先级；它建立在事件驱动、等待态停车、decode 失效、TLB/代码一致性都足够稳定之后。
+- [ ] 必须同时保留：
+  - 原解释器慢路径；
+  - 当前单条 decoded 快路径；
+  - 新的 block/JIT 路径。
+- [ ] 自修改代码、`IC IVAU`、`TLBI`、`TTBR/TCR/SCTLR` 切换、snapshot restore、SMP 远端失效，必须先定义好统一失效机制，再谈 JIT。
+
+#### 2.1 第一阶段：先做块级缓存，而不是直接做原生 JIT
+
+目标：
+- 先把“每条指令都重复取指/译码/分发”的解释器结构，升级成“按 basic block 执行”的结构。
+
+任务：
+- [ ] 新增 `BlockCache`，按 `(pc, decode_context_epoch, code_page_generation...)` 建块。
+- [ ] block 边界先保守处理为：
+  - 直接/间接控制流；
+  - 异常返回；
+  - 系统/同步原语；
+  - 页边界或可疑自修改区域；
+  - 最大指令数上限。
+- [ ] block 内容第一版不生成原生代码，只保存：
+  - 原始指令序列；
+  - 已解码的紧凑 block op 数组；
+  - 出口类型与下一个 PC。
+- [ ] 运行时先走 `execute_block()`，只有 miss/不支持时才退回单条 `step()`。
+
+理由：
+- 这一步已经能把取指、单条 decode、主分发的固定成本显著搬出热循环；
+- 同时还能复用当前 predecode 与失效逻辑，是最稳妥的“JIT 前置闭环”。
+
+#### 2.2 第二阶段：把 block executor 做成更轻的中间层
+
+目标：
+- 在还不生成宿主机原生代码的前提下，尽量接近 JIT 的收益结构。
+
+任务：
+- [ ] 为 block op 设计比当前 `DecodedInsn` 更紧凑的内部表示，优先覆盖：
+  - 热整数族；
+  - 热 branch 族；
+  - 热 `LDR/STR [Xn,#imm]`；
+  - 常见系统指令边界。
+- [ ] 让 block 内部直接使用专门化 helper，而不是再回到 `exec_data_processing()` / `exec_load_store()` 大分发。
+- [ ] block 内增加显式 safepoint：
+  - 中断检查；
+  - 步数预算；
+  - stop-on-pattern；
+  - 设备 deadline 边界。
+- [ ] 第一版 block chaining 只做 fall-through / 直接分支，不急着做 trace。
+
+预期收益：
+- 即使不做 native JIT，也可以先验证“块级执行模型”本身的正确性和收益。
+
+#### 2.3 第三阶段：为 native JIT 准备统一失效与守卫模型
+
+目标：
+- 在真正生成宿主机代码前，把最容易出错的正确性基础先收束好。
+
+任务：
+- [ ] 引入更明确的代码页 generation/version 机制：
+  - `on_code_write()` 增量 bump；
+  - `IC IVAU` / `IC IALLU*` 触发相应失效；
+  - `TLBI` / `TTBR/TCR/SCTLR` 改写触发上下文级失效。
+- [ ] 为 block / JIT entry 定义统一 guard：
+  - 起始 `pc`
+  - `decode_context_epoch`
+  - 涉及代码页 generation
+  - 必要时的 ASID / MMU 配置摘要
+- [ ] snapshot restore 时清空 block/JIT cache，只保留基础解释器状态。
+- [ ] SMP 下保证远端可见的代码失效能传播到所有 CPU 的 block/JIT cache。
+
+设计判断：
+- 这一步做扎实后，后续无论是 block interpreter 还是 native JIT，都会安全得多。
+
+#### 2.4 第四阶段：selective native JIT
+
+目标：
+- 只对最热、最稳定、最容易守卫的子集生成宿主机原生代码，不追求一步覆盖全 ISA。
+
+任务：
+- [ ] 第一批 native JIT 仅覆盖：
+  - 常见整数 ALU；
+  - 常见 branch；
+  - 专门化 `LDR/STR [Xn,#imm]`；
+  - 不含异常 side effect 的简单 flag 计算。
+- [ ] 遇到以下情况立即 deopt / exit 回解释器：
+  - 未覆盖指令；
+  - 系统指令；
+  - 复杂异常路径；
+  - MMIO 或不稳定访存；
+  - block guard 失效。
+- [ ] 后端建议分两步：
+  - 先做一个非常小的 host-code emitter，只支持固定模板；
+  - 后续再考虑寄存器分配、更 aggressive 的块内优化。
+- [ ] 先不碰：
+  - FP/AdvSIMD native JIT；
+  - SVE/SME；
+  - 多线程并行执行。
+
+#### 2.5 第五阶段：验证、调试与上线策略
+
+目标：
+- 让 block/JIT 路径可验证、可回退，而不是形成新的黑盒。
+
+任务：
+- [ ] 新增执行模式开关，例如：
+  - `-exec interp`
+  - `-exec block`
+  - `-exec jit`
+- [ ] 增加“抽样对拍”模式：
+  - 同一 block 先跑 JIT，再周期性与解释器结果比对；
+  - 出现不一致时自动回退并打印 block 信息。
+- [ ] 新增专门测试：
+  - 动态生成代码 / 自修改代码；
+  - `IC IVAU` / `TLBI` / `FENCE.I` 类缓存失效；
+  - 信号/异常返回；
+  - SMP 下远端代码更新；
+  - snapshot restore 后 block/JIT cache 失效。
+- [ ] JIT 的默认上线顺序建议为：
+  - 先默认 `interp`
+  - 然后默认 `block`
+  - 最后 `jit` 保持显式 opt-in，直到回归与性能都稳定。
+
 ## RISC-V RV64IMAC 支持方案
 
 现状判断：

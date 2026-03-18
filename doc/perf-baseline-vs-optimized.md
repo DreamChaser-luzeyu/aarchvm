@@ -10,6 +10,11 @@
 - 本文中的 baseline：指加入 perf mailbox 与统计基础设施后、进行任何进一步性能优化之前的第一次测量结果。
 - 本文中的 optimized：指在同一套 benchmark 与快照条件下，加入 CPU 端 micro-TLB 热页缓存后的测量结果。
 
+![ump](./perf-ump-trend.svg)
+![smp](./perf-smp-trend.svg)
+
+
+
 ## Case 映射
 - `case_id=1`：`base64-enc-4m`
 - `case_id=2`：`base64-dec-4m`

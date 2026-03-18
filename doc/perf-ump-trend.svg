@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1320" height="680" viewBox="0 0 1320 680">
+<rect width="100%" height="100%" fill="#fbf7ef" />
+<text x="110" y="44" font-size="28" font-family="sans-serif" fill="#1a1a1a">UMP host_ns 趋势</text>
+<text x="110" y="67" font-size="14" font-family="sans-serif" fill="#555">仅绘制各轮后项数据; source: doc/perf-baseline-vs-optimized.md</text>
+<line x1="110" y1="570.00" x2="1280" y2="570.00" stroke="#ddd4c7" stroke-width="1" />
+<text x="98" y="575.00" text-anchor="end" font-size="13" font-family="monospace" fill="#5d5247">0</text>
+<line x1="110" y1="472.00" x2="1280" y2="472.00" stroke="#ddd4c7" stroke-width="1" />
+<text x="98" y="477.00" text-anchor="end" font-size="13" font-family="monospace" fill="#5d5247">14.41G</text>
+<line x1="110" y1="374.00" x2="1280" y2="374.00" stroke="#ddd4c7" stroke-width="1" />
+<text x="98" y="379.00" text-anchor="end" font-size="13" font-family="monospace" fill="#5d5247">28.82G</text>
+<line x1="110" y1="276.00" x2="1280" y2="276.00" stroke="#ddd4c7" stroke-width="1" />
+<text x="98" y="281.00" text-anchor="end" font-size="13" font-family="monospace" fill="#5d5247">43.23G</text>
+<line x1="110" y1="178.00" x2="1280" y2="178.00" stroke="#ddd4c7" stroke-width="1" />
+<text x="98" y="183.00" text-anchor="end" font-size="13" font-family="monospace" fill="#5d5247">57.64G</text>
+<line x1="110" y1="80.00" x2="1280" y2="80.00" stroke="#ddd4c7" stroke-width="1" />
+<text x="98" y="85.00" text-anchor="end" font-size="13" font-family="monospace" fill="#5d5247">72.05G</text>
+<line x1="110.00" y1="80" x2="110.00" y2="570" stroke="#efe7db" stroke-width="1" />
+<text x="110.00" y="640" text-anchor="middle" font-size="12" font-family="sans-serif" fill="#5d5247">1</text>
+<line x1="163.18" y1="80" x2="163.18" y2="570" stroke="#efe7db" stroke-width="1" />
+<text x="163.18" y="640" text-anchor="middle" font-size="12" font-family="sans-serif" fill="#5d5247">2</text>
+<line x1="216.36" y1="80" x2="216.36" y2="570" stroke="#efe7db" stroke-width="1" />
+<text x="216.36" y="640" text-anchor="middle" font-size="12" font-family="sans-serif" fill="#5d5247">3</text>
+<line x1="269.55" y1="80" x2="269.55" y2="570" stroke="#efe7db" stroke-width="1" />
+<text x="269.55" y="640" text-anchor="middle" font-size="12" font-family="sans-serif" fill="#5d5247">4</text>
+<line x1="322.73" y1="80" x2="322.73" y2="570" stroke="#efe7db" stroke-width="1" />
+<text x="322.73" y="640" text-anchor="middle" font-size="12" font-family="sans-serif" fill="#5d5247">5</text>
+<line x1="375.91" y1="80" x2="375.91" y2="570" stroke="#efe7db" stroke-width="1" />
+<text x="375.91" y="640" text-anchor="middle" font-size="12" font-family="sans-serif" fill="#5d5247">6</text>
+<line x1="429.09" y1="80" x2="429.09" y2="570" stroke="#efe7db" stroke-width="1" />
+<text x="429.09" y="640" text-anchor="middle" font-size="12" font-family="sans-serif" fill="#5d5247">7P</text>
+<line x1="482.27" y1="80" x2="482.27" y2="570" stroke="#efe7db" stroke-width="1" />
+<text x="482.27" y="640" text-anchor="middle" font-size="12" font-family="sans-serif" fill="#5d5247">8</text>
+<line x1="535.45" y1="80" x2="535.45" y2="570" stroke="#efe7db" stroke-width="1" />
+<text x="535.45" y="640" text-anchor="middle" font-size="12" font-family="sans-serif" fill="#5d5247">9</text>
+<line x1="588.64" y1="80" x2="588.64" y2="570" stroke="#efe7db" stroke-width="1" />
+<text x="588.64" y="640" text-anchor="middle" font-size="12" font-family="sans-serif" fill="#5d5247">10</text>
+<line x1="641.82" y1="80" x2="641.82" y2="570" stroke="#efe7db" stroke-width="1" />
+<text x="641.82" y="640" text-anchor="middle" font-size="12" font-family="sans-serif" fill="#5d5247">11</text>
+<line x1="695.00" y1="80" x2="695.00" y2="570" stroke="#efe7db" stroke-width="1" />
+<text x="695.00" y="640" text-anchor="middle" font-size="12" font-family="sans-serif" fill="#5d5247">12</text>
+<line x1="748.18" y1="80" x2="748.18" y2="570" stroke="#efe7db" stroke-width="1" />
+<text x="748.18" y="640" text-anchor="middle" font-size="12" font-family="sans-serif" fill="#5d5247">13</text>
+<line x1="801.36" y1="80" x2="801.36" y2="570" stroke="#efe7db" stroke-width="1" />
+<text x="801.36" y="640" text-anchor="middle" font-size="12" font-family="sans-serif" fill="#5d5247">14</text>
+<line x1="854.55" y1="80" x2="854.55" y2="570" stroke="#efe7db" stroke-width="1" />
+<text x="854.55" y="640" text-anchor="middle" font-size="12" font-family="sans-serif" fill="#5d5247">15</text>
+<line x1="907.73" y1="80" x2="907.73" y2="570" stroke="#efe7db" stroke-width="1" />
+<text x="907.73" y="640" text-anchor="middle" font-size="12" font-family="sans-serif" fill="#5d5247">16</text>
+<line x1="960.91" y1="80" x2="960.91" y2="570" stroke="#efe7db" stroke-width="1" />
+<text x="960.91" y="640" text-anchor="middle" font-size="12" font-family="sans-serif" fill="#5d5247">17</text>
+<line x1="1014.09" y1="80" x2="1014.09" y2="570" stroke="#efe7db" stroke-width="1" />
+<text x="1014.09" y="640" text-anchor="middle" font-size="12" font-family="sans-serif" fill="#5d5247">7E</text>
+<line x1="1067.27" y1="80" x2="1067.27" y2="570" stroke="#efe7db" stroke-width="1" />
+<text x="1067.27" y="640" text-anchor="middle" font-size="12" font-family="sans-serif" fill="#5d5247">18</text>
+<line x1="1120.45" y1="80" x2="1120.45" y2="570" stroke="#efe7db" stroke-width="1" />
+<text x="1120.45" y="640" text-anchor="middle" font-size="12" font-family="sans-serif" fill="#5d5247">19</text>
+<line x1="1173.64" y1="80" x2="1173.64" y2="570" stroke="#efe7db" stroke-width="1" />
+<text x="1173.64" y="640" text-anchor="middle" font-size="12" font-family="sans-serif" fill="#5d5247">20</text>
+<line x1="1226.82" y1="80" x2="1226.82" y2="570" stroke="#efe7db" stroke-width="1" />
+<text x="1226.82" y="640" text-anchor="middle" font-size="12" font-family="sans-serif" fill="#5d5247">21</text>
+<line x1="1280.00" y1="80" x2="1280.00" y2="570" stroke="#efe7db" stroke-width="1" />
+<text x="1280.00" y="640" text-anchor="middle" font-size="12" font-family="sans-serif" fill="#5d5247">22</text>
+<rect x="110" y="80" width="1170" height="490" fill="none" stroke="#8f8172" stroke-width="1.5" />
+<polyline fill="none" stroke="#2f6f5e" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" points="110.00,381.54 163.18,215.74 216.36,162.57 269.55,165.75 322.73,162.55 375.91,80.00 429.09,387.48 482.27,433.30 535.45,434.67 588.64,486.27 641.82,481.43 695.00,470.06 748.18,476.39 801.36,473.41 854.55,456.60 907.73,428.87 960.91,413.22 1014.09,510.64 1067.27,520.40 1120.45,517.34 1173.64,528.29 1226.82,509.99 1280.00,539.67" />
+<circle cx="110.00" cy="381.54" r="4.5" fill="#2f6f5e" />
+<text x="110.00" y="371.54" text-anchor="middle" font-size="12" font-family="monospace" fill="#2f6f5e">27.71G</text>
+<circle cx="163.18" cy="215.74" r="4.5" fill="#2f6f5e" />
+<text x="163.18" y="205.74" text-anchor="middle" font-size="12" font-family="monospace" fill="#2f6f5e">52.09G</text>
+<circle cx="216.36" cy="162.57" r="4.5" fill="#2f6f5e" />
+<text x="216.36" y="152.57" text-anchor="middle" font-size="12" font-family="monospace" fill="#2f6f5e">59.91G</text>
+<circle cx="269.55" cy="165.75" r="4.5" fill="#2f6f5e" />
+<text x="269.55" y="155.75" text-anchor="middle" font-size="12" font-family="monospace" fill="#2f6f5e">59.44G</text>
+<circle cx="322.73" cy="162.55" r="4.5" fill="#2f6f5e" />
+<text x="322.73" y="152.55" text-anchor="middle" font-size="12" font-family="monospace" fill="#2f6f5e">59.91G</text>
+<circle cx="375.91" cy="80.00" r="4.5" fill="#2f6f5e" />
+<text x="375.91" y="70.00" text-anchor="middle" font-size="12" font-family="monospace" fill="#2f6f5e">72.05G</text>
+<circle cx="429.09" cy="387.48" r="4.5" fill="#2f6f5e" />
+<text x="429.09" y="377.48" text-anchor="middle" font-size="12" font-family="monospace" fill="#2f6f5e">26.84G</text>
+<circle cx="482.27" cy="433.30" r="4.5" fill="#2f6f5e" />
+<text x="482.27" y="423.30" text-anchor="middle" font-size="12" font-family="monospace" fill="#2f6f5e">20.10G</text>
+<circle cx="535.45" cy="434.67" r="4.5" fill="#2f6f5e" />
+<text x="535.45" y="424.67" text-anchor="middle" font-size="12" font-family="monospace" fill="#2f6f5e">19.90G</text>
+<circle cx="588.64" cy="486.27" r="4.5" fill="#2f6f5e" />
+<text x="588.64" y="476.27" text-anchor="middle" font-size="12" font-family="monospace" fill="#2f6f5e">12.31G</text>
+<circle cx="641.82" cy="481.43" r="4.5" fill="#2f6f5e" />
+<text x="641.82" y="471.43" text-anchor="middle" font-size="12" font-family="monospace" fill="#2f6f5e">13.02G</text>
+<circle cx="695.00" cy="470.06" r="4.5" fill="#2f6f5e" />
+<text x="695.00" y="460.06" text-anchor="middle" font-size="12" font-family="monospace" fill="#2f6f5e">14.70G</text>
+<circle cx="748.18" cy="476.39" r="4.5" fill="#2f6f5e" />
+<text x="748.18" y="466.39" text-anchor="middle" font-size="12" font-family="monospace" fill="#2f6f5e">13.76G</text>
+<circle cx="801.36" cy="473.41" r="4.5" fill="#2f6f5e" />
+<text x="801.36" y="463.41" text-anchor="middle" font-size="12" font-family="monospace" fill="#2f6f5e">14.20G</text>
+<circle cx="854.55" cy="456.60" r="4.5" fill="#2f6f5e" />
+<text x="854.55" y="446.60" text-anchor="middle" font-size="12" font-family="monospace" fill="#2f6f5e">16.68G</text>
+<circle cx="907.73" cy="428.87" r="4.5" fill="#2f6f5e" />
+<text x="907.73" y="418.87" text-anchor="middle" font-size="12" font-family="monospace" fill="#2f6f5e">20.75G</text>
+<circle cx="960.91" cy="413.22" r="4.5" fill="#2f6f5e" />
+<text x="960.91" y="403.22" text-anchor="middle" font-size="12" font-family="monospace" fill="#2f6f5e">23.05G</text>
+<circle cx="1014.09" cy="510.64" r="4.5" fill="#2f6f5e" />
+<text x="1014.09" y="500.64" text-anchor="middle" font-size="12" font-family="monospace" fill="#2f6f5e">8.73G</text>
+<circle cx="1067.27" cy="520.40" r="4.5" fill="#2f6f5e" />
+<text x="1067.27" y="510.40" text-anchor="middle" font-size="12" font-family="monospace" fill="#2f6f5e">7.29G</text>
+<circle cx="1120.45" cy="517.34" r="4.5" fill="#2f6f5e" />
+<text x="1120.45" y="507.34" text-anchor="middle" font-size="12" font-family="monospace" fill="#2f6f5e">7.74G</text>
+<circle cx="1173.64" cy="528.29" r="4.5" fill="#2f6f5e" />
+<text x="1173.64" y="518.29" text-anchor="middle" font-size="12" font-family="monospace" fill="#2f6f5e">6.13G</text>
+<circle cx="1226.82" cy="509.99" r="4.5" fill="#2f6f5e" />
+<text x="1226.82" y="499.99" text-anchor="middle" font-size="12" font-family="monospace" fill="#2f6f5e">8.82G</text>
+<circle cx="1280.00" cy="539.67" r="4.5" fill="#2f6f5e" />
+<text x="1280.00" y="529.67" text-anchor="middle" font-size="12" font-family="monospace" fill="#2f6f5e">4.46G</text>
+<text x="990" y="606" font-size="12" font-family="sans-serif" fill="#6b6257">7P = 预解码第七轮, 7E = 事件化第七轮</text>
+</svg>
