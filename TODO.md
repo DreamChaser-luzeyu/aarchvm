@@ -372,6 +372,51 @@
     - dispatch/deadline 增量化；
     - TLB hit / decoded hit / 跨页访存三条热链的固定成本压缩。
 
+### 1.1 基于 2026-03-18 热点复核的即时优先级
+
+现状：
+- 本轮重新执行的性能结果见：
+  - `out/perf-ump-analysis-20260318-results.txt`
+  - `out/perf-smp-analysis-20260318-results.txt`
+- 本轮热点报告见：
+  - `out/perf-ump-current-20260318.report`
+  - `out/perf-smp-current-20260318.report`
+  - `out/gprof-smp-current-20260318.txt`
+- 当前端到端基线：
+  - UMP 总 `host_ns`：`5004455734`
+  - SMP 总 `host_ns`：`4543807911`
+- `perf` 与 `gprof` 的结论已经比较稳定：
+  - `GicV3::has_pending(...)` 不再是当前主热点；
+  - 热点重新集中在 `Cpu::step()`、`translate_address()`、`lookup_decoded()`、`mmu_write_value()`、`exec_load_store()` 和 `SoC::run()`。
+- 因此，当前代码下一轮性能优化不应再优先回到 GIC 轮询治理，而应先压解释器/MMU/预解码固定成本。
+
+下一步优化顺序：
+- [ ] P0: 压缩 `translate_address()` / TLB hit 权限检查热路径
+  - 目标：TLB hit 时尽量只做权限位检查与地址合成，不再临时构造完整 `TranslationResult` 再回到通用判定。
+  - 方案：
+    - 在 `TlbEntry` 中预存更直接的权限/执行检查位；
+    - 为 hit case 拆一个更扁平的 `access_permitted` 快路径；
+    - miss / page walk 路径继续保留当前完整 fault 信息生成。
+- [ ] P1: 将 `lookup_decoded()` 拆成 probe/fill 两段
+  - 目标：decoded hit 时只做 tag/raw/valid 检查，不顺带背 miss 填充分支和写流量。
+  - 方案：
+    - 新增纯命中接口，如 `probe_decoded(...)`；
+    - 只有 miss 时才进入独立的 fill slow path。
+- [ ] P2: 为 `mmu_read_value()` / `mmu_write_value()` 增加常见 2-page split 快路径
+  - 目标：去掉 `8B/16B` 跨页访存逐字节循环的固定成本。
+  - 方案：
+    - 保留单页 RAM 快路径；
+    - 跨两页时优先走“两段 RAM 访问 + 精确 fault 处理”；
+    - 仍保持 faulting byte 的程序可见行为不变。
+- [ ] P3: 在 P0/P1/P2 之后再回看 `SoC::run()` 的增量化空间
+  - 目标：确认 `run()` / `next_device_event()` / dispatch scan 是否已降到第二梯队以下，再决定是否继续投时间在外层调度。
+  - 方案：
+    - 以新的 `perf/gprof` 结果为准，避免在热点顺序已经变化后继续沿旧结论优化。
+- [ ] P4: 暂不把时间投入到新的 guest 特化快路径
+  - 原因：
+    - 当前最贵的路径已经是通用解释器/MMU/decoded hit 成本；
+    - 针对某个 workload、某段日志或某个固定地址做特化，不会形成可复用收益。
+
 ### 2. 迈向 JIT 的后续改进方案
 
 目标：

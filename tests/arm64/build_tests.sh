@@ -65,6 +65,7 @@ build_asm_prog cpacr_fp_mem_trap
 build_asm_prog pstate_pan
 build_asm_prog id_aa64_feature_regs
 build_asm_prog svc_sysreg_minimal
+build_asm_prog el0_sysreg_privilege
 build_asm_prog lse_atomics
 build_asm_prog casp_pair
 build_asm_prog lse_atomics_narrow

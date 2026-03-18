@@ -76,6 +76,7 @@ run irq_disabled.bin 1200000
 run sys_ctrl.bin 1800000
 run cntkctl_el1.bin 300000
 run cntkctl_el0_timer_access.bin 600000
+run el0_sysreg_privilege.bin 400000
 run ldtr_sttr_usercopy.bin 400000
 run fpsimd_minimal.bin 400000
 run fpsimd_mvni.bin 400000

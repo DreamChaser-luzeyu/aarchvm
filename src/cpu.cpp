@@ -2918,6 +2918,64 @@ bool Cpu::exec_system(std::uint32_t insn) {
     return true;
   }
 
+  const auto trap_el0_system_access = [&]() {
+    enter_sync_exception(pc_ - 4u, 0x18u, 0u, false, 0u);
+    return true;
+  };
+
+  const auto el0_timer_sysreg_allowed = [&](std::uint32_t key, bool write) -> bool {
+    if (!sysregs_.in_el0()) {
+      return true;
+    }
+    std::uint64_t cntkctl = 0;
+    (void)sysregs_.read(3u, 0u, 14u, 1u, 0u, cntkctl);
+    switch (key) {
+      case sysreg_key(3u, 3u, 14u, 0u, 2u): // CNTVCT_EL0
+      case sysreg_key(3u, 3u, 14u, 0u, 1u): // CNTPCT_EL0
+        if (write) {
+          return false;
+        }
+        return (cntkctl & (1ull << (key == sysreg_key(3u, 3u, 14u, 0u, 2u) ? 1u : 0u))) != 0u;
+      case sysreg_key(3u, 3u, 14u, 3u, 0u): // CNTV_TVAL_EL0
+      case sysreg_key(3u, 3u, 14u, 3u, 1u): // CNTV_CTL_EL0
+      case sysreg_key(3u, 3u, 14u, 3u, 2u): // CNTV_CVAL_EL0
+        return (cntkctl & (1ull << 8u)) != 0u;
+      case sysreg_key(3u, 3u, 14u, 2u, 0u): // CNTP_TVAL_EL0
+      case sysreg_key(3u, 3u, 14u, 2u, 1u): // CNTP_CTL_EL0
+      case sysreg_key(3u, 3u, 14u, 2u, 2u): // CNTP_CVAL_EL0
+        return (cntkctl & (1ull << 9u)) != 0u;
+      default:
+        return false;
+    }
+  };
+
+  const auto el0_sysreg_access_allowed = [&](std::uint32_t key, bool write) -> bool {
+    if (!sysregs_.in_el0()) {
+      return true;
+    }
+    if (el0_timer_sysreg_allowed(key, write)) {
+      return true;
+    }
+    switch (key) {
+      case sysreg_key(3u, 3u, 4u, 2u, 0u):   // NZCV
+      case sysreg_key(3u, 3u, 4u, 4u, 0u):   // FPCR
+      case sysreg_key(3u, 3u, 4u, 4u, 1u):   // FPSR
+      case sysreg_key(3u, 3u, 13u, 0u, 2u):  // TPIDR_EL0
+      case sysreg_key(3u, 3u, 13u, 0u, 5u):  // TPIDR2_EL0
+        return true;
+      case sysreg_key(3u, 0u, 4u, 2u, 2u):   // CurrentEL
+      case sysreg_key(3u, 3u, 4u, 2u, 1u):   // DAIF
+      case sysreg_key(3u, 3u, 0u, 0u, 1u):   // CTR_EL0
+      case sysreg_key(3u, 3u, 0u, 0u, 7u):   // DCZID_EL0
+      case sysreg_key(3u, 3u, 13u, 0u, 3u):  // TPIDRRO_EL0
+      case sysreg_key(3u, 3u, 14u, 0u, 0u):  // CNTFRQ_EL0
+      case sysreg_key(3u, 3u, 2u, 5u, 1u):   // GCSPR_EL0
+        return !write;
+      default:
+        return false;
+    }
+  };
+
   // TLBI VMALLE1 / VMALLE1IS
   if (insn == 0xD508871Fu || insn == 0xD508831Fu) {
     tlb_flush_all();
@@ -3074,24 +3132,36 @@ bool Cpu::exec_system(std::uint32_t insn) {
   }
   // MSR SPSel, #imm
   if ((insn & 0xFFFFF0FFu) == 0xD50040BFu) {
+    if (sysregs_.in_el0()) {
+      return trap_el0_system_access();
+    }
     sysregs_.set_spsel((insn >> 8) & 0x1u);
     return true;
   }
 
   // MSR DAIFSet, #imm4
   if ((insn & 0xFFFFF0FFu) == 0xD50340DFu) {
+    if (sysregs_.in_el0()) {
+      return trap_el0_system_access();
+    }
     sysregs_.daif_set(static_cast<std::uint8_t>((insn >> 8) & 0xFu));
     return true;
   }
 
   // MSR DAIFClr, #imm4
   if ((insn & 0xFFFFF0FFu) == 0xD50340FFu) {
+    if (sysregs_.in_el0()) {
+      return trap_el0_system_access();
+    }
     sysregs_.daif_clr(static_cast<std::uint8_t>((insn >> 8) & 0xFu));
     return true;
   }
 
   // MSR PAN, #imm
   if ((insn & 0xFFFFF0FFu) == 0xD500409Fu) {
+    if (sysregs_.in_el0()) {
+      return trap_el0_system_access();
+    }
     sysregs_.set_pan(((insn >> 8) & 0x1u) != 0);
     return true;
   }
@@ -3105,31 +3175,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
     const std::uint32_t crm = (insn >> 8) & 0xFu;
     const std::uint32_t op2 = (insn >> 5) & 0x7u;
     const std::uint32_t key = sysreg_key(op0, op1, crn, crm, op2);
-    auto timer_sysreg_el0_allowed = [&]() -> bool {
-      if (!sysregs_.in_el0()) {
-        return true;
-      }
-      std::uint64_t cntkctl = 0;
-      (void)sysregs_.read(3u, 0u, 14u, 1u, 0u, cntkctl);
-      switch (key) {
-        case sysreg_key(3u, 3u, 14u, 0u, 2u):
-          return (cntkctl & (1ull << 1u)) != 0u; // CNTVCT_EL0: EL0VCTEN
-        case sysreg_key(3u, 3u, 14u, 0u, 1u):
-          return (cntkctl & (1ull << 0u)) != 0u; // CNTPCT_EL0: EL0PCTEN
-        case sysreg_key(3u, 3u, 14u, 3u, 0u):
-        case sysreg_key(3u, 3u, 14u, 3u, 1u):
-        case sysreg_key(3u, 3u, 14u, 3u, 2u):
-          return (cntkctl & (1ull << 8u)) != 0u; // CNTV_*_EL0: EL0VTEN
-        case sysreg_key(3u, 3u, 14u, 2u, 0u):
-        case sysreg_key(3u, 3u, 14u, 2u, 1u):
-        case sysreg_key(3u, 3u, 14u, 2u, 2u):
-          return (cntkctl & (1ull << 9u)) != 0u; // CNTP_*_EL0: EL0PTEN
-        default:
-          return true;
-      }
-    };
-
-    if (!timer_sysreg_el0_allowed()) {
+    if (!el0_sysreg_access_allowed(key, false)) {
       enter_sync_exception(pc_ - 4, 0x18u, sysreg_trap_iss(true, op0, op1, crn, crm, op2, rt), false, 0);
       return true;
     }
@@ -3237,31 +3283,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
     const std::uint32_t crm = (insn >> 8) & 0xFu;
     const std::uint32_t op2 = (insn >> 5) & 0x7u;
     const std::uint32_t key = sysreg_key(op0, op1, crn, crm, op2);
-    auto timer_sysreg_el0_allowed = [&]() -> bool {
-      if (!sysregs_.in_el0()) {
-        return true;
-      }
-      std::uint64_t cntkctl = 0;
-      (void)sysregs_.read(3u, 0u, 14u, 1u, 0u, cntkctl);
-      switch (key) {
-        case sysreg_key(3u, 3u, 14u, 0u, 2u):
-          return (cntkctl & (1ull << 1u)) != 0u;
-        case sysreg_key(3u, 3u, 14u, 0u, 1u):
-          return (cntkctl & (1ull << 0u)) != 0u;
-        case sysreg_key(3u, 3u, 14u, 3u, 0u):
-        case sysreg_key(3u, 3u, 14u, 3u, 1u):
-        case sysreg_key(3u, 3u, 14u, 3u, 2u):
-          return (cntkctl & (1ull << 8u)) != 0u;
-        case sysreg_key(3u, 3u, 14u, 2u, 0u):
-        case sysreg_key(3u, 3u, 14u, 2u, 1u):
-        case sysreg_key(3u, 3u, 14u, 2u, 2u):
-          return (cntkctl & (1ull << 9u)) != 0u;
-        default:
-          return true;
-      }
-    };
-
-    if (!timer_sysreg_el0_allowed()) {
+    if (!el0_sysreg_access_allowed(key, true)) {
       enter_sync_exception(pc_ - 4, 0x18u, sysreg_trap_iss(false, op0, op1, crn, crm, op2, rt), false, 0);
       return true;
     }

@@ -1,3 +1,72 @@
+# 修改日志 2026-03-18 22:56
+
+## 本轮修改
+
+- 重新阅读当前 `Cpu` / `SoC` / `MMU` / decode 热路径代码，并重新执行一轮 UMP/SMP 算法性能测试与热点分析：
+  - 结果文件：
+    - `out/perf-ump-analysis-20260318-results.txt`
+    - `out/perf-smp-analysis-20260318-results.txt`
+  - `perf` 报告：
+    - `out/perf-ump-current-20260318.report`
+    - `out/perf-smp-current-20260318.report`
+  - `gprof` 报告：
+    - `out/gprof-smp-current-20260318.txt`
+- 基于本轮热点复核，更新 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)：
+  - 明确当前热点已经从 `GIC` 进一步后移，重新集中到 `Cpu::step()`、`translate_address()`、`lookup_decoded()`、`mmu_write_value()`、`exec_load_store()` 与 `SoC::run()`；
+  - 将下一步性能优化优先级调整为：
+    - `translate_address()` / TLB hit 权限检查压缩；
+    - `lookup_decoded()` probe/fill 拆分；
+    - `mmu_read_value()` / `mmu_write_value()` 两页跨页快路径；
+    - 之后再复核 `SoC::run()` 是否仍值得继续优化。
+- 修正 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中 EL0 system/sysreg 访问权限不完整的问题：
+  - 之前 EL0 会错误放行对部分 EL1 特权 sysreg 的 `MRS/MSR`，例如 `FAR_EL1`、`TCR_EL1`；
+  - 之前 EL0 也会错误执行若干明显特权的 `MSR (immediate)`，如 `MSR DAIFSet` / `MSR DAIFClr` / `MSR SPSel` / `MSR PAN`；
+  - 现在为 `exec_system()` 增加了 EL0 sysreg/system instruction 访问白名单与 trap 判定：
+    - 允许的 EL0 访问包括 `NZCV`、`FPCR/FPSR`、`TPIDR_EL0/TPIDR2_EL0`，以及只读的 `CurrentEL`、`DAIF`、`CTR_EL0`、`DCZID_EL0`、`TPIDRRO_EL0`、`CNTFRQ_EL0`、`GCSPR_EL0`；
+    - timer sysreg 继续按 `CNTKCTL_EL1` 进行 EL0 门控；
+    - 未列入白名单的特权访问改为触发同步异常，而不是静默成功。
+- 新增裸机回归 [tests/arm64/el0_sysreg_privilege.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_sysreg_privilege.S)，并接入：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - 该用例覆盖：
+    - EL0 合法访问 `TPIDR_EL0` / `CTR_EL0` / `DCZID_EL0`；
+    - EL0 非法 `MRS FAR_EL1`；
+    - EL0 非法 `MSR TCR_EL1`；
+    - EL0 非法 `MSR DAIFSet, #imm`。
+
+## 本轮测试
+
+- 性能分析：
+  - `out/perf-ump-analysis-20260318-results.txt`
+  - `out/perf-smp-analysis-20260318-results.txt`
+  - `out/perf-ump-current-20260318.report`
+  - `out/perf-smp-current-20260318.report`
+  - `out/gprof-smp-current-20260318.txt`
+- 定向单测：
+  - `./build/aarchvm -bin tests/arm64/out/el0_sysreg_privilege.bin -load 0x0 -entry 0x0 -steps 400000`
+  - `./build/aarchvm -bin tests/arm64/out/cntkctl_el0_timer_access.bin -load 0x0 -entry 0x0 -steps 600000`
+- 裸机测试构建：
+  - `timeout 180s ./tests/arm64/build_tests.sh`
+- 裸机完整回归：
+  - `timeout 600s ./tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 600s ./tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 900s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 当前版本的主热点已经重新回到解释器/MMU/预解码本体，而不是 `GIC` 轮询：
+  - UMP `perf` 前列为 `Cpu::step()`、`translate_address()`、`lookup_decoded()`、`exec_data_processing()`、`mmu_write_value()`、`exec_load_store()`；
+  - SMP `perf` 与 `gprof` 给出的顺序基本一致。
+- 这说明下一轮性能优化最值得优先做的，不是继续往 `GIC` 或 guest 特化快路径上加逻辑，而是先压：
+  - TLB hit 权限检查固定成本；
+  - decoded hit 固定成本；
+  - 常见跨页访存成本。
+- 本轮发现并修复了一个明确的 Armv8-A 行为缺口：
+  - EL0 对特权 sysreg/system instruction 的访问此前不够严格；
+  - 修补后，新增单测、裸机完整回归、Linux 单核功能回归、Linux SMP 功能回归均已通过。
+
 # 修改日志 2026-03-17 23:03
 
 ## 本轮修改
