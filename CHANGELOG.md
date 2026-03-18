@@ -1,3 +1,56 @@
+# 修改日志 2026-03-18 23:24
+
+## 本轮修改
+
+- 继续审阅 `Cpu::exec_system()` 与 EL0 system instruction 权限路径，补上此前遗漏的一组 `SCTLR_EL1` 控制位语义：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - 已实现的 EL0 trap/放行规则：
+    - `SCTLR_EL1.UCI=0` 时，EL0 执行 `IC IVAU`、`AT S1E1R/W`、`DC IVAC/CVAC/CVAU/CVAP/CVADP/CIVAC` 会触发 `EC=0x18` 同步异常；
+    - `SCTLR_EL1.DZE=0` 时，EL0 执行 `DC ZVA` 会触发 `EC=0x18` 同步异常；
+    - `TLBI`、`IC IALLU/IALLUIS`、`DC ISW/CISW` 在 EL0 下不再被错误放行，而是统一 trap；
+    - `SCTLR_EL1.UCT=0` 时，EL0 读取 `CTR_EL0` 不再被错误放行，而是触发 `EC=0x18` 同步异常；置位 `UCT` 后恢复允许。
+- 新增裸机回归 [tests/arm64/el0_cache_ops_privilege.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_cache_ops_privilege.S)，并接入：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - 覆盖内容：
+    - `UCI=0` 时 EL0 `IC IVAU` / `AT S1E1R` trap；
+    - `DZE=0` 时 EL0 `DC ZVA` trap；
+    - EL0 `TLBI VMALLE1` trap；
+    - 打开 `UCI|DZE` 后，上述可放行路径恢复正常执行。
+- 重写并加强 [tests/arm64/el0_sysreg_privilege.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_sysreg_privilege.S)：
+  - 不再错误假设“复位状态下 EL0 读取 `CTR_EL0` 总是允许”；
+  - 现在显式验证：
+    - EL0 `TPIDR_EL0` 正常可读写；
+    - `UCT=0` 时 EL0 `MRS CTR_EL0` trap；
+    - 置位 `UCT` 后 EL0 `CTR_EL0` / `DCZID_EL0` 读取恢复可用；
+    - EL0 `MRS FAR_EL1`、`MSR TCR_EL1`、`MSR DAIFSet` 继续正确 trap。
+
+## 本轮测试
+
+- 定向单测：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/el0_sysreg_privilege.bin -load 0x0 -entry 0x0 -steps 500000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/el0_cache_ops_privilege.bin -load 0x0 -entry 0x0 -steps 600000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/cntkctl_el0_timer_access.bin -load 0x0 -entry 0x0 -steps 600000`
+- 裸机测试构建：
+  - `timeout 180s ./tests/arm64/build_tests.sh`
+- 裸机完整回归：
+  - `timeout 600s ./tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 600s ./tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 900s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 本轮又补齐了一组明确的 Armv8-A 程序可见语义缺口：
+  - EL0 system instruction 的可执行性并不只是“白名单 sysreg”问题，还受 `SCTLR_EL1.UCI`、`SCTLR_EL1.DZE`、`SCTLR_EL1.UCT` 控制；
+  - 当前这些控制位相关的高置信度缺口已经修正，并且新增定向单测与完整回归均已通过。
+- 继续审阅后，仍不能宣称“Armv8-A 强制行为已完全覆盖”。
+- 当前我认为下一批仍值得优先检查、但这轮没有继续落代码的项目是：
+  - `DCZID_EL0.DZP` 是否需要随当前 EL / `DZE` 动态反映禁止状态；
+  - EL0 `WFI/WFE` 与 `SCTLR_EL1.nTWI/nTWE` 的 trap 语义；
+  - 其余较少用但仍受控制位影响的 system instruction trap 条件与 syndrome 细节。
+
 # 修改日志 2026-03-18 22:56
 
 ## 本轮修改

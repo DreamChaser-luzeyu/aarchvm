@@ -46,6 +46,9 @@ constexpr std::uint16_t kDecodedFlagResult64 = 1u << 7;
 constexpr std::uint16_t kDecodedFlagInvert = 1u << 8;
 constexpr std::uint32_t kTimerVirtPpiIntId = 27u;
 constexpr std::uint32_t kTimerPhysPpiIntId = 30u;
+constexpr std::uint64_t kSctlrEl1Dze = 1ull << 14u;
+constexpr std::uint64_t kSctlrEl1Uct = 1ull << 15u;
+constexpr std::uint64_t kSctlrEl1Uci = 1ull << 26u;
 
 constexpr std::uint32_t sysreg_key(std::uint32_t op0,
                                    std::uint32_t op1,
@@ -2923,6 +2926,33 @@ bool Cpu::exec_system(std::uint32_t insn) {
     return true;
   };
 
+  const auto trap_current_system_instruction = [&](std::uint32_t trapped_insn) {
+    const std::uint32_t rt = trapped_insn & 0x1Fu;
+    const std::uint32_t op0 = (trapped_insn >> 19) & 0x3u;
+    const std::uint32_t op1 = (trapped_insn >> 16) & 0x7u;
+    const std::uint32_t crn = (trapped_insn >> 12) & 0xFu;
+    const std::uint32_t crm = (trapped_insn >> 8) & 0xFu;
+    const std::uint32_t op2 = (trapped_insn >> 5) & 0x7u;
+    enter_sync_exception(pc_ - 4u,
+                         0x18u,
+                         sysreg_trap_iss(false, op0, op1, crn, crm, op2, rt),
+                         false,
+                         0u);
+    return true;
+  };
+
+  const auto el0_uci_enabled = [&]() {
+    return !sysregs_.in_el0() || (sysregs_.sctlr_el1() & kSctlrEl1Uci) != 0u;
+  };
+
+  const auto el0_uct_enabled = [&]() {
+    return !sysregs_.in_el0() || (sysregs_.sctlr_el1() & kSctlrEl1Uct) != 0u;
+  };
+
+  const auto el0_dze_enabled = [&]() {
+    return !sysregs_.in_el0() || (sysregs_.sctlr_el1() & kSctlrEl1Dze) != 0u;
+  };
+
   const auto el0_timer_sysreg_allowed = [&](std::uint32_t key, bool write) -> bool {
     if (!sysregs_.in_el0()) {
       return true;
@@ -2965,12 +2995,13 @@ bool Cpu::exec_system(std::uint32_t insn) {
         return true;
       case sysreg_key(3u, 0u, 4u, 2u, 2u):   // CurrentEL
       case sysreg_key(3u, 3u, 4u, 2u, 1u):   // DAIF
-      case sysreg_key(3u, 3u, 0u, 0u, 1u):   // CTR_EL0
       case sysreg_key(3u, 3u, 0u, 0u, 7u):   // DCZID_EL0
       case sysreg_key(3u, 3u, 13u, 0u, 3u):  // TPIDRRO_EL0
       case sysreg_key(3u, 3u, 14u, 0u, 0u):  // CNTFRQ_EL0
       case sysreg_key(3u, 3u, 2u, 5u, 1u):   // GCSPR_EL0
         return !write;
+      case sysreg_key(3u, 3u, 0u, 0u, 1u):   // CTR_EL0
+        return !write && el0_uct_enabled();
       default:
         return false;
     }
@@ -2978,6 +3009,9 @@ bool Cpu::exec_system(std::uint32_t insn) {
 
   // TLBI VMALLE1 / VMALLE1IS
   if (insn == 0xD508871Fu || insn == 0xD508831Fu) {
+    if (sysregs_.in_el0()) {
+      return trap_current_system_instruction(insn);
+    }
     tlb_flush_all();
     invalidate_decode_all();
     if (callbacks_.tlbi_vmalle1_broadcast) {
@@ -2995,6 +3029,9 @@ bool Cpu::exec_system(std::uint32_t insn) {
       (insn & 0xFFFFFFE0u) == 0xD5088360u ||
       (insn & 0xFFFFFFE0u) == 0xD50887E0u ||
       (insn & 0xFFFFFFE0u) == 0xD50883E0u) {
+    if (sysregs_.in_el0()) {
+      return trap_current_system_instruction(insn);
+    }
     const std::uint32_t rt = insn & 0x1Fu;
     const std::uint64_t operand = reg(rt);
     const bool all_asids = (insn & 0x80u) != 0;
@@ -3015,6 +3052,9 @@ bool Cpu::exec_system(std::uint32_t insn) {
   // TLBI ASIDE1 / ASIDE1IS, Xt.
   if ((insn & 0xFFFFFFE0u) == 0xD5088740u ||
       (insn & 0xFFFFFFE0u) == 0xD5088340u) {
+    if (sysregs_.in_el0()) {
+      return trap_current_system_instruction(insn);
+    }
     const std::uint16_t asid = tlbi_operand_asid(reg(insn & 0x1Fu));
     tlb_flush_asid(asid);
     invalidate_decode_all();
@@ -3026,6 +3066,9 @@ bool Cpu::exec_system(std::uint32_t insn) {
 
   // IC IALLU
   if (insn == 0xD508751Fu) {
+    if (sysregs_.in_el0()) {
+      return trap_current_system_instruction(insn);
+    }
     invalidate_decode_all();
     if (callbacks_.ic_ivau_broadcast) {
       callbacks_.ic_ivau_broadcast(*this);
@@ -3035,6 +3078,9 @@ bool Cpu::exec_system(std::uint32_t insn) {
 
   // IC IALLUIS
   if (insn == 0xD508711Fu) {
+    if (sysregs_.in_el0()) {
+      return trap_current_system_instruction(insn);
+    }
     invalidate_decode_all();
     if (callbacks_.ic_ivau_broadcast) {
       callbacks_.ic_ivau_broadcast(*this);
@@ -3044,6 +3090,9 @@ bool Cpu::exec_system(std::uint32_t insn) {
 
   // IC IVAU, Xt
   if ((insn & 0xFFFFFFE0u) == 0xD50B7520u) {
+    if (!el0_uci_enabled()) {
+      return trap_current_system_instruction(insn);
+    }
     const std::uint32_t rt = insn & 0x1Fu;
     invalidate_decode_va(reg(rt), 1u);
     return true;
@@ -3051,11 +3100,17 @@ bool Cpu::exec_system(std::uint32_t insn) {
 
   // DC IVAC, Xt
   if ((insn & 0xFFFFFFE0u) == 0xD5087620u) {
+    if (!el0_uci_enabled()) {
+      return trap_current_system_instruction(insn);
+    }
     return true;
   }
 
   // DC CVAC, Xt
   if ((insn & 0xFFFFFFE0u) == 0xD50B7A20u) {
+    if (!el0_uci_enabled()) {
+      return trap_current_system_instruction(insn);
+    }
     return true;
   }
 
@@ -3063,12 +3118,18 @@ bool Cpu::exec_system(std::uint32_t insn) {
   if ((insn & 0xFFFFFFE0u) == 0xD50B7B20u ||
       (insn & 0xFFFFFFE0u) == 0xD50B7C20u ||
       (insn & 0xFFFFFFE0u) == 0xD50B7D20u) {
+    if (!el0_uci_enabled()) {
+      return trap_current_system_instruction(insn);
+    }
     return true;
   }
 
   // DC ZVA, Xt.
   // Model a 64-byte zeroing block, matching DCZID_EL0 BS=4.
   if ((insn & 0xFFFFFFE0u) == 0xD50B7420u) {
+    if (!el0_dze_enabled()) {
+      return trap_current_system_instruction(insn);
+    }
     const std::uint32_t rt = insn & 0x1Fu;
     const std::uint64_t base = reg(rt) & ~0x3Full;
     for (std::uint64_t off = 0; off < 64u; off += 8u) {
@@ -3090,21 +3151,33 @@ bool Cpu::exec_system(std::uint32_t insn) {
 
   // DC CIVAC, Xt
   if ((insn & 0xFFFFFFE0u) == 0xD50B7E20u) {
+    if (!el0_uci_enabled()) {
+      return trap_current_system_instruction(insn);
+    }
     return true;
   }
 
   // DC ISW, Xt
   if ((insn & 0xFFFFFFE0u) == 0xD5087640u) {
+    if (sysregs_.in_el0()) {
+      return trap_current_system_instruction(insn);
+    }
     return true;
   }
 
   // DC CISW, Xt
   if ((insn & 0xFFFFFFE0u) == 0xD5087E40u) {
+    if (sysregs_.in_el0()) {
+      return trap_current_system_instruction(insn);
+    }
     return true;
   }
 
   // AT S1E1R, Xt
   if ((insn & 0xFFFFFFE0u) == 0xD5087800u) {
+    if (!el0_uci_enabled()) {
+      return trap_current_system_instruction(insn);
+    }
     const std::uint32_t rt = insn & 0x1Fu;
     TranslationResult result{};
     if (translate_address(reg(rt), AccessType::Read, &result, false, false)) {
@@ -3119,6 +3192,9 @@ bool Cpu::exec_system(std::uint32_t insn) {
 
   // AT S1E1W, Xt
   if ((insn & 0xFFFFFFE0u) == 0xD5087820u) {
+    if (!el0_uci_enabled()) {
+      return trap_current_system_instruction(insn);
+    }
     const std::uint32_t rt = insn & 0x1Fu;
     TranslationResult result{};
     if (translate_address(reg(rt), AccessType::Write, &result, false, false)) {

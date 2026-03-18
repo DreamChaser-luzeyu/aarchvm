@@ -29,6 +29,7 @@ build_asm_prog sys_ctrl
 build_asm_prog cntkctl_el1
 build_asm_prog cntkctl_el0_timer_access
 build_asm_prog ldtr_sttr_usercopy
+build_asm_prog el0_cache_ops_privilege
 build_asm_prog fpsimd_minimal
 build_asm_prog fpsimd_mvni
 build_asm_prog fpsimd_logic_more
