@@ -528,6 +528,10 @@ bool load_fast_value(const std::uint8_t* base, std::size_t size, std::uint64_t* 
 } // namespace
 
 bool Cpu::translate_data_address_fast(std::uint64_t va, bool write, std::uint64_t* out_pa) {
+  return translate_data_address_fast(va, write ? AccessType::Write : AccessType::Read, out_pa);
+}
+
+bool Cpu::translate_data_address_fast(std::uint64_t va, AccessType access, std::uint64_t* out_pa) {
   ++perf_counters_.translate_calls;
   last_translation_fault_.reset();
   last_data_fault_va_.reset();
@@ -543,7 +547,6 @@ bool Cpu::translate_data_address_fast(std::uint64_t va, bool write, std::uint64_
   const std::uint16_t asid = current_translation_asid(va_upper);
   const std::uint64_t page = (va >> 12) & tlb_page_mask();
   const std::uint64_t off = va & 0xFFFull;
-  const AccessType access = write ? AccessType::Write : AccessType::Read;
   const TlbEntry* hit = nullptr;
   if (tlb_last_data_.valid && tlb_last_data_.va_page == page && tlb_last_data_.asid == asid) {
     hit = &tlb_last_data_;
@@ -600,6 +603,10 @@ void Cpu::invalidate_ram_page_caches() {
 }
 
 bool Cpu::mmu_read_value(std::uint64_t va, std::size_t size, std::uint64_t* out) {
+  return mmu_read_value(va, size, out, AccessType::Read);
+}
+
+bool Cpu::mmu_read_value(std::uint64_t va, std::size_t size, std::uint64_t* out, AccessType access) {
   last_data_fault_va_.reset();
   if (size == 0u || size > sizeof(std::uint64_t)) {
     return false;
@@ -607,7 +614,7 @@ bool Cpu::mmu_read_value(std::uint64_t va, std::size_t size, std::uint64_t* out)
   const std::size_t page_off = static_cast<std::size_t>(va & 0xFFFu);
   if (page_off + size <= 0x1000u) {
     std::uint64_t pa = 0;
-    if (!translate_data_address_fast(va, false, &pa)) {
+    if (!translate_data_address_fast(va, access, &pa)) {
       last_data_fault_va_ = va;
       return false;
     }
@@ -630,7 +637,7 @@ bool Cpu::mmu_read_value(std::uint64_t va, std::size_t size, std::uint64_t* out)
   std::uint64_t value = 0;
   for (std::size_t i = 0; i < size; ++i) {
     std::uint64_t pa = 0;
-    if (!translate_data_address_fast(va + i, false, &pa)) {
+    if (!translate_data_address_fast(va + i, access, &pa)) {
       last_data_fault_va_ = va + i;
       return false;
     }
@@ -648,6 +655,10 @@ bool Cpu::mmu_read_value(std::uint64_t va, std::size_t size, std::uint64_t* out)
 }
 
 bool Cpu::mmu_write_value(std::uint64_t va, std::uint64_t value, std::size_t size) {
+  return mmu_write_value(va, value, size, AccessType::Write);
+}
+
+bool Cpu::mmu_write_value(std::uint64_t va, std::uint64_t value, std::size_t size, AccessType access) {
   last_data_fault_va_.reset();
   static const std::optional<std::uint64_t> trace_write_va = []() -> std::optional<std::uint64_t> {
     const char* env = std::getenv("AARCHVM_TRACE_WRITE_VA");
@@ -707,7 +718,7 @@ bool Cpu::mmu_write_value(std::uint64_t va, std::uint64_t value, std::size_t siz
   const std::size_t page_off = static_cast<std::size_t>(va & 0xFFFu);
   if (page_off + size <= 0x1000u) {
     std::uint64_t pa = 0;
-    if (!translate_data_address_fast(va, true, &pa)) {
+    if (!translate_data_address_fast(va, access, &pa)) {
       last_data_fault_va_ = va;
       return false;
     }
@@ -737,7 +748,7 @@ bool Cpu::mmu_write_value(std::uint64_t va, std::uint64_t value, std::size_t siz
   std::array<std::uint64_t, sizeof(std::uint64_t)> pas{};
   bool trace_cross_page_pa = false;
   for (std::size_t i = 0; i < size; ++i) {
-    if (!translate_data_address_fast(va + i, true, &pas[i])) {
+    if (!translate_data_address_fast(va + i, access, &pas[i])) {
       last_data_fault_va_ = va + i;
       return false;
     }
@@ -2317,6 +2328,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
                        TranslationResult* out_result,
                        TranslationFault* fault) {
   ++perf_counters_.page_walks;
+  const bool write = access_is_write(access);
   const bool trace_va = trace_va_.has_value() && *trace_va_ == va && !trace_va_hit_;
   const auto trace_va_log = [&](const std::string& msg) {
     if (trace_va && trace_exceptions_) {
@@ -2332,7 +2344,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
       : static_cast<std::uint32_t>(tcr & 0x3Fu);
   if (txsz > 39) {
     if (fault != nullptr) {
-      *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize, .level = 0, .write = access == AccessType::Write};
+      *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize, .level = 0, .write = write};
     }
     return false;
   }
@@ -2340,7 +2352,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
   const std::uint32_t va_bits = 64u - txsz;
   if (va_bits < 12u || va_bits > 48u) {
     if (fault != nullptr) {
-      *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize, .level = 0, .write = access == AccessType::Write};
+      *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize, .level = 0, .write = write};
     }
     return false;
   }
@@ -2351,7 +2363,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
   // 4KB granule only: TG0==00, TG1==10.
   if ((!va_upper && tg != 0u) || (va_upper && tg != 2u)) {
     if (fault != nullptr) {
-      *fault = TranslationFault{.kind = TranslationFault::Kind::Translation, .level = 0, .write = access == AccessType::Write};
+      *fault = TranslationFault{.kind = TranslationFault::Kind::Translation, .level = 0, .write = write};
     }
     return false;
   }
@@ -2359,7 +2371,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
   const bool epd = va_upper ? (((tcr >> 23) & 0x1u) != 0) : (((tcr >> 7) & 0x1u) != 0);
   if (epd) {
     if (fault != nullptr) {
-      *fault = TranslationFault{.kind = TranslationFault::Kind::Translation, .level = 0, .write = access == AccessType::Write};
+      *fault = TranslationFault{.kind = TranslationFault::Kind::Translation, .level = 0, .write = write};
     }
     return false;
   }
@@ -2367,7 +2379,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
   const std::uint64_t low_limit = (va_bits == 64u) ? ~0ull : ((1ull << va_bits) - 1ull);
   if (!va_upper && va > low_limit) {
     if (fault != nullptr) {
-      *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize, .level = 0, .write = access == AccessType::Write};
+      *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize, .level = 0, .write = write};
     }
     return false;
   }
@@ -2375,7 +2387,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
     const std::uint64_t upper_tag_mask = ~low_limit;
     if ((va & upper_tag_mask) != upper_tag_mask) {
       if (fault != nullptr) {
-        *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize, .level = 0, .write = access == AccessType::Write};
+        *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize, .level = 0, .write = write};
       }
       return false;
     }
@@ -2385,7 +2397,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
   table_base &= 0x0000FFFFFFFFF000ull;
   if (!pa_within_ips(table_base, walk_attrs.ips_bits)) {
     if (fault != nullptr) {
-      *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize, .level = 0, .write = access == AccessType::Write};
+      *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize, .level = 0, .write = write};
     }
     return false;
   }
@@ -2408,7 +2420,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
   }
   if (start_level > 3u) {
     if (fault != nullptr) {
-      *fault = TranslationFault{.kind = TranslationFault::Kind::Translation, .level = 0, .write = access == AccessType::Write};
+      *fault = TranslationFault{.kind = TranslationFault::Kind::Translation, .level = 0, .write = write};
     }
     return false;
   }
@@ -2443,7 +2455,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
       if (fault != nullptr) {
         *fault = TranslationFault{.kind = TranslationFault::Kind::Translation,
                                   .level = static_cast<std::uint8_t>(level),
-                                  .write = access == AccessType::Write};
+                                  .write = write};
       }
       return false;
     }
@@ -2454,7 +2466,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
       if (fault != nullptr) {
         *fault = TranslationFault{.kind = TranslationFault::Kind::Translation,
                                   .level = static_cast<std::uint8_t>(level),
-                                  .write = access == AccessType::Write};
+                                  .write = write};
       }
       return false;
     }
@@ -2464,7 +2476,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
         if (fault != nullptr) {
           *fault = TranslationFault{.kind = TranslationFault::Kind::Translation,
                                     .level = static_cast<std::uint8_t>(level),
-                                    .write = access == AccessType::Write};
+                                    .write = write};
         }
         return false;
       }
@@ -2483,7 +2495,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
         if (fault != nullptr) {
           *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize,
                                     .level = static_cast<std::uint8_t>(level),
-                                    .write = access == AccessType::Write};
+                                    .write = write};
         }
         return false;
       }
@@ -2505,7 +2517,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
         if (fault != nullptr) {
           *fault = TranslationFault{.kind = TranslationFault::Kind::AccessFlag,
                                     .level = static_cast<std::uint8_t>(level),
-                                    .write = access == AccessType::Write};
+                                    .write = write};
         }
         return false;
       }
@@ -2525,7 +2537,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
         if (fault != nullptr) {
           *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize,
                                     .level = static_cast<std::uint8_t>(level),
-                                    .write = access == AccessType::Write};
+                                    .write = write};
         }
         return false;
       }
@@ -2536,7 +2548,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
       if (fault != nullptr) {
         *fault = TranslationFault{.kind = TranslationFault::Kind::Translation,
                                   .level = static_cast<std::uint8_t>(level),
-                                  .write = access == AccessType::Write};
+                                  .write = write};
       }
       return false;
     }
@@ -2558,7 +2570,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
       if (fault != nullptr) {
         *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize,
                                   .level = static_cast<std::uint8_t>(level),
-                                  .write = access == AccessType::Write};
+                                  .write = write};
       }
       return false;
     }
@@ -2580,7 +2592,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
       if (fault != nullptr) {
         *fault = TranslationFault{.kind = TranslationFault::Kind::AccessFlag,
                                   .level = static_cast<std::uint8_t>(level),
-                                  .write = access == AccessType::Write};
+                                  .write = write};
       }
       return false;
     }
@@ -3023,6 +3035,66 @@ bool Cpu::exec_system(std::uint32_t insn) {
     }
   };
 
+  const auto sysreg_present = [&](std::uint32_t key) -> bool {
+    switch (key) {
+      case sysreg_key(3u, 3u, 13u, 0u, 5u):  // TPIDR2_EL0
+      case sysreg_key(3u, 3u, 2u, 5u, 1u):   // GCSPR_EL0
+      case sysreg_key(3u, 3u, 9u, 14u, 0u):  // PMUSERENR_EL0
+      case sysreg_key(3u, 3u, 13u, 2u, 3u):  // AMUSERENR_EL0
+      case sysreg_key(3u, 0u, 4u, 2u, 4u):   // UAO
+      case sysreg_key(3u, 3u, 4u, 2u, 5u):   // DIT
+      case sysreg_key(3u, 3u, 4u, 2u, 6u):   // SSBS
+      case sysreg_key(3u, 3u, 4u, 2u, 7u):   // TCO
+        return false;
+      default:
+        return true;
+    }
+  };
+
+  const auto id_group_sysreg = [&](std::uint32_t key) -> bool {
+    switch (key) {
+      case sysreg_key(3u, 0u, 0u, 0u, 0u): // MIDR_EL1
+      case sysreg_key(3u, 0u, 0u, 0u, 5u): // MPIDR_EL1
+      case sysreg_key(3u, 0u, 0u, 0u, 6u): // REVIDR_EL1
+      case sysreg_key(3u, 1u, 0u, 0u, 0u): // CCSIDR_EL1
+      case sysreg_key(3u, 1u, 0u, 0u, 1u): // CLIDR_EL1
+      case sysreg_key(3u, 0u, 0u, 4u, 0u): // ID_AA64PFR0_EL1
+      case sysreg_key(3u, 0u, 0u, 4u, 1u): // ID_AA64PFR1_EL1
+      case sysreg_key(3u, 0u, 0u, 4u, 2u): // ID_AA64PFR2_EL1
+      case sysreg_key(3u, 0u, 0u, 4u, 4u): // ID_AA64ZFR0_EL1
+      case sysreg_key(3u, 0u, 0u, 4u, 5u): // ID_AA64SMFR0_EL1
+      case sysreg_key(3u, 0u, 0u, 4u, 7u): // reserved ID space (RES0 in this model)
+      case sysreg_key(3u, 0u, 0u, 5u, 0u): // ID_AA64DFR0_EL1
+      case sysreg_key(3u, 0u, 0u, 5u, 1u): // ID_AA64DFR1_EL1
+      case sysreg_key(3u, 0u, 0u, 6u, 0u): // ID_AA64ISAR0_EL1
+      case sysreg_key(3u, 0u, 0u, 6u, 1u): // ID_AA64ISAR1_EL1
+      case sysreg_key(3u, 0u, 0u, 6u, 2u): // ID_AA64ISAR2_EL1
+      case sysreg_key(3u, 0u, 0u, 6u, 3u): // ID_AA64ISAR3_EL1
+      case sysreg_key(3u, 0u, 0u, 7u, 0u): // ID_AA64MMFR0_EL1
+      case sysreg_key(3u, 0u, 0u, 7u, 1u): // ID_AA64MMFR1_EL1
+      case sysreg_key(3u, 0u, 0u, 7u, 2u): // ID_AA64MMFR2_EL1
+      case sysreg_key(3u, 0u, 0u, 7u, 3u): // ID_AA64MMFR3_EL1
+      case sysreg_key(3u, 0u, 0u, 7u, 4u): // ID_AA64MMFR4_EL1
+        return true;
+      default:
+        return false;
+    }
+  };
+
+  const auto el0_sysreg_undefined = [&](std::uint32_t key, bool write) -> bool {
+    if (!sysregs_.in_el0()) {
+      return false;
+    }
+    if (key == sysreg_key(3u, 0u, 4u, 2u, 0u) ||   // SPSel
+        key == sysreg_key(3u, 0u, 4u, 2u, 2u) ||   // CurrentEL
+        key == sysreg_key(3u, 0u, 4u, 2u, 3u)) {   // PAN
+      return true;
+    }
+    // FEAT_IDST is not implemented in this model, so direct EL0 reads of the
+    // identification space are UNDEFINED rather than system access traps.
+    return !write && id_group_sysreg(key);
+  };
+
   // TLBI VMALLE1 / VMALLE1IS
   if (insn == 0xD508871Fu || insn == 0xD508831Fu) {
     if (sysregs_.in_el0()) {
@@ -3225,7 +3297,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
   // MSR SPSel, #imm
   if ((insn & 0xFFFFF0FFu) == 0xD50040BFu) {
     if (sysregs_.in_el0()) {
-      return trap_el0_system_access();
+      return false;
     }
     sysregs_.set_spsel((insn >> 8) & 0x1u);
     return true;
@@ -3252,7 +3324,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
   // MSR PAN, #imm
   if ((insn & 0xFFFFF0FFu) == 0xD500409Fu) {
     if (sysregs_.in_el0()) {
-      return trap_el0_system_access();
+      return false;
     }
     sysregs_.set_pan(((insn >> 8) & 0x1u) != 0);
     return true;
@@ -3267,6 +3339,12 @@ bool Cpu::exec_system(std::uint32_t insn) {
     const std::uint32_t crm = (insn >> 8) & 0xFu;
     const std::uint32_t op2 = (insn >> 5) & 0x7u;
     const std::uint32_t key = sysreg_key(op0, op1, crn, crm, op2);
+    if (!sysreg_present(key)) {
+      return false;
+    }
+    if (el0_sysreg_undefined(key, false)) {
+      return false;
+    }
     if (!el0_sysreg_access_allowed(key, false)) {
       enter_sync_exception(pc_ - 4, 0x18u, sysreg_trap_iss(true, op0, op1, crn, crm, op2, rt), false, 0);
       return true;
@@ -3371,6 +3449,12 @@ bool Cpu::exec_system(std::uint32_t insn) {
     const std::uint32_t crm = (insn >> 8) & 0xFu;
     const std::uint32_t op2 = (insn >> 5) & 0x7u;
     const std::uint32_t key = sysreg_key(op0, op1, crn, crm, op2);
+    if (!sysreg_present(key)) {
+      return false;
+    }
+    if (el0_sysreg_undefined(key, true)) {
+      return false;
+    }
     if (!el0_sysreg_access_allowed(key, true)) {
       enter_sync_exception(pc_ - 4, 0x18u, sysreg_trap_iss(false, op0, op1, crn, crm, op2, rt), false, 0);
       return true;
@@ -6445,8 +6529,9 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     return true;
   }
 
-  // LDTR/STTR family (unprivileged immediate). Model access the same as normal
-  // EL1 data accesses for the current single-core Linux bring-up path.
+  // LDTR/STTR family (unprivileged immediate). In this model FEAT_UAO is not
+  // implemented, so their explicit memory effects always use EL0 permission
+  // checks when executed above EL0.
   {
     enum class LoadExtend { Zero, Sign32, Sign64 };
     const std::uint32_t tag = insn & 0xFFE00C00u;
@@ -6473,39 +6558,39 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       const std::int64_t simm9 = sign_extend((insn >> 12) & 0x1FFu, 9);
       const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + simm9);
       if (is_load) {
-        const auto value = mmu_read(addr, size);
-        if (!value.has_value()) {
+        std::uint64_t value = 0;
+        if (!mmu_read_value(addr, size, &value, AccessType::UnprivilegedRead)) {
           data_abort(addr);
           return true;
         }
         switch (extend) {
         case LoadExtend::Zero:
           if (size == 8u) {
-            set_reg(rt, *value);
+            set_reg(rt, value);
           } else {
-            set_reg32(rt, static_cast<std::uint32_t>(*value));
+            set_reg32(rt, static_cast<std::uint32_t>(value));
           }
           break;
         case LoadExtend::Sign32:
           if (size == 1u) {
-            set_reg32(rt, static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int8_t>(*value & 0xFFu))));
+            set_reg32(rt, static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int8_t>(value & 0xFFu))));
           } else {
-            set_reg32(rt, static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int16_t>(*value & 0xFFFFu))));
+            set_reg32(rt, static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int16_t>(value & 0xFFFFu))));
           }
           break;
         case LoadExtend::Sign64:
           if (size == 1u) {
-            set_reg(rt, static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int8_t>(*value & 0xFFu))));
+            set_reg(rt, static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int8_t>(value & 0xFFu))));
           } else if (size == 2u) {
-            set_reg(rt, static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int16_t>(*value & 0xFFFFu))));
+            set_reg(rt, static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int16_t>(value & 0xFFFFu))));
           } else {
-            set_reg(rt, static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(*value & 0xFFFFFFFFu))));
+            set_reg(rt, static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(value & 0xFFFFFFFFu))));
           }
           break;
         }
       } else {
         const std::uint64_t value = (size == 8u) ? reg(rt) : (size == 4u) ? reg32(rt) : (size == 2u) ? (reg32(rt) & 0xFFFFu) : (reg32(rt) & 0xFFu);
-        if (!mmu_write(addr, value, size)) {
+        if (!mmu_write_value(addr, value, size, AccessType::UnprivilegedWrite)) {
           data_abort(addr);
           return true;
         }

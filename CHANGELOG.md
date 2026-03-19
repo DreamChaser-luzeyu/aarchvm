@@ -1,3 +1,68 @@
+# 修改日志 2026-03-19 10:24
+
+## 本轮修改
+
+- 继续审阅 AArch64 system register / special-purpose accessor 行为，并修正一组“应为 `UNDEFINED` 却被当前模型当成 EL0 system access trap”的语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [src/system_registers.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/system_registers.cpp)
+  - 新增 `sysreg_present` / `el0_sysreg_undefined` 判定，将以下访问收口到更接近 Armv8-A 规范的行为：
+    - 缺失可选特性寄存器：`TPIDR2_EL0`、`GCSPR_EL0`、`PMUSERENR_EL0`、`AMUSERENR_EL0`
+    - 缺失特性对应的 special-purpose 寄存器：`UAO`、`DIT`、`SSBS`、`TCO`
+    - EL0 下本应直接 `UNDEFINED` 的 special-purpose 寄存器：`CurrentEL`、`SPSel`、`PAN`
+  - 修正 `MSR SPSel, #imm` 与 `MSR PAN, #imm` 在 EL0 下的行为：
+    - 之前错误走到 trap；
+    - 现在改为真正的 undefined 指令异常。
+- 修正 ID 寄存器暴露值与当前实现能力不一致的问题：
+  - [src/system_registers.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/system_registers.cpp)
+  - `ID_AA64MMFR0_EL1` 不再错误宣称不存在的 granule / stage-2 能力，改为与当前“仅 4KB stage-1、无 EL2/stage-2”实现一致的值；
+  - `ID_AA64MMFR1_EL1` 显式宣称已实现的 `PAN` 能力。
+- 调整和加强裸机回归：
+  - 新增 [tests/arm64/el0_idspace_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_idspace_undef.S)
+    - 覆盖 EL0 读取 `MIDR_EL1`、`CLIDR_EL1`、`ID_AA64MMFR0_EL1` 时的 undefined 行为；
+  - 新增 [tests/arm64/el0_special_regs_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_special_regs_undef.S)
+    - 覆盖 EL0 下 `MRS SPSel`、`MRS PAN`、`MSR SPSel,#imm`、`MSR PAN,#imm` 的 undefined 行为；
+  - 新增 [tests/arm64/el0_absent_pstate_features_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_absent_pstate_features_undef.S)
+    - 覆盖 EL0 访问缺失特性 `UAO/DIT/SSBS/TCO` 时的 undefined 行为；
+  - 重写 [tests/arm64/sysreg_optional_absent.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/sysreg_optional_absent.S)
+    - 除 EL1 外，补上 EL0 对 `TPIDR2_EL0`、`GCSPR_EL0`、`PMUSERENR_EL0`、`AMUSERENR_EL0` 的 undefined 覆盖；
+  - 修正 [tests/arm64/el0_sysreg_privilege.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_sysreg_privilege.S)
+    - `CurrentEL` 在 EL0 下不再按 trap 校验，而是按真正 undefined 校验；
+  - 修正 [tests/arm64/id_aa64_feature_regs.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/id_aa64_feature_regs.S)
+    - 按最新 `ID_AA64MMFR0_EL1` / `ID_AA64MMFR1_EL1` 取值校验；
+  - 接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)。
+
+## 本轮测试
+
+- 定向构建与单测：
+  - `timeout 300s cmake --build build -j`
+  - `timeout 300s tests/arm64/build_tests.sh`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/el0_sysreg_privilege.bin -load 0x0 -entry 0x0 -steps 600000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/el0_idspace_undef.bin -load 0x0 -entry 0x0 -steps 600000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/el0_special_regs_undef.bin -load 0x0 -entry 0x0 -steps 600000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/el0_absent_pstate_features_undef.bin -load 0x0 -entry 0x0 -steps 600000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/sysreg_optional_absent.bin -load 0x0 -entry 0x0 -steps 1200000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/id_aa64_feature_regs.bin -load 0x0 -entry 0x0 -steps 300000`
+- 裸机完整回归：
+  - `timeout 900s ./tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1200s ./tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 1800s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 本轮又补齐了一批明确的 Armv8-A 行为缺口，核心集中在：
+  - “缺失特性寄存器/特性 accessor 不应被错误暴露”；
+  - “EL0 下应当 `UNDEFINED` 的 special-purpose accessor 不应被错误上报为 system access trap”；
+  - “ID 寄存器返回值必须与当前实现能力一致”。
+- 本轮结束时，以下回归均已在最新代码状态下通过：
+  - `tests/arm64/run_all.sh`
+  - `tests/linux/run_functional_suite.sh`
+  - `tests/linux/run_functional_suite_smp.sh`
+- 仍不应宣称“已完整实现 Armv8-A 全部强制 ISA/行为”：
+  - 当前这轮主要继续收口 system register / ID-space / special-purpose accessor 的语义；
+  - 后续仍值得继续系统审阅其他低频但程序可见的控制寄存器、异常 syndrome 细节，以及尚未覆盖的特性宣称一致性问题。
+
 # 修改日志 2026-03-19 02:20
 
 ## 本轮修改
@@ -1376,3 +1441,65 @@
 - 仍未闭环的部分：
   - `tests/linux/run_functional_suite_smp.sh`
   - 当前阻塞点仍是 SMP shell snapshot 基础设施未就绪，脚本日志显示 `Failed to load snapshot: out/linux-smp-shell-v1.snap`，因此这轮没有把它计入功能失败。
+
+# 修改日志 2026-03-19 10:56
+
+## 本轮修改
+
+- 基于 `out/my_test.snap` 重新分析 `/init` 卡死现场，确认 CPU1 当时陷在：
+  - `__arch_clear_user()`
+  - faulting 指令是 `sttr xzr, [x0]`
+  - 异常类型为 EL1 same-EL Data Abort。
+- 定位出根因：`LDTR/STTR` 家族一直被按“普通 EL1 数据访问”执行，错误地走了当前 EL 权限模型。
+  - 在 Linux 冷启动到 `/init` 的用户页清零路径里，内核会用 `STTR`/`LDTR` 做 usercopy；
+  - 进入 EL1 异常后 `PSTATE.PAN=1`，错误实现会把这些非特权访问也当成普通特权访问；
+  - 结果本应成功的 user page clear 被错误打成 Permission fault，最终把 `init` 卡死在 fault handling 路径里。
+- 在 CPU/MMU 权限模型中新增显式的 `UnprivilegedRead` / `UnprivilegedWrite` 访问类型。
+- 修正 `LDTR/STTR` 实现，使其显式内存访问在当前模型下按 EL0 权限检查执行。
+  - 当前模拟器未实现 `FEAT_UAO`，因此这类 unprivileged load/store 在 EL1 上始终使用 EL0 访问权限；
+  - 同时保留普通 `LDR/STR` 在 `PAN=1` 时对 user mapping 触发 Permission fault 的原有行为。
+- 新增严格裸机回归 `tests/arm64/mmu_ldtr_sttr_pan.S`，覆盖：
+  - `PAN=1` 时 `LDTR/STTR` 访问 EL0 RW 页必须成功；
+  - 同条件下普通 `LDR` 访问同一 user 页必须 fault；
+  - `LDTR/STTR` 访问 EL1-only 页必须 fault。
+- 将新用例接入：
+  - `tests/arm64/build_tests.sh`
+  - `tests/arm64/run_all.sh`
+- 修复 Linux 功能回归覆盖盲区：
+  - `tests/linux/run_functional_suite.sh`
+  - `tests/linux/run_functional_suite_smp.sh`
+  - 这两个脚本现在会在 `./build/aarchvm` 新于 snapshot build log 时强制重建 shell snapshot，从而覆盖真正的冷启动 `/init` 路径，而不是继续复用旧快照。
+
+## 本轮测试
+
+- 编译与测试构建：
+  - `timeout 600s cmake --build build -j`
+  - `timeout 600s tests/arm64/build_tests.sh`
+- 定向裸机验证：
+  - `timeout 120s ./build/aarchvm -bin tests/arm64/out/mmu_ldtr_sttr_pan.bin -load 0x0 -entry 0x0 -steps 4000000`
+  - `timeout 120s ./build/aarchvm -bin tests/arm64/out/mmu_pan_user_access.bin -load 0x0 -entry 0x0 -steps 4000000`
+  - `timeout 120s ./build/aarchvm -bin tests/arm64/out/ldtr_sttr_usercopy.bin -load 0x0 -entry 0x0 -steps 400000`
+- 坏快照复验：
+  - `timeout 60s env AARCHVM_PRINT_SUMMARY=1 ./build/aarchvm -smp 2 -snapshot-load out/my_test.snap -steps 20000000`
+  - 修复后该坏快照已能继续进入 BusyBox shell，而不是继续卡在 `/init` 附近。
+- Linux 冷启动覆盖：
+  - `timeout 1800s ./tests/linux/build_linux_smp_shell_snapshot.sh`
+- 完整回归：
+  - `timeout 1800s ./tests/arm64/run_all.sh`
+  - `timeout 1800s ./tests/linux/run_functional_suite.sh`
+  - `timeout 2400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 本次 `/init` 卡死不是 timer、GIC 或快照恢复问题，而是 `LDTR/STTR` 权限语义实现错误。
+- 用户给的坏快照足够暴露根因，因为它正好保留了：
+  - CPU0 在 idle/WFI 中等 timer；
+  - CPU1 在 `__arch_clear_user` fault handling 路径里反复打转；
+  - faulting PC 落在 `STTR`。
+- 之前 Linux 回归没有发现这个问题，原因有两个：
+  - `tests/linux/run_functional_suite.sh` 和 `tests/linux/run_functional_suite_smp.sh` 默认复用已有 shell snapshot；
+  - 旧逻辑不会因为 `./build/aarchvm` 变新而重建 snapshot，所以它们绕过了真正的冷启动 `/init` 路径。
+- 本轮修复后已完整通过：
+  - `tests/arm64/run_all.sh`
+  - `tests/linux/run_functional_suite.sh`
+  - `tests/linux/run_functional_suite_smp.sh`

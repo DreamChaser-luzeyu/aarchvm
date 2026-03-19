@@ -82,26 +82,6 @@ after_mrs_currentel:
     ldr  x12, [x11]
     tbz  x12, #2, fail6
 
-    adr  x3, el0_mrs_tpidr2
-    msr  elr_el1, x3
-    msr  spsr_el1, xzr
-    eret
-
-after_mrs_tpidr2:
-    adr  x11, trap_flags
-    ldr  x12, [x11]
-    tbz  x12, #5, fail7
-
-    adr  x3, el0_mrs_gcspr
-    msr  elr_el1, x3
-    msr  spsr_el1, xzr
-    eret
-
-after_mrs_gcspr:
-    adr  x11, trap_flags
-    ldr  x12, [x11]
-    tbz  x12, #6, fail8
-
     adr  x3, el0_msr_tcr
     msr  elr_el1, x3
     msr  spsr_el1, xzr
@@ -110,7 +90,7 @@ after_mrs_gcspr:
 after_msr_tcr:
     adr  x11, trap_flags
     ldr  x12, [x11]
-    tbz  x12, #3, fail9
+    tbz  x12, #3, fail7
 
     adr  x3, el0_msr_daifset
     msr  elr_el1, x3
@@ -120,7 +100,7 @@ after_msr_tcr:
 after_msr_daifset:
     adr  x11, trap_flags
     ldr  x12, [x11]
-    tbz  x12, #4, failA
+    tbz  x12, #4, fail8
 
     movz x0, #'R'
     str  x0, [x1]
@@ -154,12 +134,6 @@ fail7:
     b out
 fail8:
     movz x0, #'8'
-    b out
-fail9:
-    movz x0, #'9'
-    b out
-failA:
-    movz x0, #'A'
     b out
 
 out:
@@ -207,16 +181,6 @@ el0_mrs_currentel_insn:
     mrs  x0, currentel
     svc  #0x16
 
-el0_mrs_tpidr2:
-el0_mrs_tpidr2_insn:
-    .inst 0xD53BD0A0                  // mrs x0, tpidr2_el0
-    svc  #0x17
-
-el0_mrs_gcspr:
-el0_mrs_gcspr_insn:
-    .inst 0xD53B2520                  // mrs x0, gcspr_el0
-    svc  #0x18
-
 el0_msr_tcr:
     movz x0, #1
 el0_msr_tcr_insn:
@@ -240,6 +204,7 @@ lower_sync_handler:
     movz x22, #0x18
     cmp  x21, x22
     b.eq handle_sys_trap
+    cbz  x21, handle_undef
     movz x22, #0x15
     cmp  x21, x22
     b.eq handle_svc
@@ -256,12 +221,6 @@ handle_sys_trap:
     adr  x24, el0_mrs_currentel_insn
     cmp  x23, x24
     b.eq trap_mrs_currentel
-    adr  x24, el0_mrs_tpidr2_insn
-    cmp  x23, x24
-    b.eq trap_mrs_tpidr2
-    adr  x24, el0_mrs_gcspr_insn
-    cmp  x23, x24
-    b.eq trap_mrs_gcspr
     adr  x24, el0_msr_tcr_insn
     cmp  x23, x24
     b.eq trap_msr_tcr
@@ -287,10 +246,6 @@ trap_mrs_far:
     b return_to_el1
 
 trap_mrs_currentel:
-    and  x24, x20, #0x1ffffff
-    ldr  x25, =0x00384240
-    cmp  x24, x25
-    b.ne handler_fail
     adr  x24, trap_flags
     ldr  x25, [x24]
     orr  x25, x25, #4
@@ -298,21 +253,12 @@ trap_mrs_currentel:
     adr  x26, after_mrs_currentel
     b return_to_el1
 
-trap_mrs_tpidr2:
-    adr  x24, trap_flags
-    ldr  x25, [x24]
-    orr  x25, x25, #32
-    str  x25, [x24]
-    adr  x26, after_mrs_tpidr2
-    b return_to_el1
-
-trap_mrs_gcspr:
-    adr  x24, trap_flags
-    ldr  x25, [x24]
-    orr  x25, x25, #64
-    str  x25, [x24]
-    adr  x26, after_mrs_gcspr
-    b return_to_el1
+handle_undef:
+    mrs  x23, elr_el1
+    adr  x24, el0_mrs_currentel_insn
+    cmp  x23, x24
+    b.eq trap_mrs_currentel
+    b handler_fail
 
 trap_msr_tcr:
     adr  x24, trap_flags

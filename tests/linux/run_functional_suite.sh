@@ -62,7 +62,7 @@ print_cmd() {
   printf '\n'
 }
 
-if [[ ! -f "$SNAPSHOT" || ! -f "$BUILD_LOG" || tests/linux/build_usertests_rootfs.sh -nt "$BUILD_LOG" || tests/linux/build_linux_shell_snapshot.sh -nt "$BUILD_LOG" ]]; then
+if [[ ! -f "$SNAPSHOT" || ! -f "$BUILD_LOG" || ./build/aarchvm -nt "$BUILD_LOG" || tests/linux/build_usertests_rootfs.sh -nt "$BUILD_LOG" || tests/linux/build_linux_shell_snapshot.sh -nt "$BUILD_LOG" ]]; then
   tests/linux/build_linux_shell_snapshot.sh >/dev/null
 fi
 

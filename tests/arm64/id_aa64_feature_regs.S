@@ -18,9 +18,13 @@ _start:
     mrs  x2, id_aa64mmfr0_el1
     movz x3, #0x0005
     movk x3, #0x0f00, lsl #16
-    movk x3, #0x0111, lsl #32
     subs xzr, x2, x3
     b.ne fail3
+
+    mrs  x2, id_aa64mmfr1_el1
+    movz x3, #0x0010, lsl #16
+    subs xzr, x2, x3
+    b.ne fail4
 
     movz x0, #'I'
     str  x0, [x1]
@@ -38,6 +42,10 @@ fail2:
     b fail
 fail3:
     movz x0, #'3'
+    str  x0, [x1]
+    b fail
+fail4:
+    movz x0, #'4'
     str  x0, [x1]
 fail:
     movz x0, #'F'

@@ -68,6 +68,9 @@ build_asm_prog pstate_pan
 build_asm_prog id_aa64_feature_regs
 build_asm_prog svc_sysreg_minimal
 build_asm_prog el0_sysreg_privilege
+build_asm_prog el0_idspace_undef
+build_asm_prog el0_special_regs_undef
+build_asm_prog el0_absent_pstate_features_undef
 build_asm_prog el0_daif_uma
 build_asm_prog sysreg_optional_absent
 build_asm_prog lse_atomics
@@ -86,6 +89,7 @@ build_asm_prog mmu_at_tlb_observe
 build_asm_prog mmu_ttbr_asid_mask
 build_asm_prog mmu_tlb_asid_scope
 build_asm_prog mmu_pan_user_access
+build_asm_prog mmu_ldtr_sttr_pan
 build_asm_prog mmu_el0_ap_fault
 build_asm_prog mmu_perm_ro_write_abort
 build_asm_prog mmu_xn_fetch_abort

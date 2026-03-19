@@ -84,6 +84,8 @@ private:
     Fetch,
     Read,
     Write,
+    UnprivilegedRead,
+    UnprivilegedWrite,
   };
 
   enum class Shareability : std::uint8_t {
@@ -231,17 +233,21 @@ private:
       }
       return false;
     };
-    if (sysregs_.in_el0() && !result.user_accessible) {
-      return permission_fault(access == AccessType::Write);
+    const bool write = access_is_write(access);
+    // FEAT_UAO is not implemented in this model, so load/store unprivileged
+    // instructions always use EL0 permission checks when executed above EL0.
+    const bool use_el0_permissions = sysregs_.in_el0() || access_is_unprivileged(access);
+    if (use_el0_permissions && !result.user_accessible) {
+      return permission_fault(write);
     }
-    if (!sysregs_.in_el0() && access != AccessType::Fetch && sysregs_.pan() && result.user_accessible) {
-      return permission_fault(access == AccessType::Write);
+    if (!use_el0_permissions && access != AccessType::Fetch && sysregs_.pan() && result.user_accessible) {
+      return permission_fault(write);
     }
-    if (access == AccessType::Write && !result.writable) {
+    if (write && !result.writable) {
       return permission_fault(true);
     }
     if (access == AccessType::Fetch) {
-      const bool execute_blocked = sysregs_.in_el0() ? result.uxn : result.pxn;
+      const bool execute_blocked = use_el0_permissions ? result.uxn : result.pxn;
       if (execute_blocked) {
         return permission_fault(false);
       }
@@ -276,10 +282,19 @@ private:
   void tlb_insert_entry(std::uint64_t va_page, const TlbEntry& entry);
   void tlb_invalidate_page(std::uint64_t va_page, std::uint16_t asid, bool match_asid);
   void data_abort(std::uint64_t va);
+  [[nodiscard]] static constexpr bool access_is_write(AccessType access) {
+    return access == AccessType::Write || access == AccessType::UnprivilegedWrite;
+  }
+  [[nodiscard]] static constexpr bool access_is_unprivileged(AccessType access) {
+    return access == AccessType::UnprivilegedRead || access == AccessType::UnprivilegedWrite;
+  }
   [[nodiscard]] bool translate_data_address_fast(std::uint64_t va, bool write, std::uint64_t* out_pa);
+  [[nodiscard]] bool translate_data_address_fast(std::uint64_t va, AccessType access, std::uint64_t* out_pa);
   void invalidate_ram_page_caches();
   [[nodiscard]] bool mmu_read_value(std::uint64_t va, std::size_t size, std::uint64_t* out);
+  [[nodiscard]] bool mmu_read_value(std::uint64_t va, std::size_t size, std::uint64_t* out, AccessType access);
   [[nodiscard]] bool mmu_write_value(std::uint64_t va, std::uint64_t value, std::size_t size);
+  [[nodiscard]] bool mmu_write_value(std::uint64_t va, std::uint64_t value, std::size_t size, AccessType access);
   void clear_exclusive_monitor();
   [[nodiscard]] bool capture_exclusive_phys_addrs(std::uint64_t va,
                                                   std::size_t size,

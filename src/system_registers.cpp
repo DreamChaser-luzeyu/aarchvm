@@ -34,8 +34,8 @@ void SystemRegisters::reset() {
   id_aa64isar2_el1_ = 0;
   id_aa64isar3_el1_ = 0;
   id_aa64zfr0_el1_ = 0;
-  id_aa64mmfr0_el1_ = 0x000001110F000005ull;
-  id_aa64mmfr1_el1_ = 0;
+  id_aa64mmfr0_el1_ = 0x000000000F000005ull;
+  id_aa64mmfr1_el1_ = 0x0000000000100000ull;
   id_aa64mmfr2_el1_ = 0;
   id_aa64mmfr3_el1_ = 0;
   csselr_el1_ = 0;
@@ -132,8 +132,6 @@ bool SystemRegisters::read(std::uint32_t op0,
   case SysReg(3, 0, 5, 2, 0): value = esr_el1_; return true;
   case SysReg(3, 0, 6, 0, 0): value = far_el1_; return true;
   case SysReg(2, 0, 0, 2, 2): value = mdscr_el1_; return true;
-  case SysReg(3, 3, 9, 14, 0): value = pmuserenr_el0_; return true;
-  case SysReg(3, 3, 13, 2, 3): value = amuserenr_el0_; return true;
   case SysReg(3, 3, 13, 0, 2): value = tpidr_el0_; return true;
   case SysReg(3, 3, 13, 0, 3): value = tpidrro_el0_; return true;
   case SysReg(3, 0, 13, 0, 4): value = tpidr_el1_; return true;
@@ -190,8 +188,6 @@ bool SystemRegisters::write(std::uint32_t op0,
   case SysReg(3, 0, 5, 2, 0): esr_el1_ = value; return true;
   case SysReg(3, 0, 6, 0, 0): far_el1_ = value; return true;
   case SysReg(2, 0, 0, 2, 2): mdscr_el1_ = value; return true;
-  case SysReg(3, 3, 9, 14, 0): pmuserenr_el0_ = value; return true;
-  case SysReg(3, 3, 13, 2, 3): amuserenr_el0_ = value; return true;
   case SysReg(3, 3, 13, 0, 2): tpidr_el0_ = value; return true;
   case SysReg(3, 3, 13, 0, 3): tpidrro_el0_ = value; return true;
   case SysReg(3, 0, 13, 0, 4): tpidr_el1_ = value; return true;

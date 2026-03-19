@@ -85,6 +85,9 @@ run cntkctl_el1.bin 300000
 run cntkctl_el0_timer_access.bin 600000
 test "$(./build/aarchvm -bin tests/arm64/out/el0_sysreg_privilege.bin -load 0x0 -entry 0x0 -steps 400000 | tr -d '\r\n')" = 'R'
 test "$(./build/aarchvm -bin tests/arm64/out/el0_daif_uma.bin -load 0x0 -entry 0x0 -steps 500000 | tr -d '\r\n')" = 'U'
+test "$(./build/aarchvm -bin tests/arm64/out/el0_idspace_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'D'
+test "$(./build/aarchvm -bin tests/arm64/out/el0_special_regs_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'S'
+test "$(./build/aarchvm -bin tests/arm64/out/el0_absent_pstate_features_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'A'
 test "$(./build/aarchvm -bin tests/arm64/out/sysreg_optional_absent.bin -load 0x0 -entry 0x0 -steps 400000 | tr -d '\r\n')" = 'U'
 test "$(./build/aarchvm -bin tests/arm64/out/el0_cache_ops_privilege.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'C'
 test "$(./build/aarchvm -bin tests/arm64/out/el0_wfx_trap.bin -load 0x0 -entry 0x0 -steps 800000 | tr -d '\r\n')" = 'T'
@@ -123,9 +126,10 @@ run fpsimd_widen_sat.bin 400000
 run cpacr_fp_trap.bin 300000
 run cpacr_fp_mem_trap.bin 300000
 run pstate_pan.bin 200000
-run id_aa64_feature_regs.bin 200000
+run_expect id_aa64_feature_regs.bin 200000 I
 run mmu_el0_ap_fault.bin 4000000
 run mmu_pan_user_access.bin 4000000
+run_expect mmu_ldtr_sttr_pan.bin 4000000 U
 run mmu_tlb_asid_scope.bin 4000000
 run svc_sysreg_minimal.bin 300000
 run lse_atomics.bin 400000
