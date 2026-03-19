@@ -2,6 +2,7 @@
 
 #include "aarchvm/snapshot_io.hpp"
 
+#include <cfenv>
 #include <bit>
 #include <cmath>
 #include <limits>
@@ -336,6 +337,9 @@ std::uint32_t highest_set_bit(std::uint32_t value) {
 }
 
 constexpr std::uint64_t kFpsrIoc = 1ull << 0;
+constexpr std::uint64_t kFpsrDzc = 1ull << 1;
+constexpr std::uint64_t kFpsrOfc = 1ull << 2;
+constexpr std::uint64_t kFpsrUfc = 1ull << 3;
 constexpr std::uint64_t kFpsrIxc = 1ull << 4;
 
 enum class FpToIntRoundingMode {
@@ -345,6 +349,116 @@ enum class FpToIntRoundingMode {
   Zero,
   TieAway,
 };
+
+template <typename UIntT>
+constexpr UIntT fp_sign_mask_bits();
+
+enum class HostFpBinaryOp {
+  Add,
+  Sub,
+  Mul,
+  Div,
+};
+
+int fpcr_rounding_mode_to_host(std::uint32_t fpcr_mode) {
+  switch (fpcr_mode & 0x3u) {
+    case 0u: return FE_TONEAREST;
+    case 1u: return FE_UPWARD;
+    case 2u: return FE_DOWNWARD;
+    case 3u: return FE_TOWARDZERO;
+  }
+  return FE_TONEAREST;
+}
+
+std::uint64_t host_fp_exceptions_to_fpsr(int exceptions) {
+  std::uint64_t fpsr_bits = 0u;
+  if ((exceptions & FE_INVALID) != 0) {
+    fpsr_bits |= kFpsrIoc;
+  }
+  if ((exceptions & FE_DIVBYZERO) != 0) {
+    fpsr_bits |= kFpsrDzc;
+  }
+  if ((exceptions & FE_OVERFLOW) != 0) {
+    fpsr_bits |= kFpsrOfc;
+  }
+  if ((exceptions & FE_UNDERFLOW) != 0) {
+    fpsr_bits |= kFpsrUfc;
+  }
+  if ((exceptions & FE_INEXACT) != 0) {
+    fpsr_bits |= kFpsrIxc;
+  }
+  return fpsr_bits;
+}
+
+template <typename FloatT, typename Fn>
+FloatT host_fp_eval(std::uint32_t fpcr_mode, int& exceptions, Fn&& fn) {
+  fenv_t saved_env{};
+  std::fegetenv(&saved_env);
+  std::fesetround(fpcr_rounding_mode_to_host(fpcr_mode));
+  std::feclearexcept(FE_ALL_EXCEPT);
+  volatile FloatT result = fn();
+  exceptions = std::fetestexcept(FE_ALL_EXCEPT);
+  std::fesetenv(&saved_env);
+  return static_cast<FloatT>(result);
+}
+
+template <typename UIntT, typename FloatT>
+UIntT fp_binary_arith_bits(UIntT lhs_bits,
+                           UIntT rhs_bits,
+                           std::uint32_t fpcr_mode,
+                           HostFpBinaryOp op,
+                           std::uint64_t& fpsr_bits) {
+  const FloatT lhs = std::bit_cast<FloatT>(lhs_bits);
+  const FloatT rhs = std::bit_cast<FloatT>(rhs_bits);
+  int exceptions = 0;
+  const FloatT result = host_fp_eval<FloatT>(fpcr_mode, exceptions, [&]() {
+    volatile FloatT a = lhs;
+    volatile FloatT b = rhs;
+    switch (op) {
+      case HostFpBinaryOp::Add:
+        return static_cast<FloatT>(a + b);
+      case HostFpBinaryOp::Sub:
+        return static_cast<FloatT>(a - b);
+      case HostFpBinaryOp::Mul:
+        return static_cast<FloatT>(a * b);
+      case HostFpBinaryOp::Div:
+        return static_cast<FloatT>(a / b);
+    }
+    return lhs;
+  });
+  fpsr_bits = host_fp_exceptions_to_fpsr(exceptions);
+  return std::bit_cast<UIntT>(result);
+}
+
+template <typename UIntT, typename FloatT>
+UIntT fp_fma_bits(UIntT lhs_bits,
+                  UIntT rhs_bits,
+                  UIntT addend_bits,
+                  std::uint32_t fpcr_mode,
+                  bool negate_product,
+                  bool negate_addend,
+                  std::uint64_t& fpsr_bits) {
+  if (negate_product) {
+    lhs_bits ^= fp_sign_mask_bits<UIntT>();
+  }
+  if (negate_addend) {
+    addend_bits ^= fp_sign_mask_bits<UIntT>();
+  }
+  const FloatT lhs = std::bit_cast<FloatT>(lhs_bits);
+  const FloatT rhs = std::bit_cast<FloatT>(rhs_bits);
+  const FloatT addend = std::bit_cast<FloatT>(addend_bits);
+  int exceptions = 0;
+  const FloatT result = host_fp_eval<FloatT>(fpcr_mode, exceptions, [&]() {
+    volatile FloatT a = lhs;
+    volatile FloatT b = rhs;
+    volatile FloatT c = addend;
+    return static_cast<FloatT>(std::fma(static_cast<FloatT>(a),
+                                        static_cast<FloatT>(b),
+                                        static_cast<FloatT>(c)));
+  });
+  fpsr_bits = host_fp_exceptions_to_fpsr(exceptions);
+  return std::bit_cast<UIntT>(result);
+}
 
 template <typename UIntT>
 bool fp_is_nan_bits(UIntT bits) {
@@ -5312,14 +5426,21 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
       const bool numeric_variant =
           opcode == 0x2E20C400u || opcode == 0x6E20C400u || opcode == 0x6E60C400u ||
           opcode == 0x2EA0C400u || opcode == 0x6EA0C400u || opcode == 0x6EE0C400u;
+      const std::uint32_t fpcr_mode = static_cast<std::uint32_t>((sysregs_.fpcr() >> 22) & 0x3u);
 
       for (std::uint32_t lane = 0; lane < half_lanes; ++lane) {
         const std::uint32_t src_lane = lane * 2u;
         if (esize_bits == 32u) {
           if (is_addp) {
-            const float a = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, src_lane)));
-            const float b = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, src_lane + 1u)));
-            vector_set_elem(dst, 32u, lane, std::bit_cast<std::uint32_t>(a + b));
+            std::uint64_t lane_fpsr = 0u;
+            const std::uint32_t result = fp_binary_arith_bits<std::uint32_t, float>(
+                static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, src_lane)),
+                static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, src_lane + 1u)),
+                fpcr_mode,
+                HostFpBinaryOp::Add,
+                lane_fpsr);
+            fpsr_bits |= lane_fpsr;
+            vector_set_elem(dst, 32u, lane, result);
           } else {
             std::uint64_t lane_fpsr = 0u;
             const std::uint32_t result = fp_minmax_result_bits<std::uint32_t, float>(
@@ -5333,9 +5454,15 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
           }
         } else {
           if (is_addp) {
-            const double a = std::bit_cast<double>(vector_get_elem(lhs, 64u, src_lane));
-            const double b = std::bit_cast<double>(vector_get_elem(lhs, 64u, src_lane + 1u));
-            vector_set_elem(dst, 64u, lane, std::bit_cast<std::uint64_t>(a + b));
+            std::uint64_t lane_fpsr = 0u;
+            const std::uint64_t result = fp_binary_arith_bits<std::uint64_t, double>(
+                vector_get_elem(lhs, 64u, src_lane),
+                vector_get_elem(lhs, 64u, src_lane + 1u),
+                fpcr_mode,
+                HostFpBinaryOp::Add,
+                lane_fpsr);
+            fpsr_bits |= lane_fpsr;
+            vector_set_elem(dst, 64u, lane, result);
           } else {
             std::uint64_t lane_fpsr = 0u;
             const std::uint64_t result = fp_minmax_result_bits<std::uint64_t, double>(
@@ -5355,9 +5482,15 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
         const std::uint32_t dst_lane = lane + half_lanes;
         if (esize_bits == 32u) {
           if (is_addp) {
-            const float a = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, src_lane)));
-            const float b = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, src_lane + 1u)));
-            vector_set_elem(dst, 32u, dst_lane, std::bit_cast<std::uint32_t>(a + b));
+            std::uint64_t lane_fpsr = 0u;
+            const std::uint32_t result = fp_binary_arith_bits<std::uint32_t, float>(
+                static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, src_lane)),
+                static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, src_lane + 1u)),
+                fpcr_mode,
+                HostFpBinaryOp::Add,
+                lane_fpsr);
+            fpsr_bits |= lane_fpsr;
+            vector_set_elem(dst, 32u, dst_lane, result);
           } else {
             std::uint64_t lane_fpsr = 0u;
             const std::uint32_t result = fp_minmax_result_bits<std::uint32_t, float>(
@@ -5371,9 +5504,15 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
           }
         } else {
           if (is_addp) {
-            const double a = std::bit_cast<double>(vector_get_elem(rhs, 64u, src_lane));
-            const double b = std::bit_cast<double>(vector_get_elem(rhs, 64u, src_lane + 1u));
-            vector_set_elem(dst, 64u, dst_lane, std::bit_cast<std::uint64_t>(a + b));
+            std::uint64_t lane_fpsr = 0u;
+            const std::uint64_t result = fp_binary_arith_bits<std::uint64_t, double>(
+                vector_get_elem(rhs, 64u, src_lane),
+                vector_get_elem(rhs, 64u, src_lane + 1u),
+                fpcr_mode,
+                HostFpBinaryOp::Add,
+                lane_fpsr);
+            fpsr_bits |= lane_fpsr;
+            vector_set_elem(dst, 64u, dst_lane, result);
           } else {
             std::uint64_t lane_fpsr = 0u;
             const std::uint64_t result = fp_minmax_result_bits<std::uint64_t, double>(
@@ -5437,6 +5576,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
   if ((insn & 0xBF20FC00u) == 0x0E20D400u) { // FADD/FSUB (vector)
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
     const bool is_sub = ((insn >> 23) & 1u) != 0u;
+    const std::uint32_t fpcr_mode = static_cast<std::uint32_t>((sysregs_.fpcr() >> 22) & 0x3u);
     std::uint32_t esize_bits = 0;
     std::uint32_t lanes = 0;
     if (!vector_fp_shape(insn, esize_bits, lanes)) {
@@ -5445,25 +5585,38 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     const auto lhs = qregs_[rn];
     const auto rhs = qregs_[rm];
     std::array<std::uint64_t, 2> dst = {0, 0};
+    std::uint64_t fpsr_bits = 0u;
     for (std::uint32_t lane = 0; lane < lanes; ++lane) {
       if (esize_bits == 32u) {
-        const float a = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)));
-        const float b = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane)));
-        const float value = is_sub ? (a - b) : (a + b);
-        vector_set_elem(dst, 32u, lane, std::bit_cast<std::uint32_t>(value));
+        std::uint64_t lane_fpsr = 0u;
+        const std::uint32_t result = fp_binary_arith_bits<std::uint32_t, float>(
+            static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)),
+            static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane)),
+            fpcr_mode,
+            is_sub ? HostFpBinaryOp::Sub : HostFpBinaryOp::Add,
+            lane_fpsr);
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 32u, lane, result);
       } else {
-        const double a = std::bit_cast<double>(vector_get_elem(lhs, 64u, lane));
-        const double b = std::bit_cast<double>(vector_get_elem(rhs, 64u, lane));
-        const double value = is_sub ? (a - b) : (a + b);
-        vector_set_elem(dst, 64u, lane, std::bit_cast<std::uint64_t>(value));
+        std::uint64_t lane_fpsr = 0u;
+        const std::uint64_t result = fp_binary_arith_bits<std::uint64_t, double>(
+            vector_get_elem(lhs, 64u, lane),
+            vector_get_elem(rhs, 64u, lane),
+            fpcr_mode,
+            is_sub ? HostFpBinaryOp::Sub : HostFpBinaryOp::Add,
+            lane_fpsr);
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 64u, lane, result);
       }
     }
+    sysregs_.fp_or_fpsr(fpsr_bits);
     qregs_[rd] = dst;
     return true;
   }
 
   if ((insn & 0x9F20FC00u) == 0x0E20DC00u) { // FMUL (vector)
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t fpcr_mode = static_cast<std::uint32_t>((sysregs_.fpcr() >> 22) & 0x3u);
     std::uint32_t esize_bits = 0;
     std::uint32_t lanes = 0;
     if (!vector_fp_shape(insn, esize_bits, lanes)) {
@@ -5472,17 +5625,31 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     const auto lhs = qregs_[rn];
     const auto rhs = qregs_[rm];
     std::array<std::uint64_t, 2> dst = {0, 0};
+    std::uint64_t fpsr_bits = 0u;
     for (std::uint32_t lane = 0; lane < lanes; ++lane) {
       if (esize_bits == 32u) {
-        const float a = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)));
-        const float b = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane)));
-        vector_set_elem(dst, 32u, lane, std::bit_cast<std::uint32_t>(a * b));
+        std::uint64_t lane_fpsr = 0u;
+        const std::uint32_t result = fp_binary_arith_bits<std::uint32_t, float>(
+            static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)),
+            static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane)),
+            fpcr_mode,
+            HostFpBinaryOp::Mul,
+            lane_fpsr);
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 32u, lane, result);
       } else {
-        const double a = std::bit_cast<double>(vector_get_elem(lhs, 64u, lane));
-        const double b = std::bit_cast<double>(vector_get_elem(rhs, 64u, lane));
-        vector_set_elem(dst, 64u, lane, std::bit_cast<std::uint64_t>(a * b));
+        std::uint64_t lane_fpsr = 0u;
+        const std::uint64_t result = fp_binary_arith_bits<std::uint64_t, double>(
+            vector_get_elem(lhs, 64u, lane),
+            vector_get_elem(rhs, 64u, lane),
+            fpcr_mode,
+            HostFpBinaryOp::Mul,
+            lane_fpsr);
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 64u, lane, result);
       }
     }
+    sysregs_.fp_or_fpsr(fpsr_bits);
     qregs_[rd] = dst;
     return true;
   }
@@ -5541,6 +5708,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
 
   if ((insn & 0x9F20FC00u) == 0x0E20FC00u) { // FDIV (vector)
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t fpcr_mode = static_cast<std::uint32_t>((sysregs_.fpcr() >> 22) & 0x3u);
     std::uint32_t esize_bits = 0;
     std::uint32_t lanes = 0;
     if (!vector_fp_shape(insn, esize_bits, lanes)) {
@@ -5549,17 +5717,31 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     const auto lhs = qregs_[rn];
     const auto rhs = qregs_[rm];
     std::array<std::uint64_t, 2> dst = {0, 0};
+    std::uint64_t fpsr_bits = 0u;
     for (std::uint32_t lane = 0; lane < lanes; ++lane) {
       if (esize_bits == 32u) {
-        const float a = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)));
-        const float b = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane)));
-        vector_set_elem(dst, 32u, lane, std::bit_cast<std::uint32_t>(a / b));
+        std::uint64_t lane_fpsr = 0u;
+        const std::uint32_t result = fp_binary_arith_bits<std::uint32_t, float>(
+            static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)),
+            static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane)),
+            fpcr_mode,
+            HostFpBinaryOp::Div,
+            lane_fpsr);
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 32u, lane, result);
       } else {
-        const double a = std::bit_cast<double>(vector_get_elem(lhs, 64u, lane));
-        const double b = std::bit_cast<double>(vector_get_elem(rhs, 64u, lane));
-        vector_set_elem(dst, 64u, lane, std::bit_cast<std::uint64_t>(a / b));
+        std::uint64_t lane_fpsr = 0u;
+        const std::uint64_t result = fp_binary_arith_bits<std::uint64_t, double>(
+            vector_get_elem(lhs, 64u, lane),
+            vector_get_elem(rhs, 64u, lane),
+            fpcr_mode,
+            HostFpBinaryOp::Div,
+            lane_fpsr);
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 64u, lane, result);
       }
     }
+    sysregs_.fp_or_fpsr(fpsr_bits);
     qregs_[rd] = dst;
     return true;
   }
@@ -5607,6 +5789,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
   if ((insn & 0x9F20FC00u) == 0x0E20CC00u) { // FMLA/FMLS (vector)
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
     const bool is_sub = ((insn >> 23) & 1u) != 0u;
+    const std::uint32_t fpcr_mode = static_cast<std::uint32_t>((sysregs_.fpcr() >> 22) & 0x3u);
     std::uint32_t esize_bits = 0;
     std::uint32_t lanes = 0;
     if (!vector_fp_shape(insn, esize_bits, lanes)) {
@@ -5616,21 +5799,35 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     const auto lhs = qregs_[rn];
     const auto rhs = qregs_[rm];
     std::array<std::uint64_t, 2> dst = {0, 0};
+    std::uint64_t fpsr_bits = 0u;
     for (std::uint32_t lane = 0; lane < lanes; ++lane) {
       if (esize_bits == 32u) {
-        const float a = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(acc, 32u, lane)));
-        const float b = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)));
-        const float c = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane)));
-        const float value = is_sub ? (a - (b * c)) : (a + (b * c));
-        vector_set_elem(dst, 32u, lane, std::bit_cast<std::uint32_t>(value));
+        std::uint64_t lane_fpsr = 0u;
+        const std::uint32_t result = fp_fma_bits<std::uint32_t, float>(
+            static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)),
+            static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane)),
+            static_cast<std::uint32_t>(vector_get_elem(acc, 32u, lane)),
+            fpcr_mode,
+            is_sub,
+            false,
+            lane_fpsr);
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 32u, lane, result);
       } else {
-        const double a = std::bit_cast<double>(vector_get_elem(acc, 64u, lane));
-        const double b = std::bit_cast<double>(vector_get_elem(lhs, 64u, lane));
-        const double c = std::bit_cast<double>(vector_get_elem(rhs, 64u, lane));
-        const double value = is_sub ? (a - (b * c)) : (a + (b * c));
-        vector_set_elem(dst, 64u, lane, std::bit_cast<std::uint64_t>(value));
+        std::uint64_t lane_fpsr = 0u;
+        const std::uint64_t result = fp_fma_bits<std::uint64_t, double>(
+            vector_get_elem(lhs, 64u, lane),
+            vector_get_elem(rhs, 64u, lane),
+            vector_get_elem(acc, 64u, lane),
+            fpcr_mode,
+            is_sub,
+            false,
+            lane_fpsr);
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 64u, lane, result);
       }
     }
+    sysregs_.fp_or_fpsr(fpsr_bits);
     qregs_[rd] = dst;
     return true;
   }
@@ -5677,6 +5874,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
 
   if ((insn & 0xBF20FC00u) == 0x2E20D400u) { // FABD (vector)
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t fpcr_mode = static_cast<std::uint32_t>((sysregs_.fpcr() >> 22) & 0x3u);
     std::uint32_t esize_bits = 0;
     std::uint32_t lanes = 0;
     if (!vector_fp_shape(insn, esize_bits, lanes)) {
@@ -5685,17 +5883,33 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     const auto lhs = qregs_[rn];
     const auto rhs = qregs_[rm];
     std::array<std::uint64_t, 2> dst = {0, 0};
+    std::uint64_t fpsr_bits = 0u;
     for (std::uint32_t lane = 0; lane < lanes; ++lane) {
       if (esize_bits == 32u) {
-        const float a = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)));
-        const float b = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane)));
-        vector_set_elem(dst, 32u, lane, std::bit_cast<std::uint32_t>(std::fabs(a - b)));
+        std::uint64_t lane_fpsr = 0u;
+        std::uint32_t result = fp_binary_arith_bits<std::uint32_t, float>(
+            static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)),
+            static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane)),
+            fpcr_mode,
+            HostFpBinaryOp::Sub,
+            lane_fpsr);
+        result &= ~fp_sign_mask_bits<std::uint32_t>();
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 32u, lane, result);
       } else {
-        const double a = std::bit_cast<double>(vector_get_elem(lhs, 64u, lane));
-        const double b = std::bit_cast<double>(vector_get_elem(rhs, 64u, lane));
-        vector_set_elem(dst, 64u, lane, std::bit_cast<std::uint64_t>(std::fabs(a - b)));
+        std::uint64_t lane_fpsr = 0u;
+        std::uint64_t result = fp_binary_arith_bits<std::uint64_t, double>(
+            vector_get_elem(lhs, 64u, lane),
+            vector_get_elem(rhs, 64u, lane),
+            fpcr_mode,
+            HostFpBinaryOp::Sub,
+            lane_fpsr);
+        result &= ~fp_sign_mask_bits<std::uint64_t>();
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 64u, lane, result);
       }
     }
+    sysregs_.fp_or_fpsr(fpsr_bits);
     qregs_[rd] = dst;
     return true;
   }
@@ -6853,12 +7067,31 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
   if ((insn & 0xFF20FC00u) == 0x1E200800u) { // FMUL (scalar)
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
     const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    const std::uint32_t fpcr_mode = static_cast<std::uint32_t>((sysregs_.fpcr() >> 22) & 0x3u);
     if (ftype == 0u) {
-      write_fp32(rd, read_fp32(rn) * read_fp32(rm));
+      std::uint64_t fpsr_bits = 0u;
+      const std::uint32_t result = fp_binary_arith_bits<std::uint32_t, float>(
+          static_cast<std::uint32_t>(qregs_[rn][0] & 0xFFFFFFFFu),
+          static_cast<std::uint32_t>(qregs_[rm][0] & 0xFFFFFFFFu),
+          fpcr_mode,
+          HostFpBinaryOp::Mul,
+          fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      qregs_[rd][0] = result;
+      qregs_[rd][1] = 0u;
       return true;
     }
     if (ftype == 1u) {
-      write_fp64(rd, read_fp64(rn) * read_fp64(rm));
+      std::uint64_t fpsr_bits = 0u;
+      const std::uint64_t result = fp_binary_arith_bits<std::uint64_t, double>(
+          qregs_[rn][0],
+          qregs_[rm][0],
+          fpcr_mode,
+          HostFpBinaryOp::Mul,
+          fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      qregs_[rd][0] = result;
+      qregs_[rd][1] = 0u;
       return true;
     }
     return false;
@@ -6867,12 +7100,33 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
   if ((insn & 0xFF20FC00u) == 0x1E208800u) { // FNMUL (scalar)
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
     const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    const std::uint32_t fpcr_mode = static_cast<std::uint32_t>((sysregs_.fpcr() >> 22) & 0x3u);
     if (ftype == 0u) {
-      write_fp32(rd, -(read_fp32(rn) * read_fp32(rm)));
+      std::uint64_t fpsr_bits = 0u;
+      std::uint32_t result = fp_binary_arith_bits<std::uint32_t, float>(
+          static_cast<std::uint32_t>(qregs_[rn][0] & 0xFFFFFFFFu),
+          static_cast<std::uint32_t>(qregs_[rm][0] & 0xFFFFFFFFu),
+          fpcr_mode,
+          HostFpBinaryOp::Mul,
+          fpsr_bits);
+      result ^= fp_sign_mask_bits<std::uint32_t>();
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      qregs_[rd][0] = result;
+      qregs_[rd][1] = 0u;
       return true;
     }
     if (ftype == 1u) {
-      write_fp64(rd, -(read_fp64(rn) * read_fp64(rm)));
+      std::uint64_t fpsr_bits = 0u;
+      std::uint64_t result = fp_binary_arith_bits<std::uint64_t, double>(
+          qregs_[rn][0],
+          qregs_[rm][0],
+          fpcr_mode,
+          HostFpBinaryOp::Mul,
+          fpsr_bits);
+      result ^= fp_sign_mask_bits<std::uint64_t>();
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      qregs_[rd][0] = result;
+      qregs_[rd][1] = 0u;
       return true;
     }
     return false;
@@ -6881,23 +7135,63 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
   if ((insn & 0xFF20FC00u) == 0x7E20D400u) { // FABD (scalar)
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
     const bool is_double = ((insn >> 22) & 1u) != 0u;
+    const std::uint32_t fpcr_mode = static_cast<std::uint32_t>((sysregs_.fpcr() >> 22) & 0x3u);
     if (!is_double) {
-      write_fp32(rd, std::fabs(read_fp32(rn) - read_fp32(rm)));
+      std::uint64_t fpsr_bits = 0u;
+      std::uint32_t result = fp_binary_arith_bits<std::uint32_t, float>(
+          static_cast<std::uint32_t>(qregs_[rn][0] & 0xFFFFFFFFu),
+          static_cast<std::uint32_t>(qregs_[rm][0] & 0xFFFFFFFFu),
+          fpcr_mode,
+          HostFpBinaryOp::Sub,
+          fpsr_bits);
+      result &= ~fp_sign_mask_bits<std::uint32_t>();
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      qregs_[rd][0] = result;
+      qregs_[rd][1] = 0u;
       return true;
     }
-    write_fp64(rd, std::fabs(read_fp64(rn) - read_fp64(rm)));
+    std::uint64_t fpsr_bits = 0u;
+    std::uint64_t result = fp_binary_arith_bits<std::uint64_t, double>(
+        qregs_[rn][0],
+        qregs_[rm][0],
+        fpcr_mode,
+        HostFpBinaryOp::Sub,
+        fpsr_bits);
+    result &= ~fp_sign_mask_bits<std::uint64_t>();
+    sysregs_.fp_or_fpsr(fpsr_bits);
+    qregs_[rd][0] = result;
+    qregs_[rd][1] = 0u;
     return true;
   }
 
   if ((insn & 0xFF20FC00u) == 0x1E201800u) { // FDIV (scalar)
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
     const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    const std::uint32_t fpcr_mode = static_cast<std::uint32_t>((sysregs_.fpcr() >> 22) & 0x3u);
     if (ftype == 0u) {
-      write_fp32(rd, read_fp32(rn) / read_fp32(rm));
+      std::uint64_t fpsr_bits = 0u;
+      const std::uint32_t result = fp_binary_arith_bits<std::uint32_t, float>(
+          static_cast<std::uint32_t>(qregs_[rn][0] & 0xFFFFFFFFu),
+          static_cast<std::uint32_t>(qregs_[rm][0] & 0xFFFFFFFFu),
+          fpcr_mode,
+          HostFpBinaryOp::Div,
+          fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      qregs_[rd][0] = result;
+      qregs_[rd][1] = 0u;
       return true;
     }
     if (ftype == 1u) {
-      write_fp64(rd, read_fp64(rn) / read_fp64(rm));
+      std::uint64_t fpsr_bits = 0u;
+      const std::uint64_t result = fp_binary_arith_bits<std::uint64_t, double>(
+          qregs_[rn][0],
+          qregs_[rm][0],
+          fpcr_mode,
+          HostFpBinaryOp::Div,
+          fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      qregs_[rd][0] = result;
+      qregs_[rd][1] = 0u;
       return true;
     }
     return false;
@@ -6905,15 +7199,31 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
 
   switch (insn & 0xFFFFFC00u) {
     case 0x7E30D800u: { // FADDP Sd, Vn.2S
-      const float a = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(qregs_[rn], 32u, 0u)));
-      const float b = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(qregs_[rn], 32u, 1u)));
-      write_fp32(rd, a + b);
+      const std::uint32_t fpcr_mode = static_cast<std::uint32_t>((sysregs_.fpcr() >> 22) & 0x3u);
+      std::uint64_t fpsr_bits = 0u;
+      const std::uint32_t result = fp_binary_arith_bits<std::uint32_t, float>(
+          static_cast<std::uint32_t>(vector_get_elem(qregs_[rn], 32u, 0u)),
+          static_cast<std::uint32_t>(vector_get_elem(qregs_[rn], 32u, 1u)),
+          fpcr_mode,
+          HostFpBinaryOp::Add,
+          fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      qregs_[rd][0] = result;
+      qregs_[rd][1] = 0u;
       return true;
     }
     case 0x7E70D800u: { // FADDP Dd, Vn.2D
-      const double a = std::bit_cast<double>(vector_get_elem(qregs_[rn], 64u, 0u));
-      const double b = std::bit_cast<double>(vector_get_elem(qregs_[rn], 64u, 1u));
-      write_fp64(rd, a + b);
+      const std::uint32_t fpcr_mode = static_cast<std::uint32_t>((sysregs_.fpcr() >> 22) & 0x3u);
+      std::uint64_t fpsr_bits = 0u;
+      const std::uint64_t result = fp_binary_arith_bits<std::uint64_t, double>(
+          vector_get_elem(qregs_[rn], 64u, 0u),
+          vector_get_elem(qregs_[rn], 64u, 1u),
+          fpcr_mode,
+          HostFpBinaryOp::Add,
+          fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      qregs_[rd][0] = result;
+      qregs_[rd][1] = 0u;
       return true;
     }
     case 0x7E30F800u: // FMAXP Sd, Vn.2S
@@ -6986,12 +7296,31 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
   if ((insn & 0xFF20FC00u) == 0x1E202800u) { // FADD (scalar)
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
     const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    const std::uint32_t fpcr_mode = static_cast<std::uint32_t>((sysregs_.fpcr() >> 22) & 0x3u);
     if (ftype == 0u) {
-      write_fp32(rd, read_fp32(rn) + read_fp32(rm));
+      std::uint64_t fpsr_bits = 0u;
+      const std::uint32_t result = fp_binary_arith_bits<std::uint32_t, float>(
+          static_cast<std::uint32_t>(qregs_[rn][0] & 0xFFFFFFFFu),
+          static_cast<std::uint32_t>(qregs_[rm][0] & 0xFFFFFFFFu),
+          fpcr_mode,
+          HostFpBinaryOp::Add,
+          fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      qregs_[rd][0] = result;
+      qregs_[rd][1] = 0u;
       return true;
     }
     if (ftype == 1u) {
-      write_fp64(rd, read_fp64(rn) + read_fp64(rm));
+      std::uint64_t fpsr_bits = 0u;
+      const std::uint64_t result = fp_binary_arith_bits<std::uint64_t, double>(
+          qregs_[rn][0],
+          qregs_[rm][0],
+          fpcr_mode,
+          HostFpBinaryOp::Add,
+          fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      qregs_[rd][0] = result;
+      qregs_[rd][1] = 0u;
       return true;
     }
     return false;
@@ -7000,12 +7329,31 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
   if ((insn & 0xFF20FC00u) == 0x1E203800u) { // FSUB (scalar)
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
     const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    const std::uint32_t fpcr_mode = static_cast<std::uint32_t>((sysregs_.fpcr() >> 22) & 0x3u);
     if (ftype == 0u) {
-      write_fp32(rd, read_fp32(rn) - read_fp32(rm));
+      std::uint64_t fpsr_bits = 0u;
+      const std::uint32_t result = fp_binary_arith_bits<std::uint32_t, float>(
+          static_cast<std::uint32_t>(qregs_[rn][0] & 0xFFFFFFFFu),
+          static_cast<std::uint32_t>(qregs_[rm][0] & 0xFFFFFFFFu),
+          fpcr_mode,
+          HostFpBinaryOp::Sub,
+          fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      qregs_[rd][0] = result;
+      qregs_[rd][1] = 0u;
       return true;
     }
     if (ftype == 1u) {
-      write_fp64(rd, read_fp64(rn) - read_fp64(rm));
+      std::uint64_t fpsr_bits = 0u;
+      const std::uint64_t result = fp_binary_arith_bits<std::uint64_t, double>(
+          qregs_[rn][0],
+          qregs_[rm][0],
+          fpcr_mode,
+          HostFpBinaryOp::Sub,
+          fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      qregs_[rd][0] = result;
+      qregs_[rd][1] = 0u;
       return true;
     }
     return false;
@@ -7020,16 +7368,35 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     const std::uint32_t ftype = (insn >> 22) & 0x3u;
     const bool negate_addend = (insn & 0x00200000u) != 0u;
     const bool negate_product = negate_addend ^ ((insn & 0x00008000u) != 0u);
+    const std::uint32_t fpcr_mode = static_cast<std::uint32_t>((sysregs_.fpcr() >> 22) & 0x3u);
     if (ftype == 0u) {
-      const float lhs = negate_product ? -read_fp32(rn) : read_fp32(rn);
-      const float addend = negate_addend ? -read_fp32(ra) : read_fp32(ra);
-      write_fp32(rd, std::fma(lhs, read_fp32(rm), addend));
+      std::uint64_t fpsr_bits = 0u;
+      const std::uint32_t result = fp_fma_bits<std::uint32_t, float>(
+          static_cast<std::uint32_t>(qregs_[rn][0] & 0xFFFFFFFFu),
+          static_cast<std::uint32_t>(qregs_[rm][0] & 0xFFFFFFFFu),
+          static_cast<std::uint32_t>(qregs_[ra][0] & 0xFFFFFFFFu),
+          fpcr_mode,
+          negate_product,
+          negate_addend,
+          fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      qregs_[rd][0] = result;
+      qregs_[rd][1] = 0u;
       return true;
     }
     if (ftype == 1u) {
-      const double lhs = negate_product ? -read_fp64(rn) : read_fp64(rn);
-      const double addend = negate_addend ? -read_fp64(ra) : read_fp64(ra);
-      write_fp64(rd, std::fma(lhs, read_fp64(rm), addend));
+      std::uint64_t fpsr_bits = 0u;
+      const std::uint64_t result = fp_fma_bits<std::uint64_t, double>(
+          qregs_[rn][0],
+          qregs_[rm][0],
+          qregs_[ra][0],
+          fpcr_mode,
+          negate_product,
+          negate_addend,
+          fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      qregs_[rd][0] = result;
+      qregs_[rd][1] = 0u;
       return true;
     }
     return false;

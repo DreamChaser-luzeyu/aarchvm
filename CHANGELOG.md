@@ -1,3 +1,50 @@
+# 修改日志 2026-03-19 22:36
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程补齐普通浮点算术/融合乘加的 AArch64 `FPCR/FPSR` 语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fp_arith_fpcr_flags.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_arith_fpcr_flags.S)
+  - [tests/arm64/fpsimd_arith_fpcr_flags.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_arith_fpcr_flags.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 新增统一的宿主 `fenv` 浮点执行 helper：
+  - 将 guest `FPCR.RMode` 映射到宿主舍入模式；
+  - 将宿主 `FE_INVALID/FE_DIVBYZERO/FE_OVERFLOW/FE_UNDERFLOW/FE_INEXACT` 映射到 guest `FPSR` 的 `IOC/DZC/OFC/UFC/IXC`；
+  - 用统一 helper 收敛普通标量/向量浮点算术与融合乘加路径。
+- 修正了下列指令族的 guest 可见行为：
+  - 标量 `FADD/FSUB/FMUL/FNMUL/FDIV/FABD/FADDP/FMADD/FMSUB/FNMADD/FNMSUB`
+  - 向量 `FADD/FSUB/FMUL/FDIV/FABD/FADDP/FMLA/FMLS`
+- 本轮修复的重点语义：
+  - 普通浮点算术现在遵守 guest `FPCR.RMode`，不再固定使用宿主默认舍入模式；
+  - `FDIV` 等运算现在会累计 `FPSR.DZC/OFC/UFC/IXC/IOC`；
+  - 向量 `FMLA/FMLS` 改为明确走 fused 语义，而不是依赖宿主是否会偶然做 contraction；
+  - `FABD`/`FNMUL` 现在在保留算术异常语义的同时，分别执行绝对值/符号翻转。
+- 新增裸机单测：
+  - [tests/arm64/fp_arith_fpcr_flags.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_arith_fpcr_flags.S)
+    - 覆盖标量 `FADD` 的 `FPCR.RMode=+Inf` 与 `FPSR.IXC`
+    - 覆盖标量 `FDIV` 的 `FPSR.DZC`
+    - 覆盖标量 `FMADD` 的 fused 语义
+  - [tests/arm64/fpsimd_arith_fpcr_flags.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_arith_fpcr_flags.S)
+    - 覆盖向量 `FADD` 的 `FPCR.RMode=+Inf` 与 `FPSR.IXC`
+    - 覆盖向量 `FDIV` 的 `FPSR.DZC`
+    - 覆盖向量 `FMLA` 的 fused 语义
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_arith_fpcr_flags.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_arith_fpcr_flags.bin -load 0x0 -entry 0x0 -steps 500000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_scalar_fma.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_scalar_pairwise.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_fp_vector.bin -load 0x0 -entry 0x0 -steps 500000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_fp_pairwise.bin -load 0x0 -entry 0x0 -steps 500000`
+- `timeout 2400s tests/arm64/run_all.sh`
+- `timeout 1200s tests/linux/run_functional_suite.sh`
+- `timeout 1200s tests/linux/run_functional_suite_smp.sh`
+- 结果：全部通过。
+
 # 修改日志 2026-03-19 21:37
 
 ## 本轮修改

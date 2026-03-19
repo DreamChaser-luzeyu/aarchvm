@@ -58,6 +58,7 @@ build_asm_prog fp_minmax_nan_flags
 build_asm_prog fp_cond_compare
 build_asm_prog fp_scalar_fcsel
 build_asm_prog fp_scalar_fma
+build_asm_prog fp_arith_fpcr_flags
 build_asm_prog fp_scalar_misc
 build_asm_prog fp_sqrt_flags
 build_asm_prog fp_roundint_flags
@@ -72,6 +73,7 @@ build_asm_prog fpsimd_fp_step
 build_asm_prog fpsimd_fp_convert_long_narrow
 build_asm_prog fpsimd_fp_reducev
 build_asm_prog fpsimd_fp_misc_rounding
+build_asm_prog fpsimd_arith_fpcr_flags
 build_asm_prog fpsimd_fp_pairwise
 build_asm_prog fpsimd_misc_more
 build_asm_prog fpsimd_arith_shift_perm

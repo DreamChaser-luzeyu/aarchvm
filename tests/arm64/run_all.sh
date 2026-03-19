@@ -128,6 +128,7 @@ run_expect fp_minmax_nan_flags.bin 300000 M
 run_expect fp_cond_compare.bin 200000 C
 run fp_scalar_fcsel.bin 200000
 run fp_scalar_fma.bin 200000
+run_expect fp_arith_fpcr_flags.bin 300000 A
 run fp_scalar_misc.bin 200000
 run_expect fp_sqrt_flags.bin 300000 Q
 run_expect fp_roundint_flags.bin 300000 I
@@ -142,6 +143,7 @@ run_expect fpsimd_fp_step.bin 400000 S
 run_expect fpsimd_fp_convert_long_narrow.bin 400000 H
 run_expect fpsimd_fp_reducev.bin 400000 R
 run_expect fpsimd_fp_misc_rounding.bin 400000 V
+run_expect fpsimd_arith_fpcr_flags.bin 400000 N
 run_expect fpsimd_fp_pairwise.bin 400000 Z
 run_expect fpsimd_misc_more.bin 300000 G
 run fpsimd_arith_shift_perm.bin 300000
