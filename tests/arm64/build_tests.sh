@@ -60,9 +60,15 @@ build_asm_prog fp_scalar_fcsel
 build_asm_prog fp_scalar_fma
 build_asm_prog fp_scalar_misc
 build_asm_prog fp_scalar_compare_misc
+build_asm_prog fp_scalar_pairwise
 build_asm_prog fpsimd_ins_xtl
 build_asm_prog fpsimd_fcvt_rounding
+build_asm_prog fpsimd_fcvtxn_roundodd
+build_asm_prog fpsimd_fp_estimate
+build_asm_prog fpsimd_fp_convert_long_narrow
+build_asm_prog fpsimd_fp_reducev
 build_asm_prog fpsimd_fp_misc_rounding
+build_asm_prog fpsimd_fp_pairwise
 build_asm_prog fpsimd_misc_more
 build_asm_prog fpsimd_arith_shift_perm
 build_asm_prog fpsimd_fp_vector

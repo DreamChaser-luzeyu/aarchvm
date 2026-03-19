@@ -1,3 +1,106 @@
+# 修改日志 2026-03-19 19:52
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程补齐一组真实可观测的 AdvSIMD FP 行为缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fpsimd_fcvtxn_roundodd.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fcvtxn_roundodd.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 补上 `FCVTXN/FCVTXN2` 的 round-to-odd 窄化语义：
+  - 标量 `FCVTXN Sd, Dn`
+  - 向量 `FCVTXN Vd.2S, Vn.2D`
+  - 向量 `FCVTXN2 Vd.4S, Vn.2D`
+- 新增 `fp64_to_fp32_bits_round_to_odd(...)`，按手册实现 round-to-odd：
+  - 仅在结果不精确时强制结果尾数最低位为 `1`；
+  - sNaN 输入会 quiet 并置 `FPSR.IOC`；
+  - 溢出按 `FCVTXN*` 语义饱和到最大有限值，而不是 `Inf`；
+  - `FCVTXN2` 保留目标寄存器低半区，只覆盖高半区。
+- 新增裸机单测 [tests/arm64/fpsimd_fcvtxn_roundodd.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fcvtxn_roundodd.S)：
+  - 覆盖标量与向量路径；
+  - 覆盖正负 inexact、最大有限值饱和、sNaN quieting、`FPSR.IOC/IXC`；
+  - 覆盖 `FCVTXN2` 的高半区写回语义。
+
+## 本轮测试
+
+- 构建与定向验证：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 180s tests/arm64/build_tests.sh`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_fcvtxn_roundodd.bin -load 0x0 -entry 0x0 -steps 400000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮修掉的是 `FCVTXN/FCVTXN2` 的真实 ISA 语义缺口，不是测试特判。
+- 新增裸机单测以及完整 bare-metal、Linux UMP、Linux SMP 回归均已通过。
+- 继续往下审时，当前仍值得优先关注的高置信度缺口主要还有：
+  - reciprocal / rsqrt estimate 家族：`FRECPE/FRECPS/FRSQRTE/FRSQRTS`
+  - 更完整的 `FPCR` 行为细节，尤其 `DN/FZ/AH` 对边界输入的影响
+  - 继续系统排查尚未覆盖的 AdvSIMD reduction / conversion 角落语义
+
+# 修改日志 2026-03-19 19:29
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程补齐一组真实可观测的 AdvSIMD FP 行为缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fp_scalar_pairwise.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_scalar_pairwise.S)
+  - [tests/arm64/fpsimd_fp_pairwise.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fp_pairwise.S)
+  - [tests/arm64/fpsimd_fp_convert_long_narrow.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fp_convert_long_narrow.S)
+  - [tests/arm64/fpsimd_fp_reducev.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fp_reducev.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 补上 pairwise FP 家族：
+  - 标量 `FADDP/FMAXP/FMINP/FMAXNMP/FMINNMP`
+  - 向量 `FADDP/FMAXP/FMINP/FMAXNMP/FMINNMP`
+  - 最小值/最大值的 qNaN/sNaN、`FPSR.IOC` 和带符号零规则统一复用现有 `fp_minmax_result_bits(...)`。
+- 补上向量浮点窄化/加宽转换：
+  - `FCVTL/FCVTL2 Vd.2D, Vn.2S/.4S`
+  - `FCVTN/FCVTN2 Vd.2S/.4S, Vn.2D`
+  - `FCVTN` 会清高半区，`FCVTN2` 保留低半区；
+  - `FCVTN*` 按 `FPCR.RMode` 做舍入，并正确累积 `FPSR.IXC/IOC`；
+  - `FCVTL*` 对 sNaN 做 quieting，并更新 `FPSR.IOC`。
+- 补上向量 reduction-to-scalar 家族：
+  - `FMAXV/FMINV/FMAXNMV/FMINNMV`
+  - 这组实现按手册的 `FPReduce(...)` 递归 pairwise 语义执行，而不是线性 fold，避免后续在 NaN 传播细节上留下偏差。
+- 新增四组裸机单测：
+  - [tests/arm64/fp_scalar_pairwise.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_scalar_pairwise.S)
+  - [tests/arm64/fpsimd_fp_pairwise.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fp_pairwise.S)
+  - [tests/arm64/fpsimd_fp_convert_long_narrow.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fp_convert_long_narrow.S)
+  - [tests/arm64/fpsimd_fp_reducev.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fp_reducev.S)
+  - 覆盖普通值、不同 rounding mode、qNaN/sNaN、`FPSR` 标志、带符号零以及 `FCVTN2` 的高半区写回语义。
+
+## 本轮测试
+
+- 构建与定向验证：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 180s tests/arm64/build_tests.sh`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_fp_convert_long_narrow.bin -load 0x0 -entry 0x0 -steps 400000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_fp_reducev.bin -load 0x0 -entry 0x0 -steps 400000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮修掉的是三组真实 ISA 行为缺口，不是测试特判：
+  - pairwise FP 家族；
+  - `FCVTL/FCVTL2/FCVTN/FCVTN2`；
+  - `FMAXV/FMINV/FMAXNMV/FMINNMV`。
+- 新增裸机单测以及完整 bare-metal、Linux UMP、Linux SMP 回归均已通过。
+- 继续往下审时，当前仍值得优先关注的高置信度缺口主要还有：
+  - `FCVTXN/FCVTXN2`
+  - reciprocal / rsqrt estimate 家族：`FRECPE/FRECPS/FRSQRTE/FRSQRTS`
+  - 更完整的 `FPCR` 行为细节，尤其 `DN/FZ/AH` 对边界输入的影响
+
 # 修改日志 2026-03-19 17:40
 
 ## 本轮修改
@@ -2146,3 +2249,66 @@
   - 其余未覆盖的标量 FP 杂项家族，尤其 reciprocal / rsqrt estimate 与 step 家族；
   - 某些 FP/AdvSIMD 指令对 NaN、subnormal、`FPCR.AH/FZ` 的更细粒度交互；
   - 尚未被裸机单测触达的零散 SIMD&FP 转换和边角异常路径。
+
+# 修改日志 2026-03-19 19:02
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程补齐两组此前真实缺失的 FP/AdvSIMD pairwise 指令族：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fpsimd_fp_pairwise.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fp_pairwise.S)
+  - [tests/arm64/fp_scalar_pairwise.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_scalar_pairwise.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 在 `cpu.cpp` 中新增向量 pairwise 浮点执行路径：
+  - `FADDP`
+  - `FMAXP/FMINP`
+  - `FMAXNMP/FMINNMP`
+- 这组向量 pairwise 实现覆盖：
+  - `.2s/.4s/.2d` 三种布局；
+  - 标准 NaN 传播与 `NM` 数值优先语义；
+  - `sNaN` 触发 `FPSR.IOC`，并按现有 `fp_minmax_result_bits()` 统一处理 quiet NaN。
+- 修正了这组向量 pairwise 的 decode 根因问题：
+  - 最初 case 常量不完整；
+  - 更关键的是原先 `switch` 掩码错误地保留了 `Rm` 的一位，导致 opcode 会随寄存器编号漂移；
+  - 现已改成稳定掩码 `0xFFE0FC00`，避免落入旧的逐 lane `FADD/FMAXNM/...` 分支。
+- 新增裸机单测 [tests/arm64/fpsimd_fp_pairwise.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fp_pairwise.S)，覆盖：
+  - `FADDP .2s/.2d`
+  - `FMAXP .4s`
+  - `FMINP .2s`
+  - `FMAXNMP .2d`
+  - `FMINNMP .4s`
+  - qNaN / sNaN / `FPSR.IOC` 行为。
+- 在 `cpu.cpp` 中新增标量 pairwise 浮点执行路径：
+  - `FADDP Sd, Vn.2S`
+  - `FADDP Dd, Vn.2D`
+  - `FMAXP/FMINP`
+  - `FMAXNMP/FMINNMP`
+- 新增裸机单测 [tests/arm64/fp_scalar_pairwise.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_scalar_pairwise.S)，覆盖：
+  - 标量 `FADDP` 的单精/双精形式；
+  - 标量 `FMAXP/FMINP`；
+  - 标量 `FMAXNMP/FMINNMP`；
+  - qNaN / sNaN / `FPSR.IOC`。
+
+## 本轮测试
+
+- 定向验证：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 120s tests/arm64/build_tests.sh`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_fp_pairwise.bin -load 0x0 -entry 0x0 -steps 400000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_scalar_pairwise.bin -load 0x0 -entry 0x0 -steps 300000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮补的是 pairwise 浮点家族的真实 ISA 缺口，而不是测试特判。
+- 向量与标量 pairwise 浮点加法、最值、数值优先最值现在都已形成“实现 + 裸机单测 + 裸机全回归 + Linux UMP/SMP 回归”的闭环。
+- 我仍不认为当前已经“完整实现 Armv8-A ISA 的全部强制行为”。继续审时，仍值得优先关注：
+  - reciprocal / rsqrt estimate 与 step 家族，如 `FRECPE/FRECPS/FRSQRTE/FRSQRTS`；
+  - 更高阶的精度转换族，尤其 `FCVTN/FCVTN2/FCVTL/FCVTL2/FCVTXN*` 对 `FPCR` 舍入模式与异常位的完整语义；
+  - 更细粒度的 `FPCR` 行为，如 `AH/FZ/FZ16/DN` 与 NaN / subnormal / flush-to-zero 的交互。
