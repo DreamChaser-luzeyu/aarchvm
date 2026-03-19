@@ -74,6 +74,9 @@ build_asm_prog el0_special_regs_undef
 build_asm_prog el0_absent_pstate_features_undef
 build_asm_prog el0_eret_undef
 build_asm_prog el0_hvc_smc_undef
+build_asm_prog el0_tlbi_cache_undef
+build_asm_prog el0_dc_ivac_undef
+build_asm_prog dc_cva_persist_absent
 build_asm_prog el0_daif_uma
 build_asm_prog sysreg_optional_absent
 build_asm_prog lse_atomics
@@ -86,6 +89,7 @@ build_asm_prog mmu_ttbr1_early
 build_asm_prog mmu_tlb_vae1_scope
 build_asm_prog mmu_ttbr_switch
 build_asm_prog mmu_unmap_data_abort
+build_asm_prog mmu_cache_maint_fault
 build_asm_prog mmu_tlbi_non_target
 build_asm_prog mmu_l2_block_vmalle1
 build_asm_prog mmu_at_tlb_observe

@@ -35,6 +35,7 @@ run mmu_ttbr1_early.bin 3000000
 run mmu_tlb_vae1_scope.bin 4000000
 run mmu_ttbr_switch.bin 4000000
 run mmu_unmap_data_abort.bin 4000000
+test "$(./build/aarchvm -bin tests/arm64/out/mmu_cache_maint_fault.bin -load 0x0 -entry 0x0 -steps 4000000 | tr -d '\r\n')" = 'M'
 run mmu_tlbi_non_target.bin 4000000
 run mmu_l2_block_vmalle1.bin 4000000
 run mmu_at_tlb_observe.bin 4000000
@@ -92,6 +93,9 @@ test "$(./build/aarchvm -bin tests/arm64/out/el0_special_regs_undef.bin -load 0x
 test "$(./build/aarchvm -bin tests/arm64/out/el0_absent_pstate_features_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'A'
 test "$(./build/aarchvm -bin tests/arm64/out/el0_eret_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'E'
 test "$(./build/aarchvm -bin tests/arm64/out/el0_hvc_smc_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'H'
+test "$(./build/aarchvm -bin tests/arm64/out/el0_tlbi_cache_undef.bin -load 0x0 -entry 0x0 -steps 800000 | tr -d '\r\n')" = 'K'
+test "$(./build/aarchvm -bin tests/arm64/out/el0_dc_ivac_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'V'
+test "$(./build/aarchvm -bin tests/arm64/out/dc_cva_persist_absent.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'P'
 test "$(./build/aarchvm -bin tests/arm64/out/sysreg_optional_absent.bin -load 0x0 -entry 0x0 -steps 400000 | tr -d '\r\n')" = 'U'
 test "$(./build/aarchvm -bin tests/arm64/out/el0_cache_ops_privilege.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'C'
 test "$(./build/aarchvm -bin tests/arm64/out/el0_wfx_trap.bin -load 0x0 -entry 0x0 -steps 800000 | tr -d '\r\n')" = 'T'

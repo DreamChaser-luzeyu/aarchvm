@@ -219,10 +219,16 @@ private:
                                      TranslationResult* out_result,
                                      bool allow_tlb_fill,
                                      bool use_tlb = true);
+  [[nodiscard]] bool translate_cache_maintenance_address(std::uint64_t va,
+                                                         TranslationResult* out_result,
+                                                         bool fault_on_el0_no_read_permission,
+                                                         bool allow_tlb_fill = true,
+                                                         bool use_tlb = true);
   [[nodiscard]] bool walk_page_tables(std::uint64_t va,
                                   AccessType access,
                                   TranslationResult* out_result,
-                                  TranslationFault* fault);
+                                  TranslationFault* fault,
+                                  bool check_permissions = true);
   [[nodiscard]] bool access_permitted(const TranslationResult& result,
                                       AccessType access,
                                       std::uint8_t level,

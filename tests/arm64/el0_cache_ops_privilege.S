@@ -189,6 +189,7 @@ sync_lower:
 lower_sync_handler:
     mrs  x20, esr_el1
     ubfx x21, x20, #26, #6
+    cbz  x21, handle_undef
     movz x22, #0x18
     cmp  x21, x22
     b.eq handle_sys_trap
@@ -244,6 +245,13 @@ trap_tlbi:
     str  x25, [x24]
     adr  x26, after_tlbi_denied
     b return_to_el1
+
+handle_undef:
+    mrs  x23, elr_el1
+    adr  x24, el0_tlbi_insn
+    cmp  x23, x24
+    b.eq trap_tlbi
+    b handler_fail
 
 handle_svc:
     and  x22, x20, #0xffff

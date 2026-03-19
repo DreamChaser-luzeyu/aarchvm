@@ -1,3 +1,109 @@
+# 修改日志 2026-03-19 12:32
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程补齐一组 cache-maintenance-by-VA 的 Armv8-A 语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [include/aarchvm/cpu.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/cpu.hpp)
+  - [tests/arm64/mmu_cache_maint_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_cache_maint_fault.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 为 `IC IVAU`、`DC CVAU`、`DC CVAC`、`DC CIVAC` 新增专用 VA 翻译 helper：
+  - 之前这些路径只是空操作，或仅做本地 decode invalidation；
+  - 现在会执行真实的 VA 翻译，并在未映射地址上产生正确的 data abort。
+- 保持现有权限模型的保守实现：
+  - EL0 下，`DC CVAU/CVAC/CIVAC` 继续按“可生成 EL0 读权限 fault”的实现策略处理；
+  - EL0 下，`IC IVAU` 采用“未强制生成读权限 fault”的实现策略，但未映射地址仍会 fault；
+  - EL1 下，上述 cache maintenance by VA 不再错误复用普通 load/store 权限检查。
+- 新增裸机定向回归：
+  - `mmu_cache_maint_fault`
+  - 覆盖 `IC IVAU`、`DC CVAU/CVAC/CIVAC` 对未映射 VA 的 `EC=0x25`、`FAR_EL1=VA`、`FSC=translation fault level 3`、`WnR=0` 行为。
+
+## 本轮测试
+
+- 构建与定向验证：
+  - `timeout 600s cmake --build build -j`
+  - `timeout 600s ./tests/arm64/build_tests.sh`
+  - `timeout 120s ./build/aarchvm -bin tests/arm64/out/mmu_cache_maint_fault.bin -load 0x0 -entry 0x0 -steps 4000000`
+  - `timeout 120s ./build/aarchvm -bin tests/arm64/out/mmu_tlb_cache.bin -load 0x0 -entry 0x0 -steps 5000000`
+  - `timeout 120s ./build/aarchvm -bin tests/arm64/out/el0_cache_ops_privilege.bin -load 0x0 -entry 0x0 -steps 600000`
+- 裸机完整回归：
+  - `timeout 1800s ./tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1800s ./tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 2400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 本轮把“cache maintenance by VA 不应在未映射地址上静默成功”的缺口补上了。
+- 现状下，这 4 条高频系统指令已经不再错误绕过 MMU fault 路径。
+- 完整裸机回归与 Linux 单核/SMP 功能回归均已通过。
+
+# 修改日志 2026-03-19 12:01
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程补齐 3 组高置信度的 Armv8-A system instruction 语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 修正一组 EL0 下本应直接 `UNDEFINED` 的 cache / TLB maintenance 指令：
+  - `TLBI VMALLE1 / VMALLE1IS`
+  - `TLBI VAE1* / VALE1* / VAAE1* / VAALE1*`
+  - `TLBI ASIDE1 / ASIDE1IS`
+  - `IC IALLU`
+  - `IC IALLUIS`
+  - `DC ISW`
+  - `DC CISW`
+  - 之前这些路径错误走成了 `EC=0x18` system access trap；
+  - 现在统一改为真正的 undefined 指令异常。
+- 修正 `DC IVAC` 在 EL0 下的行为：
+  - 之前错误受 `SCTLR_EL1.UCI` 路径影响，可能 trap 或被当成已实现；
+  - 现在按架构要求在 EL0 直接 `UNDEFINED`。
+- 修正 `DC CVAP` / `DC CVADP` 与当前 ID 寄存器暴露值不一致的问题：
+  - 当前模型的 `ID_AA64ISAR1_EL1.DPB=0`，并未实现 `FEAT_DPB/DPB2`；
+  - 之前代码却把 `DC CVAP` / `DC CVADP` 当成可执行指令；
+  - 现在这两条指令在所有异常级都按“特性缺失 -> `UNDEFINED`”处理。
+- 调整旧测试语义：
+  - [tests/arm64/el0_cache_ops_privilege.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_cache_ops_privilege.S)
+  - 其中 `TLBI VMALLE1@EL0` 的检查从“trap”修正为“undefined”。
+- 新增并接入 3 个裸机定向回归：
+  - [tests/arm64/el0_tlbi_cache_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_tlbi_cache_undef.S)
+    - 覆盖 `TLBI/IC IALLU/IALLUIS/DC ISW/DC CISW` 在 EL0 下必须是 undefined；
+  - [tests/arm64/el0_dc_ivac_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_dc_ivac_undef.S)
+    - 覆盖 `DC IVAC@EL0` 即使 `SCTLR_EL1.UCI=1` 也必须是 undefined；
+  - [tests/arm64/dc_cva_persist_absent.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/dc_cva_persist_absent.S)
+    - 覆盖 `DC CVAP` / `DC CVADP` 在 `FEAT_DPB/DPB2` 缺失时必须是 undefined。
+
+## 本轮测试
+
+- 定向构建与单测：
+  - `timeout 600s cmake --build build -j`
+  - `timeout 600s tests/arm64/build_tests.sh`
+  - `timeout 120s ./build/aarchvm -bin tests/arm64/out/el0_tlbi_cache_undef.bin -load 0x0 -entry 0x0 -steps 800000`
+  - `timeout 120s ./build/aarchvm -bin tests/arm64/out/el0_dc_ivac_undef.bin -load 0x0 -entry 0x0 -steps 600000`
+  - `timeout 120s ./build/aarchvm -bin tests/arm64/out/dc_cva_persist_absent.bin -load 0x0 -entry 0x0 -steps 600000`
+- 裸机完整回归：
+  - `timeout 1800s ./tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1800s ./tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 2400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 本轮继续收紧了 system instruction 语义，重点是：
+  - EL0 下“应为 undefined 却被错误当成 trap”的 cache/TLB maintenance 指令；
+  - “ID 寄存器已宣称 absent，但指令仍被错误接受”的可选特性指令。
+- 截至本轮结束，以下回归均已在最新代码状态下通过：
+  - `tests/arm64/run_all.sh`
+  - `tests/linux/run_functional_suite.sh`
+  - `tests/linux/run_functional_suite_smp.sh`
+- 仍不应宣称“已经完整实现 Armv8-A 全部 ISA/行为”：
+  - 当前代码对若干 cache maintenance by VA 指令仍主要建模为无副作用占位实现；
+  - 后续仍值得继续审查“缺失可选特性但被误接受”的其它指令，以及 cache maintenance 的翻译/权限/故障细节。
+
 # 修改日志 2026-03-19 11:33
 
 ## 本轮修改
