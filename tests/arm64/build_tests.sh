@@ -93,6 +93,7 @@ build_asm_prog mmu_cache_maint_fault
 build_asm_prog mmu_tlbi_non_target
 build_asm_prog mmu_l2_block_vmalle1
 build_asm_prog mmu_at_tlb_observe
+build_asm_prog mmu_at_el0_permissions
 build_asm_prog mmu_ttbr_asid_mask
 build_asm_prog mmu_tlb_asid_scope
 build_asm_prog mmu_pan_user_access

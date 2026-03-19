@@ -39,6 +39,7 @@ test "$(./build/aarchvm -bin tests/arm64/out/mmu_cache_maint_fault.bin -load 0x0
 run mmu_tlbi_non_target.bin 4000000
 run mmu_l2_block_vmalle1.bin 4000000
 run mmu_at_tlb_observe.bin 4000000
+run mmu_at_el0_permissions.bin 4000000
 run mmu_ttbr_asid_mask.bin 4000000
 run mmu_perm_ro_write_abort.bin 4000000
 run mmu_xn_fetch_abort.bin 4000000

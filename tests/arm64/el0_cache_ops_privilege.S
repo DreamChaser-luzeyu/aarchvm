@@ -69,10 +69,19 @@ after_tlbi_denied:
     movz x6, #1
     lsl  x7, x6, #26
     tst  x5, x7
-    b.eq fail5
+    b.eq fail6
     lsl  x7, x6, #14
     tst  x5, x7
-    b.eq fail5
+    b.eq fail6
+
+    adr  x3, el0_at_enabled_undef
+    msr  elr_el1, x3
+    msr  spsr_el1, xzr
+    eret
+after_at_enabled_undef:
+    adr  x11, trap_flags
+    ldr  x12, [x11]
+    tbz  x12, #4, fail5
 
     adr  x3, el0_allowed
     msr  elr_el1, x3
@@ -81,14 +90,7 @@ after_tlbi_denied:
 after_allowed:
     adr  x11, allow_done
     ldr  x12, [x11]
-    cbz  x12, fail6
-
-    mrs  x13, par_el1
-    adr  x14, zva_buf
-    lsr  x15, x14, #12
-    lsl  x15, x15, #12
-    subs xzr, x13, x15
-    b.ne fail7
+    cbz  x12, fail7
 
     adr  x16, zva_buf
     ldr  x17, [x16, #0]
@@ -160,6 +162,12 @@ el0_at_insn:
     at   s1e1r, x0
     svc  #0x12
 
+el0_at_enabled_undef:
+    adr  x0, zva_buf
+el0_at_enabled_insn:
+    at   s1e1w, x0
+    svc  #0x16
+
 el0_dc_zva_denied:
     adr  x0, zva_buf
     add  x0, x0, #32
@@ -175,7 +183,6 @@ el0_tlbi_insn:
 el0_allowed:
     adr  x0, zva_buf
     ic   ivau, x0
-    at   s1e1r, x0
     add  x0, x0, #32
     dc   zva, x0
     svc  #0x20
@@ -203,9 +210,6 @@ handle_sys_trap:
     adr  x24, el0_ic_ivau_insn
     cmp  x23, x24
     b.eq trap_ic_ivau
-    adr  x24, el0_at_insn
-    cmp  x23, x24
-    b.eq trap_at
     adr  x24, el0_dc_zva_insn
     cmp  x23, x24
     b.eq trap_dc_zva
@@ -220,14 +224,6 @@ trap_ic_ivau:
     orr  x25, x25, #1
     str  x25, [x24]
     adr  x26, after_ic_ivau_denied
-    b return_to_el1
-
-trap_at:
-    adr  x24, trap_flags
-    ldr  x25, [x24]
-    orr  x25, x25, #2
-    str  x25, [x24]
-    adr  x26, after_at_denied
     b return_to_el1
 
 trap_dc_zva:
@@ -248,10 +244,32 @@ trap_tlbi:
 
 handle_undef:
     mrs  x23, elr_el1
+    adr  x24, el0_at_insn
+    cmp  x23, x24
+    b.eq undef_at_denied
     adr  x24, el0_tlbi_insn
     cmp  x23, x24
     b.eq trap_tlbi
+    adr  x24, el0_at_enabled_insn
+    cmp  x23, x24
+    b.eq undef_at_enabled
     b handler_fail
+
+undef_at_denied:
+    adr  x24, trap_flags
+    ldr  x25, [x24]
+    orr  x25, x25, #2
+    str  x25, [x24]
+    adr  x26, after_at_denied
+    b return_to_el1
+
+undef_at_enabled:
+    adr  x24, trap_flags
+    ldr  x25, [x24]
+    orr  x25, x25, #16
+    str  x25, [x24]
+    adr  x26, after_at_enabled_undef
+    b return_to_el1
 
 handle_svc:
     and  x22, x20, #0xffff

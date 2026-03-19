@@ -2742,7 +2742,8 @@ std::uint32_t Cpu::fault_status_code(const TranslationFault& fault) const {
 }
 
 void Cpu::set_par_el1_for_fault(const TranslationFault& fault) {
-  sysregs_.set_par_el1(1ull | (static_cast<std::uint64_t>(fault_status_code(fault) & 0x7Fu) << 1));
+  const std::uint64_t fst = static_cast<std::uint64_t>(fault_status_code(fault) & 0x3Fu);
+  sysregs_.set_par_el1(1ull | (fst << 1) | (1ull << 11));
 }
 
 Cpu::WalkAttributes Cpu::decode_walk_attributes(bool va_upper) const {
@@ -3095,6 +3096,16 @@ bool Cpu::exec_system(std::uint32_t insn) {
     return !sysregs_.in_el0() || (sysregs_.sctlr_el1() & kSctlrEl1Uma) != 0u;
   };
 
+  const auto update_par_from_translation = [&](bool ok, const TranslationResult& result) {
+    if (ok) {
+      sysregs_.set_par_el1(result.pa & 0x0000FFFFFFFFF000ull);
+    } else if (last_translation_fault_.has_value()) {
+      set_par_el1_for_fault(*last_translation_fault_);
+    } else {
+      sysregs_.set_par_el1(1ull);
+    }
+  };
+
   const auto el0_timer_sysreg_allowed = [&](std::uint32_t key, bool write) -> bool {
     if (!sysregs_.in_el0()) {
       return true;
@@ -3402,35 +3413,45 @@ bool Cpu::exec_system(std::uint32_t insn) {
 
   // AT S1E1R, Xt
   if ((insn & 0xFFFFFFE0u) == 0xD5087800u) {
-    if (!el0_uci_enabled()) {
-      return trap_current_system_instruction(insn);
+    if (sysregs_.in_el0()) {
+      return undefined_current_instruction();
     }
     const std::uint32_t rt = insn & 0x1Fu;
     TranslationResult result{};
-    if (translate_address(reg(rt), AccessType::Read, &result, false, false)) {
-      sysregs_.set_par_el1(result.pa & 0x0000FFFFFFFFF000ull);
-    } else if (last_translation_fault_.has_value()) {
-      set_par_el1_for_fault(*last_translation_fault_);
-    } else {
-      sysregs_.set_par_el1(1ull);
-    }
+    update_par_from_translation(translate_address(reg(rt), AccessType::Read, &result, false, false), result);
     return true;
   }
 
   // AT S1E1W, Xt
   if ((insn & 0xFFFFFFE0u) == 0xD5087820u) {
-    if (!el0_uci_enabled()) {
-      return trap_current_system_instruction(insn);
+    if (sysregs_.in_el0()) {
+      return undefined_current_instruction();
     }
     const std::uint32_t rt = insn & 0x1Fu;
     TranslationResult result{};
-    if (translate_address(reg(rt), AccessType::Write, &result, false, false)) {
-      sysregs_.set_par_el1(result.pa & 0x0000FFFFFFFFF000ull);
-    } else if (last_translation_fault_.has_value()) {
-      set_par_el1_for_fault(*last_translation_fault_);
-    } else {
-      sysregs_.set_par_el1(1ull);
+    update_par_from_translation(translate_address(reg(rt), AccessType::Write, &result, false, false), result);
+    return true;
+  }
+
+  // AT S1E0R, Xt
+  if ((insn & 0xFFFFFFE0u) == 0xD5087840u) {
+    if (sysregs_.in_el0()) {
+      return undefined_current_instruction();
     }
+    const std::uint32_t rt = insn & 0x1Fu;
+    TranslationResult result{};
+    update_par_from_translation(translate_address(reg(rt), AccessType::UnprivilegedRead, &result, false, false), result);
+    return true;
+  }
+
+  // AT S1E0W, Xt
+  if ((insn & 0xFFFFFFE0u) == 0xD5087860u) {
+    if (sysregs_.in_el0()) {
+      return undefined_current_instruction();
+    }
+    const std::uint32_t rt = insn & 0x1Fu;
+    TranslationResult result{};
+    update_par_from_translation(translate_address(reg(rt), AccessType::UnprivilegedWrite, &result, false, false), result);
     return true;
   }
   // MSR SPSel, #imm

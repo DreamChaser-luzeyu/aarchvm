@@ -1,3 +1,46 @@
+# 修改日志 2026-03-19 12:55
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程补齐 `AT` / `PAR_EL1` 的 Armv8-A 语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/el0_cache_ops_privilege.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_cache_ops_privilege.S)
+  - [tests/arm64/mmu_at_el0_permissions.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_at_el0_permissions.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 修正 `AT S1E1R` / `AT S1E1W` 在 EL0 下的错误行为：
+  - 之前错误走成了 `UCI` 相关 trap/允许路径；
+  - 现在按手册要求在 EL0 始终 `UNDEFINED`。
+- 新增缺失的 `AT S1E0R` / `AT S1E0W`：
+  - 在 EL1 下按“以 EL0 读/写权限访问”的规则进行 stage 1 地址翻译；
+  - 使用 unprivileged translation 权限检查更新 `PAR_EL1`。
+- 修正 `PAR_EL1` fault 填充逻辑：
+  - 之前错误复用了 ESR 的 `WnR + FSC` 7-bit 编码；
+  - 现在改为 64-bit `PAR_EL1.FST` 的 6-bit fault status，并在 fault 格式下设置 `PAR_EL1[11] = RES1`。
+- 扩充 AT 回归覆盖：
+  - `el0_cache_ops_privilege` 现在验证 `AT S1E1R@EL0` 与 `AT S1E1W@EL0` 即使在 `UCI=1` 前后也都必须是 `UNDEFINED`；
+  - 新增 `mmu_at_el0_permissions`，覆盖 `AT S1E0R/S1E0W` 成功翻译、EL0 无读权限 fault、EL0 只读页写权限 fault。
+
+## 本轮测试
+
+- 构建与定向验证：
+  - `timeout 600s cmake --build build -j`
+  - `timeout 600s ./tests/arm64/build_tests.sh`
+  - `timeout 120s ./build/aarchvm -bin tests/arm64/out/el0_cache_ops_privilege.bin -load 0x0 -entry 0x0 -steps 800000`
+  - `timeout 120s ./build/aarchvm -bin tests/arm64/out/mmu_at_el0_permissions.bin -load 0x0 -entry 0x0 -steps 4000000`
+- 裸机完整回归：
+  - `timeout 1800s ./tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1800s ./tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 2400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 本轮纠正了 `AT` 指令在 EL0/EL1 权限语义上的一处明确架构偏差，并补上了缺失的 `AT S1E0*`。
+- `PAR_EL1` fault 结果不再错误混入 ESR 的 `WnR` 语义。
+- 裸机与 Linux 单核/SMP 完整回归均已通过。
+
 # 修改日志 2026-03-19 12:32
 
 ## 本轮修改
