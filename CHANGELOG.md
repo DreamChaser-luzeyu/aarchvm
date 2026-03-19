@@ -1,3 +1,62 @@
+# 修改日志 2026-03-19 17:40
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程补齐一组真实的 AdvSIMD 浮点语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fpsimd_fcvt_rounding.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fcvt_rounding.S)
+  - [tests/arm64/fpsimd_fp_misc_rounding.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fp_misc_rounding.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [tests/linux/build_usertests_rootfs.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/build_usertests_rootfs.sh)
+  - [tests/linux/run_functional_suite.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/run_functional_suite.sh)
+  - [tests/linux/run_functional_suite_smp.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/run_functional_suite_smp.sh)
+- 补上向量 `FCVTNS/FCVTNU/FCVTPS/FCVTPU/FCVTMS/FCVTMU/FCVTAS/FCVTAU` 的 `.2d` 解码覆盖：
+  - 上一版只覆盖到了 `.2s/.4s`，`fcvtns v?.2d, v?.2d` 会直接掉进 `UNIMPL`；
+  - 现在 `.2s/.4s/.2d` 都走同一组 rounding helper，并正确累积 `FPSR` 标志。
+- 新增向量 FP misc 家族实现：
+  - `FABS/FNEG/FSQRT` 的 `.2s/.4s/.2d`
+  - `FRINTN/FRINTP/FRINTM/FRINTZ/FRINTA/FRINTX/FRINTI` 的 `.2s/.4s/.2d`
+  - `FRINTX/FRINTI` 按 `FPCR.RMode` 取舍，与现有标量实现保持一致。
+- 修正一个隐藏的解码优先级 bug：
+  - 之前 `CMEQ (zero)` 的掩码过宽，会错误吞掉 `FRINTM v?.4s` 一类向量 FP misc 指令；
+  - 现象上会把 `FRINTM` 执行成比较掩码，产出 `0x0000ffff` 之类的错误结果；
+  - 现在收紧 `CMEQ (zero)` 匹配范围，避免再误伤向量 `FRINT*`。
+- 新增两组裸机单测：
+  - [tests/arm64/fpsimd_fcvt_rounding.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fcvt_rounding.S)
+    - 覆盖向量 `FCVT*` 的 signed/unsigned、`.2s/.4s/.2d`、不同 rounding 模式以及 `FPSR` 位更新。
+  - [tests/arm64/fpsimd_fp_misc_rounding.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fp_misc_rounding.S)
+    - 覆盖向量 `FABS/FNEG/FSQRT/FRINT*`，并验证 `FRINTX/FRINTI` 对 `FPCR.RMode` 的响应。
+- 顺手修正 Linux 功能回归脚本的两个稳定性问题：
+  - 之前 host 把一长串命令逐字节喂给交互 shell，输入和命令输出会交叉污染日志，导致伪失败；
+  - 现在改为 host 只调用客体里的 `run_functional_suite` / `run_functional_suite_smp` 脚本；
+  - 同时把 `dmesg | grep hang` 改为“不因无匹配而失败”，保留管道执行路径覆盖，但不再依赖日志里一定有 `hang`。
+
+## 本轮测试
+
+- 构建与定向验证：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 1200s tests/arm64/build_tests.sh`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_fcvt_rounding.bin -load 0x0 -entry 0x0 -steps 400000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_fp_misc_rounding.bin -load 0x0 -entry 0x0 -steps 400000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮修复的是两类真实可观测的 ISA 行为缺口，不是为单个程序做特殊绕过：
+  - 向量 `FCVT*` 的 `.2d` 漏实现；
+  - 向量 `FP misc` 家族缺失，以及 `CMEQ (zero)` 误匹配导致的错误执行。
+- 新增裸机单测、完整裸机回归、Linux UMP/SMP 功能回归都已通过。
+- 继续审查后，当前仍值得优先补的高置信度缺口主要还有：
+  - 向量 reciprocal / rsqrt estimate 家族：`FRECPE/FRECPS/FRSQRTE/FRSQRTS`
+  - 向量 pairwise FP 家族：`FADDP/FMAXP/FMINP/FMAXNMP/FMINNMP`
+  - 可能仍未覆盖完整的向量窄化/加宽转换家族：`FCVTN/FCVTN2/FCVTL/FCVTL2/FCVTXN/FCVTXN2`
+
 # 修改日志 2026-03-19 15:19
 
 ## 本轮修改
@@ -1895,3 +1954,195 @@
 - 继续往下审时，仍值得关注的方向主要是：
   - FEAT 可选扩展相关但当前未实现的 SIMD&FP acquire/release 访存；
   - 其余更零散的 AdvSIMD/FP 指令族与异常/陷入细节。
+
+# 修改日志 2026-03-19 15:32
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程补齐 FP min/max 家族的真实 ISA 语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fp_minmax_nan_flags.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_minmax_nan_flags.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 在 `cpu.cpp` 中新增统一的 FP min/max 结果辅助逻辑，按 Arm 语义处理：
+  - `FMAX/FMIN`
+  - `FMAXNM/FMINNM`
+  - 标量与向量路径共用同一套 NaN、signed zero、`FPSR.IOC` 处理规则。
+- 补齐此前缺失的标量 `FMAX/FMIN/FMAXNM/FMINNM` 解码与执行路径。
+- 修正已有向量 `FMAX/FMIN/FMAXNM/FMINNM` 的行为缺陷，确保：
+  - qNaN 与 sNaN 区分正确；
+  - sNaN 会 quiet 并置位 `FPSR.IOC`；
+  - `FMAXNM/FMINNM` 在单个 qNaN 操作数下返回数值操作数；
+  - `+0/-0` 平局时按 Arm 规则选择 `+0` 或 `-0`。
+- 新增裸机单测 [tests/arm64/fp_minmax_nan_flags.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_minmax_nan_flags.S)，覆盖：
+  - 标量与向量 min/max；
+  - 32-bit 与 64-bit 标量形式；
+  - qNaN/sNaN 传播与 quiet 行为；
+  - `FPSR.IOC` 置位；
+  - `+0/-0` tie-breaking。
+
+## 本轮测试
+
+- 构建与定向验证：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 1200s tests/arm64/build_tests.sh`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_minmax_nan_flags.bin -load 0x0 -entry 0x0 -steps 300000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_compare_flags.bin -load 0x0 -entry 0x0 -steps 200000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮补的是一个真实的 Armv8-A FP 语义缺口，而不是测试特判：
+  - 修改前，标量 `FMAX/FMIN/FMAXNM/FMINNM` 缺失；
+  - 向量同族指令对 qNaN/sNaN、signed zero 与 `FPSR.IOC` 的处理不符合 Arm 规则。
+- 修改后，标量与向量 min/max 家族的核心行为已经统一到同一语义模型，新增单测与完整裸机/Linux 单核/SMP 回归均通过。
+- 这不代表“Armv8-A ISA 已完整实现”。后续仍值得继续审阅的方向包括：
+  - `FRINT*` 一类的细粒度异常标志与 NaN 行为；
+  - 其他 FP/AdvSIMD 指令家族中的 sNaN/qNaN 例外路径；
+  - 仍可能遗漏的标量 FP 杂项指令族。
+
+# 修改日志 2026-03-19 16:13
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程补齐标量 FP 乘法家族中的真实 ISA 缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fp_scalar_arith.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_scalar_arith.S)
+- 在 `cpu.cpp` 中补上此前缺失的标量 `FNMUL Sd/Dd, Sn/Dn, Sm/Dm` 解码与执行路径。
+- 在现有裸机单测 [tests/arm64/fp_scalar_arith.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_scalar_arith.S) 中新增：
+  - double `FNMUL` 结果检查；
+  - float `FNMUL` 结果检查。
+- 定向测试时顺手修正了新加单测里一个测试自身的问题：
+  - 单精度检查最初误复用了双精度常量的低 32 位；
+  - 已改为显式加载 `2.0f/-3.0f` 的 32-bit 位模式。
+
+## 本轮测试
+
+- 构建与定向验证：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 1200s tests/arm64/build_tests.sh`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_scalar_arith.bin -load 0x0 -entry 0x0 -steps 300000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮补的是缺指令级别的问题，不是行为特判：
+  - 修改前，标量 `FNMUL` 没有实现；
+  - 修改后，标量 FP 基本算术族的覆盖更完整，且定向测试、裸机完整回归、Linux 单核与 SMP 功能回归都通过。
+- 到目前为止，我仍不认为已经“完整实现 Armv8-A ISA 的全部强制行为”。下一批仍值得继续审阅的方向主要是：
+  - 标量/向量 FP 其余杂项家族中与 NaN、异常标志相关的细节；
+  - `FRINT*` 一类 finer-grained `FPSR`/`FPCR` 交互；
+  - 其他尚未被单测覆盖到的零散标量 FP 指令族。
+
+# 修改日志 2026-03-19 16:30
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程补齐另一组真实的标量 FP ISA 缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fp_scalar_compare_misc.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_scalar_compare_misc.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 在 `cpu.cpp` 中新增统一的标量 compare-result 写回辅助路径，并补齐：
+  - 标量 `FABD`；
+  - 标量 register-compare：`FCMEQ/FCMGE/FCMGT`；
+  - 标量 absolute compare：`FACGE/FACGT`；
+  - 标量 zero-compare：`FCMEQ/FCMGE/FCMGT/FCMLE/FCMLT`。
+- 这轮中途还修正了一个真实解码问题：
+  - 这组标量 FP 指令不能直接复用先前部分算术指令的 `ftype==0/1` 判法；
+  - 已改为按该族实际的 `sz` 位区分 32/64-bit，避免误把合法指令落入未实现路径。
+- 新增裸机单测 [tests/arm64/fp_scalar_compare_misc.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_scalar_compare_misc.S)，覆盖：
+  - `FABD` 的单精度与双精度；
+  - `FCMEQ/FCMGE/FCMGT` register 形式；
+  - `FACGE/FACGT`；
+  - `FCMEQ/FCMGE/FCMGT/FCMLE/FCMLT` zero 形式；
+  - qNaN 比较返回 false；
+  - 标量 compare 结果写回时高位清零。
+
+## 本轮测试
+
+- 构建与定向验证：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 1200s tests/arm64/build_tests.sh`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_scalar_compare_misc.bin -load 0x0 -entry 0x0 -steps 300000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮补的是一整组此前缺失的标量 FP compare/misc 指令，而不是测试特判。
+- 修改后，标量 FP 里“绝对差 + compare-register + compare-zero”这块已经形成了解码、执行、单测与完整回归闭环。
+- 我仍不认为当前已经“完整实现 Armv8-A ISA 的全部强制行为”。下一轮继续审时，仍值得优先关注：
+  - 其余标量 FP 杂项家族；
+  - `FRINT*` 与其它 FP 指令对 NaN / `FPSR` 异常位的细粒度语义；
+  - 尚未被单测触达的零散 FP/AdvSIMD 边角行为。
+
+# 修改日志 2026-03-19 17:01
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程补齐两组真实的标量 FP ISA 缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fp_cond_compare.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_cond_compare.S)
+  - [tests/arm64/fp_fcvt_rounding_scalar.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_fcvt_rounding_scalar.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 在 `cpu.cpp` 中新增标量 `FCCMP/FCCMPE`：
+  - 条件不成立时按 `nzcv` 立即数字段直接写入 `PSTATE.NZCV`；
+  - 条件成立时复用 `FCMP/FCMPE` 的 compare/NaN/`FPSR.IOC` 语义；
+  - 修正了解码掩码，避免把 `cond` 位误当成 opcode 一部分。
+- 新增裸机单测 [tests/arm64/fp_cond_compare.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_cond_compare.S)，覆盖：
+  - `FCCMP/FCCMPE` 的条件成立/不成立路径；
+  - qNaN / sNaN compare 的 `NZCV` 与 `FPSR.IOC`；
+  - 单精度与双精度形式。
+- 在 `cpu.cpp` 中补上此前缺失的标量 FP→整数舍入转换家族：
+  - `FCVTNS/FCVTNU`
+  - `FCVTPS/FCVTPU`
+  - `FCVTMS/FCVTMU`
+  - `FCVTAS/FCVTAU`
+- 为这组 `FCVT*` 新增统一的 `FPToFixed` 风格辅助逻辑，按共享伪代码处理：
+  - ties-to-even / ties-away / toward +inf / toward -inf；
+  - signed / unsigned 饱和结果；
+  - `FPSR.IOC` 与 `FPSR.IXC`。
+- 新增裸机单测 [tests/arm64/fp_fcvt_rounding_scalar.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_fcvt_rounding_scalar.S)，覆盖：
+  - signed / unsigned；
+  - 32-bit / 64-bit；
+  - `Wd,Sn` / `Wd,Dn` / `Xd,Sn` / `Xd,Dn` cross-width 形式；
+  - inexact 与 invalid 标志位。
+
+## 本轮测试
+
+- 构建与定向验证：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 1200s tests/arm64/build_tests.sh`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_cond_compare.bin -load 0x0 -entry 0x0 -steps 200000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_fcvt_rounding_scalar.bin -load 0x0 -entry 0x0 -steps 300000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮补的是两组此前真实缺失的标量 FP 指令行为，而不是测试特判。
+- 修改后，标量 FP compare 的条件版本与非朝零的 FP→整数舍入转换都已经形成“实现 + 单测 + 裸机全回归 + Linux UMP/SMP 回归”的闭环。
+- 到目前为止，我仍不认为已经“完整实现 Armv8-A ISA 的全部强制行为”。继续审时，仍值得优先关注：
+  - 其余未覆盖的标量 FP 杂项家族，尤其 reciprocal / rsqrt estimate 与 step 家族；
+  - 某些 FP/AdvSIMD 指令对 NaN、subnormal、`FPCR.AH/FZ` 的更细粒度交互；
+  - 尚未被裸机单测触达的零散 SIMD&FP 转换和边角异常路径。

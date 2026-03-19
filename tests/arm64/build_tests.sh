@@ -52,11 +52,17 @@ build_asm_prog fcmp_e
 build_asm_prog fp_scalar_convert
 build_asm_prog fp_fcvtzu_scalar
 build_asm_prog fp_fcvt_flags
+build_asm_prog fp_fcvt_rounding_scalar
 build_asm_prog fp_compare_flags
+build_asm_prog fp_minmax_nan_flags
+build_asm_prog fp_cond_compare
 build_asm_prog fp_scalar_fcsel
 build_asm_prog fp_scalar_fma
 build_asm_prog fp_scalar_misc
+build_asm_prog fp_scalar_compare_misc
 build_asm_prog fpsimd_ins_xtl
+build_asm_prog fpsimd_fcvt_rounding
+build_asm_prog fpsimd_fp_misc_rounding
 build_asm_prog fpsimd_misc_more
 build_asm_prog fpsimd_arith_shift_perm
 build_asm_prog fpsimd_fp_vector

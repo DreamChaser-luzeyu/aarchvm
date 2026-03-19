@@ -41,7 +41,7 @@ AARCHVM_CMD=(
 print_cmd 'AARCHVM SMP functional command:' "${AARCHVM_CMD[@]}"
 
 set -o pipefail
-printf 'for i in 1 2 3; do\n  echo SMP-ROUND:$i\n  uname -a\n  /bin/busybox uname -a\n  ps\n  dmesg -s 128 >/dev/null\n  echo SMP-DMESG-OK:$i\n  mount\n  df\n  cat /proc/cpuinfo\n  /bin/busybox ls /bin >/dev/null\n  ping -c 1 127.0.0.1 || true\ndone\necho SMP-FUNCTIONAL-SUITE PASS\n' | \
+printf '/bin/run_functional_suite_smp\n' | \
   AARCHVM_BUS_FASTPATH="$FASTPATH" \
   AARCHVM_TIMER_SCALE="$TIMER_SCALE" \
   timeout "$TIMEOUT_SEC" "${AARCHVM_CMD[@]}" \

@@ -122,11 +122,17 @@ run fcmp_e.bin 200000
 run fp_scalar_convert.bin 200000
 run fp_fcvtzu_scalar.bin 200000
 run fp_fcvt_flags.bin 200000
+run_expect fp_fcvt_rounding_scalar.bin 300000 R
 run_expect fp_compare_flags.bin 200000 Q
+run_expect fp_minmax_nan_flags.bin 300000 M
+run_expect fp_cond_compare.bin 200000 C
 run fp_scalar_fcsel.bin 200000
 run fp_scalar_fma.bin 200000
 run fp_scalar_misc.bin 200000
+run_expect fp_scalar_compare_misc.bin 300000 J
 run fpsimd_ins_xtl.bin 300000
+run_expect fpsimd_fcvt_rounding.bin 400000 O
+run_expect fpsimd_fp_misc_rounding.bin 400000 V
 run_expect fpsimd_misc_more.bin 300000 G
 run fpsimd_arith_shift_perm.bin 300000
 run fpsimd_fp_vector.bin 400000

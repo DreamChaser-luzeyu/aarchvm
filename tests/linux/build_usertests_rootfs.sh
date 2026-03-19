@@ -164,12 +164,35 @@ cat /proc/version
 ps
 dmesg -s 128 >/dev/null
 echo DMESG-OK
+dmesg | grep hang >/dev/null || true
+echo GREP-HANG-OK
 /bin/run_dmesg_stress_check
 ping -c 1 127.0.0.1 || true
 mount
 df
 /bin/run_usertests
 echo FUNCTIONAL-SUITE PASS
+EOS
+
+cat > out/initramfs-usertests-root/bin/run_functional_suite_smp <<'EOS'
+#!/bin/sh
+set -e
+i=1
+while [ "$i" -le 3 ]; do
+  echo SMP-ROUND:$i
+  uname -a
+  /bin/busybox uname -a
+  ps
+  dmesg -s 128 >/dev/null
+  echo SMP-DMESG-OK:$i
+  mount
+  df
+  cat /proc/cpuinfo
+  /bin/busybox ls /bin >/dev/null
+  ping -c 1 127.0.0.1 || true
+  i=$((i + 1))
+done
+echo SMP-FUNCTIONAL-SUITE PASS
 EOS
 
 chmod 0755 \
@@ -186,7 +209,8 @@ chmod 0755 \
   out/initramfs-usertests-root/bin/read_tty_spin_affine \
   out/initramfs-usertests-root/bin/run_dmesg_stress_check \
   out/initramfs-usertests-root/bin/run_usertests \
-  out/initramfs-usertests-root/bin/run_functional_suite
+  out/initramfs-usertests-root/bin/run_functional_suite \
+  out/initramfs-usertests-root/bin/run_functional_suite_smp
 
 (
   cd out/initramfs-usertests-root

@@ -21,6 +21,22 @@ _start:
     cmp x6, x7
     b.ne fail
 
+    fnmul d14, d0, d1
+    fmov x6, d14
+    ldr x7, =0x4018000000000000 // +6.0
+    cmp x6, x7
+    b.ne fail
+
+    ldr w8, =0x40000000 // 2.0f
+    ldr w9, =0xc0400000 // -3.0f
+    fmov s15, w8
+    fmov s16, w9
+    fnmul s17, s15, s16
+    fmov w6, s17
+    ldr w7, =0x40c00000 // +6.0f
+    cmp w6, w7
+    b.ne fail
+
     fmov d3, x4
     fmov d4, x5
     fadd d5, d3, d4

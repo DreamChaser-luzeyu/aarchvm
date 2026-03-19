@@ -17,40 +17,7 @@ AARCHVM_EXTRA_ARGS=()
 if [[ -n "$AARCHVM_ARGS_RAW" ]]; then
   read -r -a AARCHVM_EXTRA_ARGS <<< "$AARCHVM_ARGS_RAW"
 fi
-DEFAULT_CMD=$(cat <<'EOC'
-echo FUNCTIONAL-BEGIN
-/bin/busybox uname -a
-pwd
-cat /proc/version
-/bin/busybox ls /bin
-ps
-dmesg -s 128 >/dev/null
-echo DMESG-OK
-dmesg | grep hang >/dev/null
-echo GREP-HANG-OK
-tmp=/tmp/dmesg-stress.log
-: > "$tmp"
-echo DMESG-STRESS-BEGIN
-i=1
-while [ "$i" -le 4 ]; do
-  echo DMESG-STRESS-ROUND:$i
-  dmesg | tee -a "$tmp"
-  i=$((i + 1))
-done
-bad=$(LC_ALL=C tr -d '\11\12\15\40-\176' < "$tmp" | wc -c)
-echo DMESG-STRESS-BADCOUNT:$bad
-[ "$bad" -eq 0 ]
-echo DMESG-STRESS PASS
-echo DMESG-STRESS-END
-ping -c 1 127.0.0.1 || true
-mount
-df
-/bin/fpsimd_selftest
-/bin/fpint_selftest
-echo USERTESTS PASS
-echo FUNCTIONAL-SUITE PASS
-EOC
-)
+DEFAULT_CMD="/bin/run_functional_suite"
 CMD="${AARCHVM_FUNCTIONAL_COMMAND:-$DEFAULT_CMD}"
 STOP_PATTERN="FUNCTIONAL-SUITE PASS"
 

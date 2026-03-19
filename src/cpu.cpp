@@ -338,6 +338,14 @@ std::uint32_t highest_set_bit(std::uint32_t value) {
 constexpr std::uint64_t kFpsrIoc = 1ull << 0;
 constexpr std::uint64_t kFpsrIxc = 1ull << 4;
 
+enum class FpToIntRoundingMode {
+  TieEven,
+  PosInf,
+  NegInf,
+  Zero,
+  TieAway,
+};
+
 template <typename UIntT>
 bool fp_is_nan_bits(UIntT bits) {
   if constexpr (sizeof(UIntT) == 4u) {
@@ -372,6 +380,82 @@ std::uint64_t fp_compare_fpsr_bits(UIntT lhs_bits, UIntT rhs_bits, bool signalin
 }
 
 template <typename UIntT>
+constexpr UIntT fp_sign_mask_bits() {
+  if constexpr (sizeof(UIntT) == 4u) {
+    return 0x80000000u;
+  } else {
+    return 0x8000000000000000ull;
+  }
+}
+
+template <typename UIntT>
+constexpr UIntT fp_quiet_nan_bit() {
+  if constexpr (sizeof(UIntT) == 4u) {
+    return 0x00400000u;
+  } else {
+    return 0x0008000000000000ull;
+  }
+}
+
+template <typename UIntT>
+UIntT fp_quiet_nan_bits(UIntT bits) {
+  return bits | fp_quiet_nan_bit<UIntT>();
+}
+
+template <typename UIntT, typename FloatT>
+UIntT fp_minmax_result_bits(UIntT lhs_bits,
+                            UIntT rhs_bits,
+                            bool is_min,
+                            bool numeric_variant,
+                            std::uint64_t& fpsr_bits) {
+  fpsr_bits = 0u;
+
+  if (fp_is_signaling_nan_bits(lhs_bits)) {
+    fpsr_bits |= kFpsrIoc;
+    return fp_quiet_nan_bits(lhs_bits);
+  }
+  if (fp_is_signaling_nan_bits(rhs_bits)) {
+    fpsr_bits |= kFpsrIoc;
+    return fp_quiet_nan_bits(rhs_bits);
+  }
+
+  const bool lhs_qnan = fp_is_nan_bits(lhs_bits);
+  const bool rhs_qnan = fp_is_nan_bits(rhs_bits);
+  if (numeric_variant) {
+    if (lhs_qnan) {
+      return rhs_qnan ? lhs_bits : rhs_bits;
+    }
+    if (rhs_qnan) {
+      return lhs_bits;
+    }
+  } else {
+    if (lhs_qnan) {
+      return lhs_bits;
+    }
+    if (rhs_qnan) {
+      return rhs_bits;
+    }
+  }
+
+  const FloatT lhs = std::bit_cast<FloatT>(lhs_bits);
+  const FloatT rhs = std::bit_cast<FloatT>(rhs_bits);
+  if (lhs < rhs) {
+    return is_min ? lhs_bits : rhs_bits;
+  }
+  if (lhs > rhs) {
+    return is_min ? rhs_bits : lhs_bits;
+  }
+
+  const UIntT sign_mask = fp_sign_mask_bits<UIntT>();
+  const bool lhs_zero = (lhs_bits & ~sign_mask) == 0u;
+  const bool rhs_zero = (rhs_bits & ~sign_mask) == 0u;
+  if (lhs_zero && rhs_zero) {
+    return is_min ? (lhs_bits | rhs_bits) : (lhs_bits & rhs_bits);
+  }
+  return lhs_bits;
+}
+
+template <typename UIntT>
 UIntT fp_to_unsigned_rtz(long double value, std::uint64_t& fpsr_bits) {
   fpsr_bits = 0;
   if (std::isnan(value)) {
@@ -392,6 +476,24 @@ UIntT fp_to_unsigned_rtz(long double value, std::uint64_t& fpsr_bits) {
     fpsr_bits |= kFpsrIxc;
   }
   return static_cast<UIntT>(truncated);
+}
+
+inline bool fp_round_up_from_floor(long double error,
+                                   long double floor_value,
+                                   FpToIntRoundingMode rounding) {
+  switch (rounding) {
+    case FpToIntRoundingMode::TieEven:
+      return error > 0.5L || (error == 0.5L && std::fmod(std::fabs(floor_value), 2.0L) != 0.0L);
+    case FpToIntRoundingMode::PosInf:
+      return error != 0.0L;
+    case FpToIntRoundingMode::NegInf:
+      return false;
+    case FpToIntRoundingMode::Zero:
+      return error != 0.0L && floor_value < 0.0L;
+    case FpToIntRoundingMode::TieAway:
+      return error > 0.5L || (error == 0.5L && floor_value >= 0.0L);
+  }
+  return false;
 }
 
 template <typename IntT>
@@ -416,6 +518,69 @@ IntT fp_to_signed_rtz(long double value, std::uint64_t& fpsr_bits) {
     fpsr_bits |= kFpsrIxc;
   }
   return static_cast<IntT>(truncated);
+}
+
+template <typename UIntT>
+UIntT fp_to_unsigned_round(long double value,
+                           FpToIntRoundingMode rounding,
+                           std::uint64_t& fpsr_bits) {
+  fpsr_bits = 0;
+  if (std::isnan(value)) {
+    fpsr_bits |= kFpsrIoc;
+    return 0;
+  }
+  if (!std::isfinite(value)) {
+    fpsr_bits |= kFpsrIoc;
+    return value < 0.0L ? 0 : std::numeric_limits<UIntT>::max();
+  }
+
+  long double int_result = std::floor(value);
+  const long double error = value - int_result;
+  if (fp_round_up_from_floor(error, int_result, rounding)) {
+    int_result += 1.0L;
+  }
+
+  const long double max_value = static_cast<long double>(std::numeric_limits<UIntT>::max());
+  if (int_result < 0.0L || int_result > max_value) {
+    fpsr_bits |= kFpsrIoc;
+    return int_result < 0.0L ? 0 : std::numeric_limits<UIntT>::max();
+  }
+  if (error != 0.0L) {
+    fpsr_bits |= kFpsrIxc;
+  }
+  return static_cast<UIntT>(int_result);
+}
+
+template <typename IntT>
+IntT fp_to_signed_round(long double value,
+                        FpToIntRoundingMode rounding,
+                        std::uint64_t& fpsr_bits) {
+  fpsr_bits = 0;
+  if (std::isnan(value)) {
+    fpsr_bits |= kFpsrIoc;
+    return 0;
+  }
+  if (!std::isfinite(value)) {
+    fpsr_bits |= kFpsrIoc;
+    return value < 0.0L ? std::numeric_limits<IntT>::min() : std::numeric_limits<IntT>::max();
+  }
+
+  long double int_result = std::floor(value);
+  const long double error = value - int_result;
+  if (fp_round_up_from_floor(error, int_result, rounding)) {
+    int_result += 1.0L;
+  }
+
+  const long double min_value = static_cast<long double>(std::numeric_limits<IntT>::min());
+  const long double max_value = static_cast<long double>(std::numeric_limits<IntT>::max());
+  if (int_result < min_value || int_result > max_value) {
+    fpsr_bits |= kFpsrIoc;
+    return int_result < 0.0L ? std::numeric_limits<IntT>::min() : std::numeric_limits<IntT>::max();
+  }
+  if (error != 0.0L) {
+    fpsr_bits |= kFpsrIxc;
+  }
+  return static_cast<IntT>(int_result);
 }
 
 template <typename IntT, typename WideT>
@@ -3825,6 +3990,10 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     qregs_[idx][0] = std::bit_cast<std::uint64_t>(value);
     qregs_[idx][1] = 0u;
   };
+  const auto write_fp_compare_result = [&](std::uint32_t idx, bool predicate, std::uint32_t esize_bits) {
+    qregs_[idx][0] = predicate ? ones(esize_bits) : 0u;
+    qregs_[idx][1] = 0u;
+  };
   const auto set_fp_compare_flags = [&](bool unordered, bool less, bool equal) {
     auto p = sysregs_.pstate();
     if (unordered) {
@@ -3862,50 +4031,6 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
   };
   const auto vector_fp_compare_mask = [](bool predicate, std::uint32_t esize_bits) -> std::uint64_t {
     return predicate ? ones(esize_bits) : 0u;
-  };
-  const auto vector_fp_min = [](auto lhs, auto rhs) {
-    using FloatT = decltype(lhs);
-    if (std::isnan(lhs) || std::isnan(rhs)) {
-      return std::numeric_limits<FloatT>::quiet_NaN();
-    }
-    return lhs < rhs ? lhs : rhs;
-  };
-  const auto vector_fp_max = [](auto lhs, auto rhs) {
-    using FloatT = decltype(lhs);
-    if (std::isnan(lhs) || std::isnan(rhs)) {
-      return std::numeric_limits<FloatT>::quiet_NaN();
-    }
-    return lhs > rhs ? lhs : rhs;
-  };
-  const auto vector_fp_min_nm = [](auto lhs, auto rhs) {
-    using FloatT = decltype(lhs);
-    const bool lhs_nan = std::isnan(lhs);
-    const bool rhs_nan = std::isnan(rhs);
-    if (lhs_nan && rhs_nan) {
-      return std::numeric_limits<FloatT>::quiet_NaN();
-    }
-    if (lhs_nan) {
-      return rhs;
-    }
-    if (rhs_nan) {
-      return lhs;
-    }
-    return lhs < rhs ? lhs : rhs;
-  };
-  const auto vector_fp_max_nm = [](auto lhs, auto rhs) {
-    using FloatT = decltype(lhs);
-    const bool lhs_nan = std::isnan(lhs);
-    const bool rhs_nan = std::isnan(rhs);
-    if (lhs_nan && rhs_nan) {
-      return std::numeric_limits<FloatT>::quiet_NaN();
-    }
-    if (lhs_nan) {
-      return rhs;
-    }
-    if (rhs_nan) {
-      return lhs;
-    }
-    return lhs > rhs ? lhs : rhs;
   };
   const auto fp_round_ties_even = [](auto value) {
     using FloatT = decltype(value);
@@ -4214,7 +4339,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
-  if ((insn & 0x9F20FC00u) == 0x0E209800u) { // CMEQ (zero)
+  if ((insn & 0x9F21FC00u) == 0x0E209800u) { // CMEQ (zero)
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::uint32_t size = (insn >> 22) & 0x3u;
     const std::uint32_t esize_bits = 8u << size;
@@ -4444,19 +4569,31 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     const auto lhs = qregs_[rn];
     const auto rhs = qregs_[rm];
     std::array<std::uint64_t, 2> dst = {0, 0};
+    std::uint64_t fpsr_bits = 0u;
     for (std::uint32_t lane = 0; lane < lanes; ++lane) {
       if (esize_bits == 32u) {
-        const float a = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)));
-        const float b = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane)));
-        const float value = is_min ? vector_fp_min(a, b) : vector_fp_max(a, b);
-        vector_set_elem(dst, 32u, lane, std::bit_cast<std::uint32_t>(value));
+        std::uint64_t lane_fpsr = 0u;
+        const std::uint32_t result = fp_minmax_result_bits<std::uint32_t, float>(
+            static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)),
+            static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane)),
+            is_min,
+            false,
+            lane_fpsr);
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 32u, lane, result);
       } else {
-        const double a = std::bit_cast<double>(vector_get_elem(lhs, 64u, lane));
-        const double b = std::bit_cast<double>(vector_get_elem(rhs, 64u, lane));
-        const double value = is_min ? vector_fp_min(a, b) : vector_fp_max(a, b);
-        vector_set_elem(dst, 64u, lane, std::bit_cast<std::uint64_t>(value));
+        std::uint64_t lane_fpsr = 0u;
+        const std::uint64_t result = fp_minmax_result_bits<std::uint64_t, double>(
+            vector_get_elem(lhs, 64u, lane),
+            vector_get_elem(rhs, 64u, lane),
+            is_min,
+            false,
+            lane_fpsr);
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 64u, lane, result);
       }
     }
+    sysregs_.fp_or_fpsr(fpsr_bits);
     qregs_[rd] = dst;
     return true;
   }
@@ -4503,19 +4640,31 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     const auto lhs = qregs_[rn];
     const auto rhs = qregs_[rm];
     std::array<std::uint64_t, 2> dst = {0, 0};
+    std::uint64_t fpsr_bits = 0u;
     for (std::uint32_t lane = 0; lane < lanes; ++lane) {
       if (esize_bits == 32u) {
-        const float a = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)));
-        const float b = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane)));
-        const float value = is_min ? vector_fp_min_nm(a, b) : vector_fp_max_nm(a, b);
-        vector_set_elem(dst, 32u, lane, std::bit_cast<std::uint32_t>(value));
+        std::uint64_t lane_fpsr = 0u;
+        const std::uint32_t result = fp_minmax_result_bits<std::uint32_t, float>(
+            static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)),
+            static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane)),
+            is_min,
+            true,
+            lane_fpsr);
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 32u, lane, result);
       } else {
-        const double a = std::bit_cast<double>(vector_get_elem(lhs, 64u, lane));
-        const double b = std::bit_cast<double>(vector_get_elem(rhs, 64u, lane));
-        const double value = is_min ? vector_fp_min_nm(a, b) : vector_fp_max_nm(a, b);
-        vector_set_elem(dst, 64u, lane, std::bit_cast<std::uint64_t>(value));
+        std::uint64_t lane_fpsr = 0u;
+        const std::uint64_t result = fp_minmax_result_bits<std::uint64_t, double>(
+            vector_get_elem(lhs, 64u, lane),
+            vector_get_elem(rhs, 64u, lane),
+            is_min,
+            true,
+            lane_fpsr);
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 64u, lane, result);
       }
     }
+    sysregs_.fp_or_fpsr(fpsr_bits);
     qregs_[rd] = dst;
     return true;
   }
@@ -4654,6 +4803,197 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
+  switch (insn & 0xBFE0FC00u) {
+    case 0x0E20A800u: // FCVTNS (vector, S)
+    case 0x2E20A800u: // FCVTNU (vector, S)
+    case 0x0EA0A800u: // FCVTPS (vector, S)
+    case 0x2EA0A800u: // FCVTPU (vector, S)
+    case 0x0E20B800u: // FCVTMS (vector, S)
+    case 0x2E20B800u: // FCVTMU (vector, S)
+    case 0x0E20C800u: // FCVTAS (vector, S)
+    case 0x2E20C800u: // FCVTAU (vector, S)
+    case 0x0E60A800u: // FCVTNS (vector, D)
+    case 0x2E60A800u: // FCVTNU (vector, D)
+    case 0x0EE0A800u: // FCVTPS (vector, D)
+    case 0x2EE0A800u: // FCVTPU (vector, D)
+    case 0x0E60B800u: // FCVTMS (vector, D)
+    case 0x2E60B800u: // FCVTMU (vector, D)
+    case 0x0E60C800u: // FCVTAS (vector, D)
+    case 0x2E60C800u: { // FCVTAU (vector, D)
+      const std::uint32_t opcode = insn & 0xBFE0FC00u;
+      std::uint32_t esize_bits = 0u;
+      std::uint32_t lanes = 0u;
+      if (!vector_fp_shape(insn, esize_bits, lanes)) {
+        return false;
+      }
+      const bool is_unsigned = (opcode & 0x20000000u) != 0u;
+      FpToIntRoundingMode rounding = FpToIntRoundingMode::TieEven;
+      switch (opcode) {
+        case 0x0E20A800u:
+        case 0x2E20A800u:
+        case 0x0E60A800u:
+        case 0x2E60A800u:
+          rounding = FpToIntRoundingMode::TieEven;
+          break;
+        case 0x0EA0A800u:
+        case 0x2EA0A800u:
+        case 0x0EE0A800u:
+        case 0x2EE0A800u:
+          rounding = FpToIntRoundingMode::PosInf;
+          break;
+        case 0x0E20B800u:
+        case 0x2E20B800u:
+        case 0x0E60B800u:
+        case 0x2E60B800u:
+          rounding = FpToIntRoundingMode::NegInf;
+          break;
+        case 0x0E20C800u:
+        case 0x2E20C800u:
+        case 0x0E60C800u:
+        case 0x2E60C800u:
+          rounding = FpToIntRoundingMode::TieAway;
+          break;
+      }
+      const auto src = qregs_[rn];
+      std::array<std::uint64_t, 2> dst = {0, 0};
+      std::uint64_t fpsr_bits = 0u;
+      for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+        std::uint64_t lane_fpsr = 0u;
+        if (esize_bits == 32u) {
+          const long double value = static_cast<long double>(
+              std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(src, 32u, lane))));
+          if (is_unsigned) {
+            const std::uint32_t result = fp_to_unsigned_round<std::uint32_t>(value, rounding, lane_fpsr);
+            vector_set_elem(dst, 32u, lane, result);
+          } else {
+            const std::int32_t result = fp_to_signed_round<std::int32_t>(value, rounding, lane_fpsr);
+            vector_set_elem(dst, 32u, lane, static_cast<std::uint32_t>(result));
+          }
+        } else {
+          const long double value = static_cast<long double>(
+              std::bit_cast<double>(vector_get_elem(src, 64u, lane)));
+          if (is_unsigned) {
+            const std::uint64_t result = fp_to_unsigned_round<std::uint64_t>(value, rounding, lane_fpsr);
+            vector_set_elem(dst, 64u, lane, result);
+          } else {
+            const std::int64_t result = fp_to_signed_round<std::int64_t>(value, rounding, lane_fpsr);
+            vector_set_elem(dst, 64u, lane, static_cast<std::uint64_t>(result));
+          }
+        }
+        fpsr_bits |= lane_fpsr;
+      }
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      qregs_[rd] = dst;
+      return true;
+    }
+  }
+
+
+  switch (insn & 0xBFE1FC00u) {
+    case 0x0EA0F800u: // FABS (vector, S)
+    case 0x2EA0F800u: // FNEG (vector, S)
+    case 0x2EA1F800u: // FSQRT (vector, S)
+    case 0x0EE0F800u: // FABS (vector, D)
+    case 0x2EE0F800u: // FNEG (vector, D)
+    case 0x2EE1F800u: { // FSQRT (vector, D)
+      const std::uint32_t opcode = insn & 0xBFE1FC00u;
+      std::uint32_t esize_bits = 0u;
+      std::uint32_t lanes = 0u;
+      if (!vector_fp_shape(insn, esize_bits, lanes)) {
+        return false;
+      }
+      const auto src = qregs_[rn];
+      std::array<std::uint64_t, 2> dst = {0, 0};
+      for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+        if (esize_bits == 32u) {
+          const float value = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(src, 32u, lane)));
+          float result = value;
+          switch (opcode) {
+            case 0x0EA0F800u: result = std::fabs(value); break;
+            case 0x2EA0F800u: result = -value; break;
+            case 0x2EA1F800u: result = std::sqrt(value); break;
+            default: return false;
+          }
+          vector_set_elem(dst, 32u, lane, std::bit_cast<std::uint32_t>(result));
+        } else {
+          const double value = std::bit_cast<double>(vector_get_elem(src, 64u, lane));
+          double result = value;
+          switch (opcode) {
+            case 0x0EE0F800u: result = std::fabs(value); break;
+            case 0x2EE0F800u: result = -value; break;
+            case 0x2EE1F800u: result = std::sqrt(value); break;
+            default: return false;
+          }
+          vector_set_elem(dst, 64u, lane, std::bit_cast<std::uint64_t>(result));
+        }
+      }
+      qregs_[rd] = dst;
+      return true;
+    }
+    case 0x0E218800u: // FRINTN (vector, S)
+    case 0x0EA18800u: // FRINTP (vector, S)
+    case 0x0E219800u: // FRINTM (vector, S)
+    case 0x0EA19800u: // FRINTZ (vector, S)
+    case 0x2E218800u: // FRINTA (vector, S)
+    case 0x2E219800u: // FRINTX (vector, S)
+    case 0x2EA19800u: // FRINTI (vector, S)
+    case 0x0E618800u: // FRINTN (vector, D)
+    case 0x0EE18800u: // FRINTP (vector, D)
+    case 0x0E619800u: // FRINTM (vector, D)
+    case 0x0EE19800u: // FRINTZ (vector, D)
+    case 0x2E618800u: // FRINTA (vector, D)
+    case 0x2E619800u: // FRINTX (vector, D)
+    case 0x2EE19800u: { // FRINTI (vector, D)
+      const std::uint32_t opcode = insn & 0xBFE1FC00u;
+      std::uint32_t esize_bits = 0u;
+      std::uint32_t lanes = 0u;
+      if (!vector_fp_shape(insn, esize_bits, lanes)) {
+        return false;
+      }
+      const auto src = qregs_[rn];
+      std::array<std::uint64_t, 2> dst = {0, 0};
+      const std::uint32_t fpcr_mode = static_cast<std::uint32_t>((sysregs_.fpcr() >> 22) & 0x3u);
+      for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+        if (esize_bits == 32u) {
+          const float value = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(src, 32u, lane)));
+          float result = value;
+          switch (opcode) {
+            case 0x0E218800u: result = fp_round_ties_even(value); break;
+            case 0x0EA18800u: result = std::ceil(value); break;
+            case 0x0E219800u: result = std::floor(value); break;
+            case 0x0EA19800u: result = std::trunc(value); break;
+            case 0x2E218800u: result = fp_round_ties_away(value); break;
+            case 0x2E219800u:
+            case 0x2EA19800u:
+              result = fp_round_by_mode(value, fpcr_mode);
+              break;
+            default:
+              return false;
+          }
+          vector_set_elem(dst, 32u, lane, std::bit_cast<std::uint32_t>(result));
+        } else {
+          const double value = std::bit_cast<double>(vector_get_elem(src, 64u, lane));
+          double result = value;
+          switch (opcode) {
+            case 0x0E618800u: result = fp_round_ties_even(value); break;
+            case 0x0EE18800u: result = std::ceil(value); break;
+            case 0x0E619800u: result = std::floor(value); break;
+            case 0x0EE19800u: result = std::trunc(value); break;
+            case 0x2E618800u: result = fp_round_ties_away(value); break;
+            case 0x2E619800u:
+            case 0x2EE19800u:
+              result = fp_round_by_mode(value, fpcr_mode);
+              break;
+            default:
+              return false;
+          }
+          vector_set_elem(dst, 64u, lane, std::bit_cast<std::uint64_t>(result));
+        }
+      }
+      qregs_[rd] = dst;
+      return true;
+    }
+  }
 
   if ((insn & 0xBF20FC00u) == 0x0E208400u) { // ADD (vector)
     const bool q = ((insn >> 30) & 1u) != 0u;
@@ -5250,6 +5590,31 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return false;
   }
 
+  if ((insn & 0xFF20FC00u) == 0x1E208800u) { // FNMUL (scalar)
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    if (ftype == 0u) {
+      write_fp32(rd, -(read_fp32(rn) * read_fp32(rm)));
+      return true;
+    }
+    if (ftype == 1u) {
+      write_fp64(rd, -(read_fp64(rn) * read_fp64(rm)));
+      return true;
+    }
+    return false;
+  }
+
+  if ((insn & 0xFF20FC00u) == 0x7E20D400u) { // FABD (scalar)
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const bool is_double = ((insn >> 22) & 1u) != 0u;
+    if (!is_double) {
+      write_fp32(rd, std::fabs(read_fp32(rn) - read_fp32(rm)));
+      return true;
+    }
+    write_fp64(rd, std::fabs(read_fp64(rn) - read_fp64(rm)));
+    return true;
+  }
+
   if ((insn & 0xFF20FC00u) == 0x1E201800u) { // FDIV (scalar)
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
     const std::uint32_t ftype = (insn >> 22) & 0x3u;
@@ -5259,6 +5624,41 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     }
     if (ftype == 1u) {
       write_fp64(rd, read_fp64(rn) / read_fp64(rm));
+      return true;
+    }
+    return false;
+  }
+
+  if ((insn & 0xFF20FC00u) == 0x1E204800u || // FMAX (scalar)
+      (insn & 0xFF20FC00u) == 0x1E205800u || // FMIN (scalar)
+      (insn & 0xFF20FC00u) == 0x1E206800u || // FMAXNM (scalar)
+      (insn & 0xFF20FC00u) == 0x1E207800u) { // FMINNM (scalar)
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    const std::uint32_t opcode = insn & 0xFF20FC00u;
+    const bool is_min = opcode == 0x1E205800u || opcode == 0x1E207800u;
+    const bool numeric_variant = opcode == 0x1E206800u || opcode == 0x1E207800u;
+    std::uint64_t fpsr_bits = 0u;
+    if (ftype == 0u) {
+      const std::uint32_t result = fp_minmax_result_bits<std::uint32_t, float>(
+          static_cast<std::uint32_t>(qregs_[rn][0] & 0xFFFFFFFFu),
+          static_cast<std::uint32_t>(qregs_[rm][0] & 0xFFFFFFFFu),
+          is_min,
+          numeric_variant,
+          fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      write_fp32(rd, std::bit_cast<float>(result));
+      return true;
+    }
+    if (ftype == 1u) {
+      const std::uint64_t result = fp_minmax_result_bits<std::uint64_t, double>(
+          qregs_[rn][0],
+          qregs_[rm][0],
+          is_min,
+          numeric_variant,
+          fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      write_fp64(rd, std::bit_cast<double>(result));
       return true;
     }
     return false;
@@ -5333,6 +5733,104 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
 
   if ((insn & 0xFFFFFC00u) == 0x1E614000u) { // FNEG Dd, Dn
     write_fp64(rd, -read_fp64(rn));
+    return true;
+  }
+
+  if ((insn & 0xFFA0FC00u) == 0x5E20E400u || // FCMEQ (scalar, register)
+      (insn & 0xFFA0FC00u) == 0x7E20E400u || // FCMGE (scalar, register)
+      (insn & 0xFFA0FC00u) == 0x7EA0E400u) { // FCMGT (scalar, register)
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t tag = insn & 0xFFA0FC00u;
+    const bool is_double = ((insn >> 22) & 1u) != 0u;
+    if (!is_double) {
+      const float a = read_fp32(rn);
+      const float b = read_fp32(rm);
+      bool predicate = false;
+      if (!std::isnan(a) && !std::isnan(b)) {
+        switch (tag) {
+          case 0x5E20E400u: predicate = (a == b); break;
+          case 0x7E20E400u: predicate = (a >= b); break;
+          case 0x7EA0E400u: predicate = (a > b); break;
+        }
+      }
+      write_fp_compare_result(rd, predicate, 32u);
+      return true;
+    }
+    const double a = read_fp64(rn);
+    const double b = read_fp64(rm);
+    bool predicate = false;
+    if (!std::isnan(a) && !std::isnan(b)) {
+      switch (tag) {
+        case 0x5E20E400u: predicate = (a == b); break;
+        case 0x7E20E400u: predicate = (a >= b); break;
+        case 0x7EA0E400u: predicate = (a > b); break;
+      }
+    }
+    write_fp_compare_result(rd, predicate, 64u);
+    return true;
+  }
+
+  if ((insn & 0xFFA0FC00u) == 0x7E20EC00u || // FACGE (scalar, register)
+      (insn & 0xFFA0FC00u) == 0x7EA0EC00u) { // FACGT (scalar, register)
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t tag = insn & 0xFFA0FC00u;
+    const bool is_double = ((insn >> 22) & 1u) != 0u;
+    if (!is_double) {
+      const float a = read_fp32(rn);
+      const float b = read_fp32(rm);
+      bool predicate = false;
+      if (!std::isnan(a) && !std::isnan(b)) {
+        predicate = (tag == 0x7EA0EC00u) ? (std::fabs(a) > std::fabs(b))
+                                         : (std::fabs(a) >= std::fabs(b));
+      }
+      write_fp_compare_result(rd, predicate, 32u);
+      return true;
+    }
+    const double a = read_fp64(rn);
+    const double b = read_fp64(rm);
+    bool predicate = false;
+    if (!std::isnan(a) && !std::isnan(b)) {
+      predicate = (tag == 0x7EA0EC00u) ? (std::fabs(a) > std::fabs(b))
+                                       : (std::fabs(a) >= std::fabs(b));
+    }
+    write_fp_compare_result(rd, predicate, 64u);
+    return true;
+  }
+
+  if ((insn & 0xFFA0FC00u) == 0x5EA0D800u || // FCMEQ (scalar, zero)
+      (insn & 0xFFA0FC00u) == 0x7EA0C800u || // FCMGE (scalar, zero)
+      (insn & 0xFFA0FC00u) == 0x5EA0C800u || // FCMGT (scalar, zero)
+      (insn & 0xFFA0FC00u) == 0x7EA0D800u || // FCMLE (scalar, zero)
+      (insn & 0xFFA0FC00u) == 0x5EA0E800u) { // FCMLT (scalar, zero)
+    const std::uint32_t tag = insn & 0xFFA0FC00u;
+    const bool is_double = ((insn >> 22) & 1u) != 0u;
+    if (!is_double) {
+      const float a = read_fp32(rn);
+      bool predicate = false;
+      if (!std::isnan(a)) {
+        switch (tag) {
+          case 0x5EA0D800u: predicate = (a == 0.0f); break;
+          case 0x7EA0C800u: predicate = (a >= 0.0f); break;
+          case 0x5EA0C800u: predicate = (a > 0.0f); break;
+          case 0x7EA0D800u: predicate = (a <= 0.0f); break;
+          case 0x5EA0E800u: predicate = (a < 0.0f); break;
+        }
+      }
+      write_fp_compare_result(rd, predicate, 32u);
+      return true;
+    }
+    const double a = read_fp64(rn);
+    bool predicate = false;
+    if (!std::isnan(a)) {
+      switch (tag) {
+        case 0x5EA0D800u: predicate = (a == 0.0); break;
+        case 0x7EA0C800u: predicate = (a >= 0.0); break;
+        case 0x5EA0C800u: predicate = (a > 0.0); break;
+        case 0x7EA0D800u: predicate = (a <= 0.0); break;
+        case 0x5EA0E800u: predicate = (a < 0.0); break;
+      }
+    }
+    write_fp_compare_result(rd, predicate, 64u);
     return true;
   }
 
@@ -5432,6 +5930,44 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return false;
   }
 
+  if ((insn & 0xFFB80F20u) == 0x1E200400u) { // FCCMP/FCCMPE S/D
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t cond = (insn >> 12) & 0xFu;
+    const std::uint32_t nzcv_imm = insn & 0xFu;
+    const bool is_double = ((insn >> 22) & 0x1u) != 0u;
+    const bool signaling_compare = (insn & 0x10u) != 0u;
+    if (!condition_holds(cond)) {
+      sysregs_.set_nzcv(static_cast<std::uint64_t>(nzcv_imm) << 28);
+      return true;
+    }
+    if (!is_double) {
+      const std::uint32_t lhs_bits = static_cast<std::uint32_t>(qregs_[rn][0] & 0xFFFFFFFFu);
+      const std::uint32_t rhs_bits = static_cast<std::uint32_t>(qregs_[rm][0] & 0xFFFFFFFFu);
+      const bool unordered = fp_is_nan_bits(lhs_bits) || fp_is_nan_bits(rhs_bits);
+      if (unordered) {
+        set_fp_compare_flags(true, false, false);
+      } else {
+        const float lhs = std::bit_cast<float>(lhs_bits);
+        const float rhs = std::bit_cast<float>(rhs_bits);
+        set_fp_compare_flags(false, lhs < rhs, lhs == rhs);
+      }
+      sysregs_.fp_or_fpsr(fp_compare_fpsr_bits(lhs_bits, rhs_bits, signaling_compare));
+      return true;
+    }
+    const std::uint64_t lhs_bits = qregs_[rn][0];
+    const std::uint64_t rhs_bits = qregs_[rm][0];
+    const bool unordered = fp_is_nan_bits(lhs_bits) || fp_is_nan_bits(rhs_bits);
+    if (unordered) {
+      set_fp_compare_flags(true, false, false);
+    } else {
+      const double lhs = std::bit_cast<double>(lhs_bits);
+      const double rhs = std::bit_cast<double>(rhs_bits);
+      set_fp_compare_flags(false, lhs < rhs, lhs == rhs);
+    }
+    sysregs_.fp_or_fpsr(fp_compare_fpsr_bits(lhs_bits, rhs_bits, signaling_compare));
+    return true;
+  }
+
   if (((insn & 0xFF20FC1Fu) == 0x1E202000u) || ((insn & 0xFF20FC1Fu) == 0x1E202010u)) { // FCMP/FCMPE Sn, Sm / Dn, Dm
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
     const std::uint32_t ftype = (insn >> 22) & 0x3u;
@@ -5517,6 +6053,100 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
       set_reg32(rd, static_cast<std::uint32_t>(out));
     }
     return true;
+  }
+
+  switch (insn & 0xFF3FFC00u) {
+    case 0x1E200000u: // FCVTNS Wd, Sn
+    case 0x1E210000u: // FCVTNU Wd, Sn
+    case 0x1E240000u: // FCVTAS Wd, Sn
+    case 0x1E250000u: // FCVTAU Wd, Sn
+    case 0x1E280000u: // FCVTPS Wd, Sn
+    case 0x1E290000u: // FCVTPU Wd, Sn
+    case 0x1E300000u: // FCVTMS Wd, Sn
+    case 0x1E310000u: // FCVTMU Wd, Sn
+    case 0x1E600000u: // FCVTNS Wd, Dn
+    case 0x1E610000u: // FCVTNU Wd, Dn
+    case 0x1E640000u: // FCVTAS Wd, Dn
+    case 0x1E650000u: // FCVTAU Wd, Dn
+    case 0x1E680000u: // FCVTPS Wd, Dn
+    case 0x1E690000u: // FCVTPU Wd, Dn
+    case 0x1E700000u: // FCVTMS Wd, Dn
+    case 0x1E710000u: // FCVTMU Wd, Dn
+    case 0x9E200000u: // FCVTNS Xd, Sn
+    case 0x9E210000u: // FCVTNU Xd, Sn
+    case 0x9E240000u: // FCVTAS Xd, Sn
+    case 0x9E250000u: // FCVTAU Xd, Sn
+    case 0x9E280000u: // FCVTPS Xd, Sn
+    case 0x9E290000u: // FCVTPU Xd, Sn
+    case 0x9E300000u: // FCVTMS Xd, Sn
+    case 0x9E310000u: // FCVTMU Xd, Sn
+    case 0x9E600000u: // FCVTNS Xd, Dn
+    case 0x9E610000u: // FCVTNU Xd, Dn
+    case 0x9E640000u: // FCVTAS Xd, Dn
+    case 0x9E650000u: // FCVTAU Xd, Dn
+    case 0x9E680000u: // FCVTPS Xd, Dn
+    case 0x9E690000u: // FCVTPU Xd, Dn
+    case 0x9E700000u: // FCVTMS Xd, Dn
+    case 0x9E710000u: { // FCVTMU Xd, Dn
+      const std::uint32_t opcode = insn & 0xFF3FFC00u;
+      const bool to_x = (insn >> 31) != 0u;
+      const std::uint32_t ftype = (insn >> 22) & 0x3u;
+      long double value = 0.0L;
+      if (ftype == 0u) {
+        value = static_cast<long double>(read_fp32(rn));
+      } else if (ftype == 1u) {
+        value = static_cast<long double>(read_fp64(rn));
+      } else {
+        return false;
+      }
+
+      const bool is_unsigned = (opcode & 0x00010000u) != 0u;
+      FpToIntRoundingMode rounding = FpToIntRoundingMode::TieEven;
+      switch (opcode & 0x001F0000u) {
+        case 0x00000000u:
+        case 0x00010000u:
+          rounding = FpToIntRoundingMode::TieEven;
+          break;
+        case 0x00040000u:
+        case 0x00050000u:
+          rounding = FpToIntRoundingMode::TieAway;
+          break;
+        case 0x00080000u:
+        case 0x00090000u:
+          rounding = FpToIntRoundingMode::PosInf;
+          break;
+        case 0x00100000u:
+        case 0x00110000u:
+          rounding = FpToIntRoundingMode::NegInf;
+          break;
+        default:
+          return false;
+      }
+
+      std::uint64_t fpsr_bits = 0u;
+      if (is_unsigned) {
+        if (to_x) {
+          const std::uint64_t out = fp_to_unsigned_round<std::uint64_t>(value, rounding, fpsr_bits);
+          sysregs_.fp_or_fpsr(fpsr_bits);
+          set_reg(rd, out);
+        } else {
+          const std::uint32_t out = fp_to_unsigned_round<std::uint32_t>(value, rounding, fpsr_bits);
+          sysregs_.fp_or_fpsr(fpsr_bits);
+          set_reg32(rd, out);
+        }
+      } else {
+        if (to_x) {
+          const std::int64_t out = fp_to_signed_round<std::int64_t>(value, rounding, fpsr_bits);
+          sysregs_.fp_or_fpsr(fpsr_bits);
+          set_reg(rd, static_cast<std::uint64_t>(out));
+        } else {
+          const std::int32_t out = fp_to_signed_round<std::int32_t>(value, rounding, fpsr_bits);
+          sysregs_.fp_or_fpsr(fpsr_bits);
+          set_reg32(rd, static_cast<std::uint32_t>(out));
+        }
+      }
+      return true;
+    }
   }
 
   if ((insn & 0xFF3FFC00u) == 0x1E390000u || (insn & 0xFF3FFC00u) == 0x9E390000u) { // FCVTZU
