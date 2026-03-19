@@ -62,6 +62,7 @@ build_asm_prog fpsimd_fp_vector
 build_asm_prog fpsimd_more_perm_fp
 build_asm_prog fpsimd_structured_ls
 build_asm_prog fpsimd_structured_ls_more
+build_asm_prog fpsimd_structured_lane_ls
 build_asm_prog fpsimd_widen_sat
 build_asm_prog cpacr_fp_trap
 build_asm_prog cpacr_fp_mem_trap

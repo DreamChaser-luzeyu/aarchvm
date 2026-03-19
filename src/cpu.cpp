@@ -1788,7 +1788,8 @@ bool Cpu::insn_uses_fp_asimd(std::uint32_t insn) const {
       (insn & 0xBFFFFC00u) == 0x0C407000u || (insn & 0xBFFFFC00u) == 0x0C007000u ||
       (insn & 0xBFFFFC00u) == 0x0CDF7000u || (insn & 0xBFFFFC00u) == 0x0C9F7000u ||
       (insn & 0xBFFFFC00u) == 0x0C408000u || (insn & 0xBFFFFC00u) == 0x0C008000u ||
-      (insn & 0xBFFFFC00u) == 0x0CDF8000u || (insn & 0xBFFFFC00u) == 0x0C9F8000u;
+      (insn & 0xBFFFFC00u) == 0x0CDF8000u || (insn & 0xBFFFFC00u) == 0x0C9F8000u ||
+      (insn & 0xBF9F0000u) == 0x0D000000u || (insn & 0xBF800000u) == 0x0D800000u;
   if (fp_ls_unsigned_imm || fp_ls_pre_post || fp_ls_regoffset || fp_ls_unscaled || asimd_structured_ls) {
     return true;
   }
@@ -6505,6 +6506,121 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     }
     return true;
   };
+  const auto access_vec_single_struct = [&](std::uint64_t addr,
+                                            std::uint32_t vt,
+                                            std::uint32_t reg_count,
+                                            std::uint32_t esize_bits,
+                                            std::uint32_t lane_index,
+                                            std::uint32_t datasize_bits,
+                                            bool is_load,
+                                            bool replicate,
+                                            std::uint64_t& fault_addr) -> bool {
+    const std::size_t ebytes = static_cast<std::size_t>(esize_bits / 8u);
+    if (reg_count == 0u || reg_count > 4u || (esize_bits != 8u && esize_bits != 16u &&
+                                              esize_bits != 32u && esize_bits != 64u)) {
+      return false;
+    }
+
+    if (is_load) {
+      std::array<std::array<std::uint64_t, 2>, 4> regs{};
+      for (std::uint32_t reg_idx = 0; reg_idx < reg_count; ++reg_idx) {
+        const auto value = mmu_read(addr + static_cast<std::uint64_t>(reg_idx) * ebytes, ebytes);
+        if (!value.has_value()) {
+          fault_addr = addr + static_cast<std::uint64_t>(reg_idx) * ebytes;
+          return false;
+        }
+
+        if (replicate) {
+          std::array<std::uint64_t, 2> dst{};
+          const std::uint32_t lanes = datasize_bits / esize_bits;
+          for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+            vector_set_elem(dst, esize_bits, lane, *value & ones(esize_bits));
+          }
+          regs[reg_idx] = dst;
+        } else {
+          auto dst = qregs_[(vt + reg_idx) & 0x1Fu];
+          vector_set_elem(dst, esize_bits, lane_index, *value & ones(esize_bits));
+          regs[reg_idx] = dst;
+        }
+      }
+
+      for (std::uint32_t reg_idx = 0; reg_idx < reg_count; ++reg_idx) {
+        qregs_[(vt + reg_idx) & 0x1Fu] = regs[reg_idx];
+      }
+      return true;
+    }
+
+    for (std::uint32_t reg_idx = 0; reg_idx < reg_count; ++reg_idx) {
+      const auto& src = qregs_[(vt + reg_idx) & 0x1Fu];
+      if (!mmu_write(addr + static_cast<std::uint64_t>(reg_idx) * ebytes,
+                     vector_get_elem(src, esize_bits, lane_index) & ones(esize_bits),
+                     ebytes)) {
+        fault_addr = addr + static_cast<std::uint64_t>(reg_idx) * ebytes;
+        return false;
+      }
+    }
+
+    return true;
+  };
+  const auto decode_vec_single_struct = [&](std::uint32_t insn,
+                                            bool& is_load,
+                                            bool& replicate,
+                                            std::uint32_t& reg_count,
+                                            std::uint32_t& esize_bits,
+                                            std::uint32_t& lane_index,
+                                            std::uint32_t& datasize_bits) -> bool {
+    const std::uint32_t q = (insn >> 30) & 1u;
+    const std::uint32_t l = (insn >> 22) & 1u;
+    const std::uint32_t r = (insn >> 21) & 1u;
+    const std::uint32_t opcode = (insn >> 13) & 0x7u;
+    const std::uint32_t s = (insn >> 12) & 1u;
+    const std::uint32_t size = (insn >> 10) & 0x3u;
+    std::uint32_t scale = (opcode >> 1) & 0x3u;
+
+    is_load = l != 0u;
+    reg_count = (((opcode & 1u) << 1u) | r) + 1u;
+    replicate = false;
+    lane_index = 0u;
+
+    switch (scale) {
+    case 0x3u:
+      if (!is_load || s != 0u) {
+        return false;
+      }
+      scale = size;
+      replicate = true;
+      break;
+    case 0x0u:
+      lane_index = (q << 3u) | (s << 2u) | size;
+      break;
+    case 0x1u:
+      if ((size & 1u) != 0u) {
+        return false;
+      }
+      lane_index = (q << 2u) | (s << 1u) | (size >> 1u);
+      break;
+    case 0x2u:
+      if ((size & 0x2u) != 0u) {
+        return false;
+      }
+      if ((size & 0x1u) == 0u) {
+        lane_index = (q << 1u) | s;
+      } else {
+        if (s != 0u) {
+          return false;
+        }
+        lane_index = q;
+        scale = 0x3u;
+      }
+      break;
+    default:
+      return false;
+    }
+
+    datasize_bits = 64u << q;
+    esize_bits = 8u << scale;
+    return true;
+  };
 
   // SIMD&FP memory subset, including whole-register structured load/store
   // forms needed by user-space code generation and AdvSIMD compliance tests.
@@ -6620,6 +6736,33 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     const bool ok = is_load ? load_vec(addr, rt, size) : store_vec(addr, rt, size);
     if (!ok) {
       data_abort(addr);
+    }
+    return true;
+  }
+
+  if ((insn & 0xBF9F0000u) == 0x0D000000u || (insn & 0xBF800000u) == 0x0D800000u) {
+    const bool writeback = (insn & 0x00800000u) != 0u;
+    bool is_load = false;
+    bool replicate = false;
+    std::uint32_t reg_count = 0u;
+    std::uint32_t esize_bits = 0u;
+    std::uint32_t lane_index = 0u;
+    std::uint32_t datasize_bits = 0u;
+    if (!decode_vec_single_struct(insn, is_load, replicate, reg_count, esize_bits, lane_index, datasize_bits)) {
+      return false;
+    }
+    const std::uint64_t addr = sp_or_reg(rn);
+    std::uint64_t fault_addr = addr;
+    if (!access_vec_single_struct(addr, rt, reg_count, esize_bits, lane_index, datasize_bits,
+                                  is_load, replicate, fault_addr)) {
+      data_abort(fault_addr);
+      return true;
+    }
+    if (writeback) {
+      const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+      const std::uint64_t imm_off = static_cast<std::uint64_t>(reg_count) * static_cast<std::uint64_t>(esize_bits / 8u);
+      const std::uint64_t off = rm == 31u ? imm_off : reg(rm);
+      set_sp_or_reg(rn, addr + off, false);
     }
     return true;
   }

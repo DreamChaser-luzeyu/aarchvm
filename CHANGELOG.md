@@ -1760,3 +1760,53 @@
   - 修改前，最小 `LD3` 探针会落入未实现路径并最终异常停机；
   - 修改后，新增 whole-register structured load/store 用例与完整主线回归均通过。
 - 这轮之后，whole-register 结构访存的覆盖显著更完整了，但我仍未把所有 lane/replicate 类 structured AdvSIMD 访存都补齐；那部分仍是后续继续审阅的候选缺口。
+
+# 修改日志 2026-03-19 14:47
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程补齐 AdvSIMD structured 访存剩余的真实 ISA 缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fpsimd_structured_lane_ls.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_structured_lane_ls.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 在 `cpu.cpp` 中新增 Arm ARM shared decode 对应的 single-structure 处理路径，补齐：
+  - one-lane `LD1/ST1/LD2/ST2/LD3/ST3/LD4/ST4`；
+  - replicate `LD1R/LD2R/LD3R/LD4R`；
+  - no-offset 与 post-index（immediate / register）变体。
+- 按手册语义实现了这两类 structured 访存的关键行为：
+  - one-lane load 只更新目标 lane，保留寄存器其他位；
+  - replicate load 按 arrangement 填充目标向量；
+  - post-index immediate 写回使用“本次传输总字节数”，register variant 写回使用 `Xm`；
+  - load 路径在全部元素读取成功后再统一提交寄存器结果，避免部分更新。
+- 扩展 `insn_uses_fp_asimd()`，确保新增的 structured SIMD 访存在 `CPACR_EL1.FPEN` trap 条件下也走正确的 FP/AdvSIMD 访问陷入路径。
+- 新增裸机单测 [tests/arm64/fpsimd_structured_lane_ls.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_structured_lane_ls.S)，覆盖：
+  - one-lane load/store 的 8/16/32/64-bit lane 语义；
+  - replicate `LD1R/LD2R/LD3R/LD4R`；
+  - 1/2/3/4-register 结构数；
+  - no-offset、post-index immediate、post-index register；
+  - lane 保留语义、replicate 结果、内存布局和 writeback。
+- 在落地前额外用 `qemu-aarch64` 做了语义核对：
+  - `LD1R {Vt.8B}` 会清零高 64 位；
+  - one-lane `LD1 {Vt.B}[idx]` 会保留寄存器其余字节与高 64 位。
+
+## 本轮测试
+
+- 构建与定向验证：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 1200s tests/arm64/build_tests.sh`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_structured_lane_ls.bin -load 0x0 -entry 0x0 -steps 800000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 900s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮补的是 whole-register structured 之后剩下的一大块 AdvSIMD structured memory gap，不是针对某个测试的特殊处理。
+- 修改后，single-structure one-lane 与 replicate 家族已经有了解码、语义和单测闭环，且完整裸机与 Linux 单核/SMP 回归均通过。
+- 继续往下审时，仍值得关注的方向主要是：
+  - FEAT 可选扩展相关但当前未实现的 SIMD&FP acquire/release 访存；
+  - 其余更零散的 AdvSIMD/FP 指令族与异常/陷入细节。
