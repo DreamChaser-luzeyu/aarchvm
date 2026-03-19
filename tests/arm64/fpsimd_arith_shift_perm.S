@@ -4,6 +4,9 @@ _start:
     movz x20, #0
     movk x20, #0x0900, lsl #16
     adr  x21, dst
+    movz x25, #0x0030, lsl #16
+    msr  cpacr_el1, x25
+    isb
 
     adr  x22, add_a
     ldr  q0, [x22]

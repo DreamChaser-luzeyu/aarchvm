@@ -22,6 +22,13 @@ run_smp() {
   ./build/aarchvm -smp 2 -bin "tests/arm64/out/${bin}" -load 0x0 -entry 0x0 -steps "$steps"
 }
 
+run_expect() {
+  local bin="$1"
+  local steps="$2"
+  local expected="$3"
+  test "$(./build/aarchvm -bin "tests/arm64/out/${bin}" -load 0x0 -entry 0x0 -steps "$steps" | tr -d '\r\n')" = "$expected"
+}
+
 run instr_legacy_each.bin 3000000
 run mmu_tlb_cache.bin 5000000
 run mmu_ttbr1_early.bin 3000000
@@ -76,8 +83,11 @@ run irq_disabled.bin 1200000
 run sys_ctrl.bin 1800000
 run cntkctl_el1.bin 300000
 run cntkctl_el0_timer_access.bin 600000
-run el0_sysreg_privilege.bin 400000
-run el0_cache_ops_privilege.bin 600000
+test "$(./build/aarchvm -bin tests/arm64/out/el0_sysreg_privilege.bin -load 0x0 -entry 0x0 -steps 400000 | tr -d '\r\n')" = 'R'
+test "$(./build/aarchvm -bin tests/arm64/out/el0_daif_uma.bin -load 0x0 -entry 0x0 -steps 500000 | tr -d '\r\n')" = 'U'
+test "$(./build/aarchvm -bin tests/arm64/out/sysreg_optional_absent.bin -load 0x0 -entry 0x0 -steps 400000 | tr -d '\r\n')" = 'U'
+test "$(./build/aarchvm -bin tests/arm64/out/el0_cache_ops_privilege.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'C'
+test "$(./build/aarchvm -bin tests/arm64/out/el0_wfx_trap.bin -load 0x0 -entry 0x0 -steps 800000 | tr -d '\r\n')" = 'T'
 run ldtr_sttr_usercopy.bin 400000
 run fpsimd_minimal.bin 400000
 run fpsimd_mvni.bin 400000
@@ -90,8 +100,8 @@ run fp_scalar_elem_ls.bin 400000
 run fpsimd_uminp.bin 400000
 run fpsimd_umov_lane.bin 400000
 run fpsimd_dup_elem.bin 400000
-run fpsimd_stringops.bin 600000
-run fpsimd_bic_imm.bin 200000
+run_expect fpsimd_stringops.bin 600000 W
+run_expect fpsimd_bic_imm.bin 200000 W
 run fmov_scalar_imm.bin 200000
 run fpsimd_scalar_movi.bin 200000
 run fmov_scalar_reg.bin 200000
@@ -104,7 +114,7 @@ run fp_scalar_fcsel.bin 200000
 run fp_scalar_fma.bin 200000
 run fp_scalar_misc.bin 200000
 run fpsimd_ins_xtl.bin 300000
-run fpsimd_misc_more.bin 300000
+run_expect fpsimd_misc_more.bin 300000 G
 run fpsimd_arith_shift_perm.bin 300000
 run fpsimd_fp_vector.bin 400000
 run fpsimd_more_perm_fp.bin 400000

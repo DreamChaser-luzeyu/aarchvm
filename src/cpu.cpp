@@ -48,6 +48,9 @@ constexpr std::uint32_t kTimerVirtPpiIntId = 27u;
 constexpr std::uint32_t kTimerPhysPpiIntId = 30u;
 constexpr std::uint64_t kSctlrEl1Dze = 1ull << 14u;
 constexpr std::uint64_t kSctlrEl1Uct = 1ull << 15u;
+constexpr std::uint64_t kSctlrEl1Uma = 1ull << 9u;
+constexpr std::uint64_t kSctlrEl1NTwi = 1ull << 16u;
+constexpr std::uint64_t kSctlrEl1NTwe = 1ull << 18u;
 constexpr std::uint64_t kSctlrEl1Uci = 1ull << 26u;
 
 constexpr std::uint32_t sysreg_key(std::uint32_t op0,
@@ -2874,15 +2877,26 @@ bool Cpu::exec_system(std::uint32_t insn) {
   // but otherwise treat hint-space operations such as BTI/PAC/AUT as no-ops
   // for the current minimal Linux bring-up model.
   if ((insn & 0xFFFFF01Fu) == 0xD503201Fu) {
+    const auto trap_wfx = [&](std::uint32_t iss) {
+      enter_sync_exception(pc_ - 4u, 0x01u, iss, false, 0u);
+      return true;
+    };
     switch ((insn >> 5) & 0x7Fu) {
     case 0x02u: // WFE
       if (event_register_) {
         event_register_ = false;
+      } else if (sysregs_.in_el0() && (sysregs_.sctlr_el1() & kSctlrEl1NTwe) == 0u) {
+        return trap_wfx(0x1u);
       } else {
         waiting_for_event_ = true;
       }
       return true;
     case 0x03u: // WFI
+      if (sysregs_.in_el0() &&
+          (sysregs_.sctlr_el1() & kSctlrEl1NTwi) == 0u &&
+          !gic_.has_pending(cpu_index_)) {
+        return trap_wfx(0x0u);
+      }
       waiting_for_interrupt_ = true;
       return true;
     case 0x04u: // SEV
@@ -2953,6 +2967,10 @@ bool Cpu::exec_system(std::uint32_t insn) {
     return !sysregs_.in_el0() || (sysregs_.sctlr_el1() & kSctlrEl1Dze) != 0u;
   };
 
+  const auto el0_uma_enabled = [&]() {
+    return !sysregs_.in_el0() || (sysregs_.sctlr_el1() & kSctlrEl1Uma) != 0u;
+  };
+
   const auto el0_timer_sysreg_allowed = [&](std::uint32_t key, bool write) -> bool {
     if (!sysregs_.in_el0()) {
       return true;
@@ -2991,14 +3009,12 @@ bool Cpu::exec_system(std::uint32_t insn) {
       case sysreg_key(3u, 3u, 4u, 4u, 0u):   // FPCR
       case sysreg_key(3u, 3u, 4u, 4u, 1u):   // FPSR
       case sysreg_key(3u, 3u, 13u, 0u, 2u):  // TPIDR_EL0
-      case sysreg_key(3u, 3u, 13u, 0u, 5u):  // TPIDR2_EL0
         return true;
-      case sysreg_key(3u, 0u, 4u, 2u, 2u):   // CurrentEL
       case sysreg_key(3u, 3u, 4u, 2u, 1u):   // DAIF
+        return el0_uma_enabled();
       case sysreg_key(3u, 3u, 0u, 0u, 7u):   // DCZID_EL0
       case sysreg_key(3u, 3u, 13u, 0u, 3u):  // TPIDRRO_EL0
       case sysreg_key(3u, 3u, 14u, 0u, 0u):  // CNTFRQ_EL0
-      case sysreg_key(3u, 3u, 2u, 5u, 1u):   // GCSPR_EL0
         return !write;
       case sysreg_key(3u, 3u, 0u, 0u, 1u):   // CTR_EL0
         return !write && el0_uct_enabled();
@@ -3217,7 +3233,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
 
   // MSR DAIFSet, #imm4
   if ((insn & 0xFFFFF0FFu) == 0xD50340DFu) {
-    if (sysregs_.in_el0()) {
+    if (!el0_uma_enabled()) {
       return trap_el0_system_access();
     }
     sysregs_.daif_set(static_cast<std::uint8_t>((insn >> 8) & 0xFu));
@@ -3226,7 +3242,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
 
   // MSR DAIFClr, #imm4
   if ((insn & 0xFFFFF0FFu) == 0xD50340FFu) {
-    if (sysregs_.in_el0()) {
+    if (!el0_uma_enabled()) {
       return trap_el0_system_access();
     }
     sysregs_.daif_clr(static_cast<std::uint8_t>((insn >> 8) & 0xFu));
@@ -3327,10 +3343,6 @@ bool Cpu::exec_system(std::uint32_t insn) {
     }
     if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (2u << 3) | 0u)) { // CNTP_TVAL_EL0
       set_reg(rt, timer_.read_cntp_tval_el0(cpu_index_, shared_timer_steps()));
-      return true;
-    }
-    if (key == ((3u << 14) | (3u << 11) | (2u << 7) | (5u << 3) | 1u)) { // GCSPR_EL0
-      set_reg(rt, 0);
       return true;
     }
     if (key == ((3u << 14) | (0u << 11) | (4u << 7) | (1u << 3) | 0u)) { // SP_EL0
@@ -3804,6 +3816,46 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     dst[0] = imm64;
     dst[1] = q ? imm64 : 0u;
     return true;
+  }
+
+  if ((insn & 0x9FF80400u) == 0x0F000400u) { // MOVI/ORR/MVNI/BIC (vector, modified immediate)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const bool op = ((insn >> 29) & 1u) != 0u;
+    const std::uint32_t cmode = (insn >> 12) & 0xFu;
+    const std::uint8_t imm8 = static_cast<std::uint8_t>((((insn >> 16) & 0x7u) << 5u) | ((insn >> 5) & 0x1Fu));
+    const std::uint64_t imm64 = advsimd_expand_imm(false, cmode, imm8);
+    auto& dst = qregs_[rd];
+    const auto old = dst;
+    if (cmode <= 11u) {
+      if (!op) {
+        if ((cmode & 1u) == 0u) {
+          dst[0] = imm64;
+          dst[1] = q ? imm64 : 0u;
+        } else {
+          dst[0] = old[0] | imm64;
+          dst[1] = q ? (old[1] | imm64) : 0u;
+        }
+      } else {
+        if ((cmode & 1u) == 0u) {
+          dst[0] = ~imm64;
+          dst[1] = q ? ~imm64 : 0u;
+        } else {
+          dst[0] = old[0] & ~imm64;
+          dst[1] = q ? (old[1] & ~imm64) : 0u;
+        }
+      }
+      return true;
+    }
+    if (cmode == 12u || cmode == 13u) {
+      if (!op) {
+        dst[0] = imm64;
+        dst[1] = q ? imm64 : 0u;
+      } else {
+        dst[0] = ~imm64;
+        dst[1] = q ? ~imm64 : 0u;
+      }
+      return true;
+    }
   }
 
   if ((insn & 0xBF80FC00u) == 0x2F000400u) { // MVNI (2S/4S immediate)

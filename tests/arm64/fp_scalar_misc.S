@@ -3,6 +3,10 @@
 _start:
     movz x20, #0
     movk x20, #0x0900, lsl #16
+    movz x25, #0x0030, lsl #16
+    msr  cpacr_el1, x25
+    isb
+
     adr  x21, dst
 
     adr  x22, sqrt_s_src

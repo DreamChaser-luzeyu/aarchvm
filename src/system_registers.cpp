@@ -135,7 +135,6 @@ bool SystemRegisters::read(std::uint32_t op0,
   case SysReg(3, 3, 9, 14, 0): value = pmuserenr_el0_; return true;
   case SysReg(3, 3, 13, 2, 3): value = amuserenr_el0_; return true;
   case SysReg(3, 3, 13, 0, 2): value = tpidr_el0_; return true;
-  case SysReg(3, 3, 13, 0, 5): value = tpidr2_el0_; return true;
   case SysReg(3, 3, 13, 0, 3): value = tpidrro_el0_; return true;
   case SysReg(3, 0, 13, 0, 4): value = tpidr_el1_; return true;
   case SysReg(3, 4, 13, 0, 2): value = tpidr_el2_; return true;
@@ -194,7 +193,6 @@ bool SystemRegisters::write(std::uint32_t op0,
   case SysReg(3, 3, 9, 14, 0): pmuserenr_el0_ = value; return true;
   case SysReg(3, 3, 13, 2, 3): amuserenr_el0_ = value; return true;
   case SysReg(3, 3, 13, 0, 2): tpidr_el0_ = value; return true;
-  case SysReg(3, 3, 13, 0, 5): tpidr2_el0_ = value; return true;
   case SysReg(3, 3, 13, 0, 3): tpidrro_el0_ = value; return true;
   case SysReg(3, 0, 13, 0, 4): tpidr_el1_ = value; return true;
   case SysReg(3, 4, 13, 0, 2): tpidr_el2_ = value; return true;

@@ -17,15 +17,17 @@ after_svc:
     ldr  x12, [x11]
     cbz  x12, fail
 
-    .inst 0xD53B252D                  // mrs x13, S3_3_C2_C5_1 (gcspr_el0)
-    cbnz x13, fail_g
+    mrs  x13, currentel
+    movz x17, #4
+    subs xzr, x13, x17
+    b.ne fail_c
 
     movz x14, #0xbeef
     movk x14, #0xcafe, lsl #16
     movk x14, #0x5678, lsl #32
     movk x14, #0x1234, lsl #48
-    .inst 0xD51BD0AE                  // msr S3_3_C13_C0_5 (tpidr2_el0), x14
-    .inst 0xD53BD0AF                  // mrs x15, S3_3_C13_C0_5 (tpidr2_el0)
+    msr  tpidr_el0, x14
+    mrs  x15, tpidr_el0
     subs xzr, x15, x14
     b.ne fail_t
 
@@ -46,8 +48,8 @@ after_svc:
 fail:
     movz x0, #'F'
     b out
-fail_g:
-    movz x0, #'G'
+fail_c:
+    movz x0, #'C'
     b out
 fail_t:
     movz x0, #'T'

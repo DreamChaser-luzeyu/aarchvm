@@ -3,6 +3,10 @@
 _start:
     movz x20, #0
     movk x20, #0x0900, lsl #16
+    movz x25, #0x0030, lsl #16
+    msr  cpacr_el1, x25
+    isb
+
     adr  x21, dst
 
     // DUP (general), byte elements
@@ -62,6 +66,18 @@ _start:
     cmp  x0, x1
     b.ne fail
 
+    // SHRN (64-bit source lanes -> 32-bit destination lanes)
+    adr  x22, shrn64_src
+    ldr  q10, [x22]
+    shrn v9.2s, v10.2d, #16
+    str  d9, [x21, #56]
+    adr  x22, exp_shrn64
+    add  x23, x21, #56
+    ldr  x0, [x23]
+    ldr  x1, [x22]
+    cmp  x0, x1
+    b.ne fail
+
     movz x0, #'G'
     str  x0, [x20]
     movz x0, #'\n'
@@ -76,7 +92,7 @@ fail:
     .data
     .balign 16
 dst:
-    .space 64
+    .space 80
 exp_dup_b:
     .quad 0x5a5a5a5a5a5a5a5a
     .quad 0x5a5a5a5a5a5a5a5a
@@ -92,3 +108,8 @@ shrn_src:
     .hword 0x1234,0x5678,0x9abc,0xdef0,0x00ff,0xff00,0x0f0f,0xf0f0
 exp_shrn:
     .byte 0x12,0x56,0x9a,0xde,0x00,0xff,0x0f,0xf0
+shrn64_src:
+    .quad 0x5566778811223344
+    .quad 0x99aabbccddeeff00
+exp_shrn64:
+    .quad 0xbbccddee77881122

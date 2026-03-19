@@ -1,3 +1,151 @@
+# 修改日志 2026-03-19 02:20
+
+## 本轮修改
+
+- 继续审阅 system register 行为，修正当前模型把缺失可选特性寄存器错误暴露给软件的问题：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [src/system_registers.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/system_registers.cpp)
+  - `TPIDR2_EL0` 仅在 `FEAT_SME` 存在时才应直接访问；当前模型未实现 SME，因此不再允许 EL0 访问，也不再在 EL1/更高异常级把它当成已实现寄存器读写。
+  - `GCSPR_EL0` 仅在 `FEAT_GCS` 存在时才应直接访问；当前模型未实现 GCS，因此不再错误返回 0，也不再把它放进 EL0 只读白名单。
+- 扩展 EL0 system register 权限回归：
+  - [tests/arm64/el0_sysreg_privilege.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_sysreg_privilege.S)
+  - 新增对 `MRS TPIDR2_EL0` 与 `MRS GCSPR_EL0` 的 EL0 trap 覆盖，避免类似“寄存器本应不存在却在用户态被读成功”的问题再次漏过。
+- 新增裸机回归 [tests/arm64/sysreg_optional_absent.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/sysreg_optional_absent.S)：
+  - 覆盖 EL1 下对 `TPIDR2_EL0` / `GCSPR_EL0` 的 `MRS/MSR`；
+  - 验证当前未实现对应可选特性时，这些访问不会再被错误当作已实现寄存器执行；
+  - 同时校验异常返回后目标寄存器未被错误改写。
+- 修正受旧错误前提影响的旧测试：
+  - [tests/arm64/svc_sysreg_minimal.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/svc_sysreg_minimal.S)
+  - 去掉对 `GCSPR_EL0` / `TPIDR2_EL0` 的错误成功访问假设，改为只验证当前模型真正实现的 `CurrentEL`、`TPIDR_EL0` 和特性 ID 寄存器。
+- 接入测试构建与完整裸机回归：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+
+## 本轮测试
+
+- 定向构建与单测：
+  - `timeout 300s cmake --build build -j`
+  - `timeout 300s tests/arm64/build_tests.sh`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/el0_sysreg_privilege.bin -load 0x0 -entry 0x0 -steps 600000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/sysreg_optional_absent.bin -load 0x0 -entry 0x0 -steps 600000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/svc_sysreg_minimal.bin -load 0x0 -entry 0x0 -steps 400000`
+- 裸机完整回归：
+  - `timeout 900s ./tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1200s ./tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 1800s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮又补齐了两处真实的 Armv8-A 行为缺口：`TPIDR2_EL0` 与 `GCSPR_EL0` 在缺失对应可选特性时，不应被当前模型错误暴露给软件。
+- 相关裸机定向测试、裸机总回归，以及 Linux UMP/SMP 功能回归均已通过。
+- 继续审阅后，当前在“EL0/EL1 system register 可见性”这条线上没有再发现同级别的明显宽放行点，但这仍不等于已完整实现全部 Armv8-A 强制行为，后续仍需继续逐类审查。
+
+# 修改日志 2026-03-19 01:20
+
+## 本轮修改
+
+- 继续审阅 EL0 system register 访问控制，修正 `SCTLR_EL1.UMA` 相关行为：
+  - EL0 `MRS/MSR DAIF` 以及 `MSR DAIFSet/DAIFClr` 不再一律 trap；
+  - 现在仅在 `UMA=0` 时 trap，在 `UMA=1` 时按架构允许访问；
+  - `NZCV` 保持 EL0 可访问，不错误地受 `UMA` 限制。
+- 新增裸机回归 [tests/arm64/el0_daif_uma.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_daif_uma.S)，并接入：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - 覆盖 `DAIF`、`DAIFSet`、`DAIFClr` 在 `UMA=0/1` 两种状态下的 trap/allow 语义，以及 EL0 `NZCV` 访问。
+- 统一修正一批裸机 FP/AdvSIMD 测试的前提条件：
+  - 在测试入口显式打开 `CPACR_EL1.FPEN=0b11`；
+  - 避免“模拟器已经正确实现 FP trap，但旧测试默认上电就能执行 FP/SIMD”造成的假阴性或静默空转。
+- 修正 AdvSIMD modified-immediate 解码：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - 之前 `MOVI/ORR/MVNI/BIC (vector, modified immediate)` 的匹配掩码过宽，会把 `SHRN` 这类 SIMD shift-immediate 指令误吞；
+  - 现按编码字段收紧到 `bits[22:19]` 也必须匹配，避免与 `SHRN/USHR/SSHR/SRI` 等家族重叠。
+- 扩充 modified-immediate 与 SHRN 单测覆盖：
+  - [tests/arm64/fpsimd_bic_imm.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_bic_imm.S)
+    - 新增 32-bit shifted `MOVI/MVNI/ORR/BIC` 与 16-bit `ORR` 覆盖；
+  - [tests/arm64/fpsimd_misc_more.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_misc_more.S)
+    - 新增 `SHRN v?.2s, v?.2d, #16` 覆盖，防止仅修好 `.8b/.8h` 窄宽度路径。
+- 加强裸机总回归脚本 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)：
+  - `fpsimd_stringops.bin` 现在严格校验输出 `W`；
+  - `fpsimd_bic_imm.bin` 现在严格校验输出 `W`；
+  - `fpsimd_misc_more.bin` 现在严格校验输出 `G`；
+  - 避免这次暴露出来的解码重叠 bug 再被“只运行不校验”的回归脚本漏掉。
+
+## 本轮测试
+
+- 定向单测：
+  - `timeout 180s ./tests/arm64/build_tests.sh`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/el0_daif_uma.bin -load 0x0 -entry 0x0 -steps 500000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_stringops.bin -load 0x0 -entry 0x0 -steps 600000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_bic_imm.bin -load 0x0 -entry 0x0 -steps 200000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_misc_more.bin -load 0x0 -entry 0x0 -steps 300000`
+- 裸机完整回归：
+  - `timeout 900s ./tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1200s ./tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 1800s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- `SCTLR_EL1.UMA` 控制下的 EL0 `DAIF` 访问语义已经补齐，并有独立裸机回归覆盖。
+- 本轮修复的 AdvSIMD 问题根因是“modified-immediate 解码过宽导致 shift-immediate 被误识别”，不是某一条 `SHRN` 指令的单点执行错误。
+- 本轮结束时，以下回归均已通过：
+  - `tests/arm64/run_all.sh`
+  - `tests/linux/run_functional_suite.sh`
+  - `tests/linux/run_functional_suite_smp.sh`
+- 仍不应宣称“已经完整实现 Armv8-A 全部强制 ISA/行为”：
+  - 当前只能说在本轮继续审阅过程中，又补齐了一处真实的 system register 语义缺口和一处真实的 AdvSIMD 解码缺口；
+  - 结合现有单测与 Linux UMP/SMP 回归，当前实现状态进一步收敛，但仍需要后续持续审阅与补测。
+
+# 修改日志 2026-03-19 00:17
+
+## 本轮修改
+
+- 继续审阅 EL0 system/hint instruction 行为，补上 `SCTLR_EL1.nTWI` / `nTWE` 对 EL0 `WFI` / `WFE` 的 trap 语义：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - `nTWE=0` 时，EL0 `WFE` 触发 `EC=0x01`、`ISS=1` 的同步异常；
+  - `nTWI=0` 且当前无待处理中断时，EL0 `WFI` 触发 `EC=0x01`、`ISS=0` 的同步异常；
+  - 置位 `nTWI|nTWE` 后，对应 `WFI/WFE` 恢复正常执行。
+- 新增裸机回归 [tests/arm64/el0_wfx_trap.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_wfx_trap.S)，并接入：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - 该用例显式初始化 GIC CPU interface 与 virtual timer PPI，覆盖：
+    - EL0 `WFE` trap 路径；
+    - EL0 `WFI` trap 路径；
+    - 放行后的 `SEVL/WFE` 正常前进；
+    - 放行后的 EL0 `WFI` 被真实 timer IRQ 唤醒并回到下一条指令。
+- 修正新用例中的 level-triggered PPI 处理顺序：
+  - IRQ handler 先关闭 `CNTV_CTL_EL0` 再执行 `ICC_EOIR1_EL1/ICC_DIR_EL1`；
+  - 避免在 timer 线仍为高电平时过早 drop active，导致同一中断被立即重新挂回 pending。
+- 加强 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)：
+  - `el0_sysreg_privilege.bin` 现在校验输出 `R`；
+  - `el0_cache_ops_privilege.bin` 现在校验输出 `C`；
+  - `el0_wfx_trap.bin` 现在校验输出 `T`；
+  - 避免“脚本通过但测试实际只是在空转”的情况。
+
+## 本轮测试
+
+- 定向单测：
+  - `timeout 180s ./tests/arm64/build_tests.sh`
+  - `timeout 60s env AARCHVM_PRINT_SUMMARY=1 AARCHVM_TRACE_EXC=1 AARCHVM_TRACE_LOWER_SYNC_LIMIT=16 AARCHVM_TRACE_ERET_LOWER_LIMIT=16 AARCHVM_TRACE_IRQ_TAKE=1 AARCHVM_TRACE_TIMER=1 AARCHVM_TRACE_GIC=1 ./build/aarchvm -bin tests/arm64/out/el0_wfx_trap.bin -load 0x0 -entry 0x0 -steps 800000`
+- 裸机完整回归：
+  - `timeout 900s ./tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 900s ./tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 1200s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- `SCTLR_EL1.nTWI/nTWE` 这组 EL0 `WFI/WFE` 控制语义已补齐，并有独立裸机回归覆盖。
+- 新测试不再依赖 reset-state 的默认 IRQ/GIC 状态，而是显式走 GIC + timer sysreg 路径，结果更接近真实体系结构行为。
+- 本轮结束时，以下回归均已通过：
+  - `tests/arm64/run_all.sh`
+  - `tests/linux/run_functional_suite.sh`
+  - `tests/linux/run_functional_suite_smp.sh`
+
 # 修改日志 2026-03-18 23:24
 
 ## 本轮修改

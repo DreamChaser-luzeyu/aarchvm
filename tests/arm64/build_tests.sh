@@ -30,6 +30,7 @@ build_asm_prog cntkctl_el1
 build_asm_prog cntkctl_el0_timer_access
 build_asm_prog ldtr_sttr_usercopy
 build_asm_prog el0_cache_ops_privilege
+build_asm_prog el0_wfx_trap
 build_asm_prog fpsimd_minimal
 build_asm_prog fpsimd_mvni
 build_asm_prog fpsimd_logic_more
@@ -67,6 +68,8 @@ build_asm_prog pstate_pan
 build_asm_prog id_aa64_feature_regs
 build_asm_prog svc_sysreg_minimal
 build_asm_prog el0_sysreg_privilege
+build_asm_prog el0_daif_uma
+build_asm_prog sysreg_optional_absent
 build_asm_prog lse_atomics
 build_asm_prog casp_pair
 build_asm_prog lse_atomics_narrow

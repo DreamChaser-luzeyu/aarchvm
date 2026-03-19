@@ -11,8 +11,9 @@ _start:
     movz x12, #0
     str  x12, [x11]
 
-    // Trigger instruction abort by jumping to an unmapped VA.
-    movz x20, #0x5000, lsl #16      // 0x50000000
+    // Trigger instruction abort by jumping to an unmapped address outside the
+    // 1 GiB SDRAM window [0x40000000, 0x80000000).
+    movz x20, #0x8000, lsl #16      // 0x80000000
     br   x20
 
 after_fault:

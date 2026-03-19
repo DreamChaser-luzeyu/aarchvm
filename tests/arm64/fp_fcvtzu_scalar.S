@@ -3,6 +3,9 @@
 _start:
     movz x20, #0x0000
     movk x20, #0x0900, lsl #16
+    movz x25, #0x0030, lsl #16
+    msr  cpacr_el1, x25
+    isb
 
     mov  w0, #123
     ucvtf s0, w0
