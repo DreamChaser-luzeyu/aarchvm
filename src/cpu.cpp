@@ -2794,8 +2794,8 @@ void Cpu::signal_event() {
 
 void Cpu::notify_external_memory_write(std::uint64_t pa, std::size_t size) {
   invalidate_decode_pa(pa, size);
-  event_register_ = true;
   if (exclusive_monitor_overlaps(pa, size)) {
+    event_register_ = true;
     clear_exclusive_monitor();
   }
 }
@@ -5935,23 +5935,31 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     const auto lhs = qregs_[rn];
     const auto rhs = qregs_[rm];
     std::array<std::uint64_t, 2> dst = {0, 0};
+    std::uint64_t fpsr_bits = 0u;
     for (std::uint32_t lane = 0; lane < lanes; ++lane) {
       bool predicate = false;
       if (esize_bits == 32u) {
-        const float a = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)));
-        const float b = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane)));
+        const std::uint32_t a_bits = static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane));
+        const std::uint32_t b_bits = static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane));
+        const float a = std::bit_cast<float>(a_bits);
+        const float b = std::bit_cast<float>(b_bits);
+        fpsr_bits |= fp_compare_fpsr_bits(a_bits, b_bits, false);
         if (!std::isnan(a) && !std::isnan(b)) {
           predicate = is_gt ? (std::fabs(a) > std::fabs(b)) : (std::fabs(a) >= std::fabs(b));
         }
       } else {
-        const double a = std::bit_cast<double>(vector_get_elem(lhs, 64u, lane));
-        const double b = std::bit_cast<double>(vector_get_elem(rhs, 64u, lane));
+        const std::uint64_t a_bits = vector_get_elem(lhs, 64u, lane);
+        const std::uint64_t b_bits = vector_get_elem(rhs, 64u, lane);
+        const double a = std::bit_cast<double>(a_bits);
+        const double b = std::bit_cast<double>(b_bits);
+        fpsr_bits |= fp_compare_fpsr_bits(a_bits, b_bits, false);
         if (!std::isnan(a) && !std::isnan(b)) {
           predicate = is_gt ? (std::fabs(a) > std::fabs(b)) : (std::fabs(a) >= std::fabs(b));
         }
       }
       vector_set_elem(dst, esize_bits, lane, vector_fp_compare_mask(predicate, esize_bits));
     }
+    sysregs_.fp_or_fpsr(fpsr_bits);
     qregs_[rd] = dst;
     return true;
   }
@@ -5968,23 +5976,31 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     const auto lhs = qregs_[rn];
     const auto rhs = qregs_[rm];
     std::array<std::uint64_t, 2> dst = {0, 0};
+    std::uint64_t fpsr_bits = 0u;
     for (std::uint32_t lane = 0; lane < lanes; ++lane) {
       bool predicate = false;
       if (esize_bits == 32u) {
-        const float a = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)));
-        const float b = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane)));
+        const std::uint32_t a_bits = static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane));
+        const std::uint32_t b_bits = static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane));
+        const float a = std::bit_cast<float>(a_bits);
+        const float b = std::bit_cast<float>(b_bits);
+        fpsr_bits |= fp_compare_fpsr_bits(a_bits, b_bits, false);
         if (!std::isnan(a) && !std::isnan(b)) {
           predicate = is_eq ? (a == b) : (is_gt ? (a > b) : (a >= b));
         }
       } else {
-        const double a = std::bit_cast<double>(vector_get_elem(lhs, 64u, lane));
-        const double b = std::bit_cast<double>(vector_get_elem(rhs, 64u, lane));
+        const std::uint64_t a_bits = vector_get_elem(lhs, 64u, lane);
+        const std::uint64_t b_bits = vector_get_elem(rhs, 64u, lane);
+        const double a = std::bit_cast<double>(a_bits);
+        const double b = std::bit_cast<double>(b_bits);
+        fpsr_bits |= fp_compare_fpsr_bits(a_bits, b_bits, false);
         if (!std::isnan(a) && !std::isnan(b)) {
           predicate = is_eq ? (a == b) : (is_gt ? (a > b) : (a >= b));
         }
       }
       vector_set_elem(dst, esize_bits, lane, vector_fp_compare_mask(predicate, esize_bits));
     }
+    sysregs_.fp_or_fpsr(fpsr_bits);
     qregs_[rd] = dst;
     return true;
   }
@@ -6002,10 +6018,13 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     }
     const auto src = qregs_[rn];
     std::array<std::uint64_t, 2> dst = {0, 0};
+    std::uint64_t fpsr_bits = 0u;
     for (std::uint32_t lane = 0; lane < lanes; ++lane) {
       bool predicate = false;
       if (esize_bits == 32u) {
-        const float a = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(src, 32u, lane)));
+        const std::uint32_t a_bits = static_cast<std::uint32_t>(vector_get_elem(src, 32u, lane));
+        const float a = std::bit_cast<float>(a_bits);
+        fpsr_bits |= fp_compare_fpsr_bits(a_bits, static_cast<std::uint32_t>(0), false);
         if (!std::isnan(a)) {
           switch (tag) {
             case 0x0E20D800u: predicate = (a == 0.0f); break;
@@ -6016,7 +6035,9 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
           }
         }
       } else {
-        const double a = std::bit_cast<double>(vector_get_elem(src, 64u, lane));
+        const std::uint64_t a_bits = vector_get_elem(src, 64u, lane);
+        const double a = std::bit_cast<double>(a_bits);
+        fpsr_bits |= fp_compare_fpsr_bits(a_bits, static_cast<std::uint64_t>(0), false);
         if (!std::isnan(a)) {
           switch (tag) {
             case 0x0E20D800u: predicate = (a == 0.0); break;
@@ -6029,6 +6050,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
       }
       vector_set_elem(dst, esize_bits, lane, vector_fp_compare_mask(predicate, esize_bits));
     }
+    sysregs_.fp_or_fpsr(fpsr_bits);
     qregs_[rd] = dst;
     return true;
   }

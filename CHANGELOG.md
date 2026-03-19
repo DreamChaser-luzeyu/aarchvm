@@ -1,3 +1,40 @@
+# 修改日志 2026-03-20 00:19
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”的前两阶段，分别补了一个 `FP/AdvSIMD` 缺口和一个 `SMP/WFE` 语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fpsimd_compare_flags.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_compare_flags.S)
+  - [tests/arm64/smp_wfe_store_no_event.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/smp_wfe_store_no_event.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 修正向量 `FACGE/FACGT/FCMEQ/FCMGE/FCMGT` 以及 `FCM* ..., #0.0` 的 `FPSR` 语义：
+  - 之前这些向量 compare 只生成掩码结果，没有像标量 quiet compare 那样累计 `FPSR.IOC`；
+  - 现在对每个 lane 统一复用 `fp_compare_fpsr_bits(...)`；
+  - `qNaN` quiet compare 保持不置 `IOC`，`sNaN` 会正确置位 `IOC`。
+- 修正 `WFE` 事件语义中过宽的远端写唤醒：
+  - 之前任意远端内存写都会把目标 CPU 的 `event_register_` 置位；
+  - 现在只有远端写真正打破该 CPU 的 exclusive monitor 时，才生成对应 event；
+  - 保留 `SEV/SEVL` 与 exclusive-monitor-loss 这两类现有可见唤醒路径。
+- 新增裸机单测：
+  - [tests/arm64/fpsimd_compare_flags.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_compare_flags.S)
+    - 覆盖向量寄存器 compare、zero compare、absolute compare；
+    - 覆盖 single/double；
+    - 覆盖 `qNaN/sNaN` 与 `FPSR.IOC`。
+  - [tests/arm64/smp_wfe_store_no_event.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/smp_wfe_store_no_event.S)
+    - 验证无 `SEV` 且无 exclusive monitor 相关性的普通远端写不会错误唤醒 `WFE`。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_compare_flags.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 60s ./build/aarchvm -smp 2 -bin tests/arm64/out/smp_wfe_store_no_event.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 2400s tests/arm64/run_all.sh`
+- `timeout 1800s tests/linux/run_functional_suite.sh`
+- `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+- 结果：通过。
+
 # 修改日志 2026-03-19 23:19
 
 ## 本轮修改

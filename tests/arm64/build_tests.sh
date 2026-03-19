@@ -55,6 +55,7 @@ build_asm_prog fp_fcvt_flags
 build_asm_prog fp_fcvt_rounding_scalar
 build_asm_prog fp_compare_flags
 build_asm_prog fp_absneg_nan_flags
+build_asm_prog fpsimd_compare_flags
 build_asm_prog fp_minmax_nan_flags
 build_asm_prog fp_cond_compare
 build_asm_prog fp_scalar_fcsel
@@ -177,6 +178,7 @@ build_asm_prog smp_ldxr_invalidate_mmu
 build_asm_prog smp_spinlock_ldaxr_stlxr
 build_asm_prog smp_tlbi_broadcast
 build_asm_prog smp_wfe_monitor_event
+build_asm_prog smp_wfe_store_no_event
 build_asm_prog psci_cpu_on_min
 build_asm_prog smp_gic_sgi
 build_asm_prog smp_timer_ppi

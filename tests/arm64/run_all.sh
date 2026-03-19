@@ -125,6 +125,7 @@ run fp_fcvt_flags.bin 200000
 run_expect fp_fcvt_rounding_scalar.bin 300000 R
 run_expect fp_compare_flags.bin 200000 Q
 run_expect fp_absneg_nan_flags.bin 300000 N
+run_expect fpsimd_compare_flags.bin 300000 G
 run_expect fp_minmax_nan_flags.bin 300000 M
 run_expect fp_cond_compare.bin 200000 C
 run fp_scalar_fcsel.bin 200000
@@ -213,6 +214,7 @@ run_smp smp_ldxr_invalidate.bin 200000
 run_smp smp_spinlock_ldaxr_stlxr.bin 600000
 run_smp smp_tlbi_broadcast.bin 1200000
 ./build/aarchvm -smp 2 -bin tests/arm64/out/smp_wfe_monitor_event.bin -load 0x0 -entry 0x0 -steps 300000 | grep -qx 'M'
+./build/aarchvm -smp 2 -bin tests/arm64/out/smp_wfe_store_no_event.bin -load 0x0 -entry 0x0 -steps 300000 | grep -qx 'N'
 ./build/aarchvm -smp 2 -smp-mode psci -bin tests/arm64/out/psci_cpu_on_min.bin -load 0x0 -entry 0x0 -steps 400000 | grep -qx 'P'
 ./build/aarchvm -smp 2 -bin tests/arm64/out/smp_gic_sgi.bin -load 0x0 -entry 0x0 -steps 400000 | grep -qx 'G'
 ./build/aarchvm -smp 2 -bin tests/arm64/out/smp_timer_ppi.bin -load 0x0 -entry 0x0 -steps 400000 | grep -qx 'T'
