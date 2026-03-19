@@ -1,3 +1,35 @@
+# 修改日志 2026-03-19 23:19
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”第一阶段，先修补一个明确且可验证的浮点语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fp_absneg_nan_flags.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_absneg_nan_flags.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 修正标量与向量 `FABS/FNEG` 的 guest 可见 NaN 语义：
+  - 不再经宿主 `std::fabs` / 一元负号路径处理；
+  - 改为纯 bitwise 实现，避免把 `sNaN` 错误 quiet 成 `qNaN`；
+  - 不再错误置位 `FPSR.IOC`；
+  - 保持当前模型下 `AH=0` 的 NaN 符号处理行为。
+- 新增裸机单测 [tests/arm64/fp_absneg_nan_flags.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_absneg_nan_flags.S)：
+  - 覆盖 scalar/vector；
+  - 覆盖 single/double；
+  - 覆盖 `sNaN/qNaN`；
+  - 覆盖 `FABS/FNEG` 的结果位型与 `FPSR`。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_absneg_nan_flags.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_scalar_misc.bin -load 0x0 -entry 0x0 -steps 200000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_fp_misc_rounding.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 2400s tests/arm64/run_all.sh`
+- `timeout 1800s tests/linux/run_functional_suite.sh`
+- `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+- 结果：通过。
+
 # 修改日志 2026-03-19 22:36
 
 ## 本轮修改

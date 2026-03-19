@@ -124,6 +124,7 @@ run fp_fcvtzu_scalar.bin 200000
 run fp_fcvt_flags.bin 200000
 run_expect fp_fcvt_rounding_scalar.bin 300000 R
 run_expect fp_compare_flags.bin 200000 Q
+run_expect fp_absneg_nan_flags.bin 300000 N
 run_expect fp_minmax_nan_flags.bin 300000 M
 run_expect fp_cond_compare.bin 200000 C
 run fp_scalar_fcsel.bin 200000

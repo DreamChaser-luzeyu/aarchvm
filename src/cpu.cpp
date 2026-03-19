@@ -583,6 +583,16 @@ constexpr UIntT fp_zero_bits(bool sign) {
 }
 
 template <typename UIntT>
+constexpr UIntT fp_abs_bits(UIntT bits) {
+  return bits & ~fp_sign_mask_bits<UIntT>();
+}
+
+template <typename UIntT>
+constexpr UIntT fp_neg_bits(UIntT bits) {
+  return bits ^ fp_sign_mask_bits<UIntT>();
+}
+
+template <typename UIntT>
 constexpr UIntT fp_max_normal_bits(bool sign) {
   if constexpr (sizeof(UIntT) == 4u) {
     return (sign ? 0x80000000u : 0u) | 0x7F7FFFFFu;
@@ -6198,8 +6208,8 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
               fpsr_bits |= lane_fpsr;
               break;
             }
-            case 0x0EA0F800u: result_bits = std::bit_cast<std::uint32_t>(std::fabs(std::bit_cast<float>(value_bits))); break;
-            case 0x2EA0F800u: result_bits = std::bit_cast<std::uint32_t>(-std::bit_cast<float>(value_bits)); break;
+            case 0x0EA0F800u: result_bits = fp_abs_bits(value_bits); break;
+            case 0x2EA0F800u: result_bits = fp_neg_bits(value_bits); break;
             case 0x2EA1F800u: {
               std::uint64_t lane_fpsr = 0u;
               result_bits = fp_sqrt_bits<std::uint32_t, float>(value_bits, lane_fpsr);
@@ -6226,8 +6236,8 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
               fpsr_bits |= lane_fpsr;
               break;
             }
-            case 0x0EE0F800u: result_bits = std::bit_cast<std::uint64_t>(std::fabs(std::bit_cast<double>(value_bits))); break;
-            case 0x2EE0F800u: result_bits = std::bit_cast<std::uint64_t>(-std::bit_cast<double>(value_bits)); break;
+            case 0x0EE0F800u: result_bits = fp_abs_bits(value_bits); break;
+            case 0x2EE0F800u: result_bits = fp_neg_bits(value_bits); break;
             case 0x2EE1F800u: {
               std::uint64_t lane_fpsr = 0u;
               result_bits = fp_sqrt_bits<std::uint64_t, double>(value_bits, lane_fpsr);
@@ -7403,22 +7413,28 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
   }
 
   if ((insn & 0xFFFFFC00u) == 0x1E20C000u) { // FABS Sd, Sn
-    write_fp32(rd, std::fabs(read_fp32(rn)));
+    qregs_[rd][0] = static_cast<std::uint64_t>(
+        fp_abs_bits(static_cast<std::uint32_t>(qregs_[rn][0] & 0xFFFFFFFFu)));
+    qregs_[rd][1] = 0u;
     return true;
   }
 
   if ((insn & 0xFFFFFC00u) == 0x1E60C000u) { // FABS Dd, Dn
-    write_fp64(rd, std::fabs(read_fp64(rn)));
+    qregs_[rd][0] = fp_abs_bits(qregs_[rn][0]);
+    qregs_[rd][1] = 0u;
     return true;
   }
 
   if ((insn & 0xFFFFFC00u) == 0x1E214000u) { // FNEG Sd, Sn
-    write_fp32(rd, -read_fp32(rn));
+    qregs_[rd][0] = static_cast<std::uint64_t>(
+        fp_neg_bits(static_cast<std::uint32_t>(qregs_[rn][0] & 0xFFFFFFFFu)));
+    qregs_[rd][1] = 0u;
     return true;
   }
 
   if ((insn & 0xFFFFFC00u) == 0x1E614000u) { // FNEG Dd, Dn
-    write_fp64(rd, -read_fp64(rn));
+    qregs_[rd][0] = fp_neg_bits(qregs_[rn][0]);
+    qregs_[rd][1] = 0u;
     return true;
   }
 

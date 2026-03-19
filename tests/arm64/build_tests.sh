@@ -54,6 +54,7 @@ build_asm_prog fp_fcvtzu_scalar
 build_asm_prog fp_fcvt_flags
 build_asm_prog fp_fcvt_rounding_scalar
 build_asm_prog fp_compare_flags
+build_asm_prog fp_absneg_nan_flags
 build_asm_prog fp_minmax_nan_flags
 build_asm_prog fp_cond_compare
 build_asm_prog fp_scalar_fcsel

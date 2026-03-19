@@ -1,5 +1,112 @@
 # TODO
 
+## Armv8-A 程序可见正确性收尾计划
+
+目标：
+- 不追求周期级、微架构级或实现细节级的精确模拟。
+- 只追求 guest 程序可观察到的 ISA / 系统行为符合 Armv8-A 规范，以及与当前 ID 寄存器声明保持一致。
+- 保持“高性能优先”的项目方向；任何修复都不应把热路径拖回到无必要的慢精确模型。
+
+范围边界：
+- [ ] 仅把“当前模型已声明存在的特性”纳入正确性闭环；对 ID 寄存器已声明 absent 的特性，不为追求覆盖率而实现。
+- [ ] 不追求 EL2/EL3、AArch32、SVE/SME、MTE、PAC、BTI、PMU、完整 debug 架构等超出当前模型目标的全规范支持。
+- [ ] 对 hint、cache、TLB、异常、timer、GIC 等路径，只要求程序可见结果正确，不要求内部实现方式或时序贴近真实硬件。
+
+### 1. 浮点 / AdvSIMD 程序可见语义收尾
+
+目标：
+- 收敛当前最可能“程序不一定立刻崩，但结果会悄悄错”的剩余语义尾差。
+
+任务：
+- [ ] 系统性梳理 `FPCR.DN/FZ/AH` 对普通 FP arithmetic、conversion、compare、sqrt、estimate、round-int 的影响。
+- [ ] 统一检查 `FPSR` 的 `IOC/DZC/OFC/UFC/IXC` 在标量与向量路径中的置位一致性。
+- [ ] 统一检查 `qNaN/sNaN/default-NaN/payload/subnormal/±0/Inf` 在各类 FP/AdvSIMD 指令中的传播行为。
+- [ ] 检查 pairwise / reduce / widen / narrow / scalar-by-element / structured load-store 等已实现 AdvSIMD 路径的边界语义。
+- [ ] 对拿不准的行为优先做工具链 / QEMU / 手册交叉验证，再实现，不凭猜测补语义。
+
+预期收益：
+- 降低 glibc、libm、编译器生成代码、数值程序和多媒体代码中“看似能跑、结果却悄悄错”的风险。
+
+### 2. 异常 / 系统寄存器 / trap 语义收尾
+
+目标：
+- 让内核、libc、JIT、信号处理与自检程序能看到正确的异常与系统行为。
+
+任务：
+- [ ] 复查 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 的程序可见编码是否与当前已实现异常类型一致。
+- [ ] 复查“同一条指令到底应 trap / undef / no-op / 正常执行”的判定，确保与当前 ID 寄存器声明一致。
+- [ ] 复查 `ERET`、`SPSR_EL1`、`ELR_EL1`、`PSTATE` 相关可见行为，确保异常返回不留下状态尾差。
+- [ ] 复查 EL0 对系统寄存器、cache/TLB/system 指令的可见行为是否与 Linux 用户态预期一致。
+- [ ] 统一整理“当前模型已声明支持 / 已声明 absent / 保守 no-op”的系统指令语义边界。
+
+预期收益：
+- 减少用户态 `illegal instruction`、内核异常路径错判、信号恢复异常、JIT/运行时探测失败等问题。
+
+### 3. SMP 内存模型与同步原语收尾
+
+目标：
+- 收敛最容易导致“偶发卡死 / 偶发乱序 / 难复现”问题的多核程序可见错误。
+
+任务：
+- [ ] 系统审查 exclusive monitor、`LDXR/STXR/LDAXR/STLXR`、LSE 原子指令在多核下的可见语义。
+- [ ] 复查 `DMB/DSB/ISB` 在当前模拟器模型下的保守实现是否足以满足程序可见顺序要求。
+- [ ] 复查 `SEV/WFE/WFI`、IPI/SGI、timer PPI 的跨核唤醒可见语义。
+- [ ] 复查 `TLBI`、`IC IVAU`、自修改代码、远端代码失效、`TTBR/TCR/SCTLR` 切换在多核下的传播行为。
+- [ ] 复查 cache maintenance 在“程序能观察到的内存/执行结果”层面是否成立，而不是只看内部状态。
+
+预期收益：
+- 提高 SMP Linux、锁、futex 风格同步、自旋锁、并发用户态 workload 的稳定性。
+
+### 4. MMU / 地址翻译 / fault 边界收尾
+
+目标：
+- 保证内核与用户态看到的地址空间、权限和 fault 行为正确。
+
+任务：
+- [ ] 复查跨页访存、部分 fault、faulting byte、FAR 指向、pair load/store fault 行为。
+- [ ] 复查 `TTBR0/TTBR1/TCR/MAIR/ASID/TLBI` 切换边界，以及与 TLB / decode cache 的一致性。
+- [ ] 复查 PAN、XN/PXN/UXN、table AP 继承、AF 等已支持页表语义的程序可见行为。
+- [ ] 复查“快路径 / 预解码 / TLB 优化”是否在 fault、权限、self-modifying code 场景下保持一致语义。
+
+预期收益：
+- 减少 Linux 启动、`execve`、动态链接、页权限切换、用户态 fault 测试中的边界错误。
+
+### 5. 正确性验证基础设施补强
+
+目标：
+- 让“程序可见正确性”可持续验证，而不是靠人工试命令。
+
+任务：
+- [ ] 持续补裸机单测，优先覆盖：FP 边界值、异常 syndrome、SMP 原子/屏障、跨页 fault、TLBI/IC IVAU。
+- [ ] 持续补 Linux 用户态测试，优先覆盖：浮点/向量、线程同步、`mprotect`/`execve`/信号、长时间刷屏与内存压力。
+- [ ] 对最容易拿不准的语义建立差分验证路径：当前模拟器 vs QEMU vs 工具链生成结果。
+- [ ] 为“当前模型声明 absent 的特性”补负向测试，确保它们确实表现为 absent，而不是半实现状态。
+
+预期收益：
+- 后续再做性能优化、预解码、事件驱动、JIT 时，不会轻易把程序可见语义重新弄坏。
+
+### 6. 建议实施顺序
+
+第一阶段：
+- [ ] 浮点 / AdvSIMD 语义收尾
+- [ ] 异常 / 系统寄存器 / trap 语义收尾
+
+第二阶段：
+- [ ] SMP 内存模型与同步原语收尾
+- [ ] MMU / fault / TLB / self-modifying code 边界收尾
+
+第三阶段：
+- [ ] 建立更系统的差分与 Linux 用户态压力回归
+- [ ] 在“程序可见正确性”稳定后，再继续做更激进的性能优化
+
+### 7. 完成判据
+
+当满足以下条件时，可认为“当前模型下 Armv8-A 强制要求的程序可见行为”已基本收敛：
+- [ ] 当前 ID 寄存器声明存在的指令与系统行为，都有明确实现或明确 trap/undef 语义。
+- [ ] 裸机单测不再持续发现新的高优先级 ISA / 异常 / SMP / MMU 语义缺口。
+- [ ] Linux UMP / SMP 回归长期稳定，不再出现偶发 `illegal instruction`、莫名 panic、同步失效、刷屏乱码、卡死等问题。
+- [ ] 进一步的性能优化已主要是结构性提速问题，而不是“边优化边暴露新语义 bug”。
+
 ## 事件驱动化演进方案
 
 目标：
