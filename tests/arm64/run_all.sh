@@ -52,6 +52,8 @@ run mmu_table_pxn_inherit.bin 4000000
 run mmu_tcr_ips_mair_decode.bin 4000000
 run mmu_af_fault.bin 4000000
 run sync_exception_regs.bin 2000000
+run_expect exception_daif_entry.bin 300000 D
+run_expect eret_clears_exclusive.bin 300000 E
 ./build/aarchvm -bin tests/arm64/out/nested_sync_depth.bin -load 0x0 -entry 0x0 -steps 400000 | grep -qx 'P'
 run gic_timer_sysreg.bin 2000000
 run gic_timer_rearm_no_spurious.bin 2000000
@@ -88,6 +90,8 @@ test "$(./build/aarchvm -bin tests/arm64/out/el0_daif_uma.bin -load 0x0 -entry 0
 test "$(./build/aarchvm -bin tests/arm64/out/el0_idspace_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'D'
 test "$(./build/aarchvm -bin tests/arm64/out/el0_special_regs_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'S'
 test "$(./build/aarchvm -bin tests/arm64/out/el0_absent_pstate_features_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'A'
+test "$(./build/aarchvm -bin tests/arm64/out/el0_eret_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'E'
+test "$(./build/aarchvm -bin tests/arm64/out/el0_hvc_smc_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'H'
 test "$(./build/aarchvm -bin tests/arm64/out/sysreg_optional_absent.bin -load 0x0 -entry 0x0 -steps 400000 | tr -d '\r\n')" = 'U'
 test "$(./build/aarchvm -bin tests/arm64/out/el0_cache_ops_privilege.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'C'
 test "$(./build/aarchvm -bin tests/arm64/out/el0_wfx_trap.bin -load 0x0 -entry 0x0 -steps 800000 | tr -d '\r\n')" = 'T'
@@ -126,6 +130,7 @@ run fpsimd_widen_sat.bin 400000
 run cpacr_fp_trap.bin 300000
 run cpacr_fp_mem_trap.bin 300000
 run pstate_pan.bin 200000
+run_expect pan_span_exception.bin 300000 S
 run_expect id_aa64_feature_regs.bin 200000 I
 run mmu_el0_ap_fault.bin 4000000
 run mmu_pan_user_access.bin 4000000

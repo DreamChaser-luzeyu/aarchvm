@@ -1,3 +1,68 @@
+# 修改日志 2026-03-19 11:33
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程补齐一组异常入口 / 异常返回 / EL0 非法特权指令的 Armv8-A 行为缺口：
+  - [src/system_registers.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/system_registers.cpp)
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+- 修正 `SCTLR_EL1.SPAN` 对异常入口 `PSTATE.PAN` 的影响：
+  - 进入 EL1 异常时，`SPAN=0` 现在会强制把 `PAN` 置 1；
+  - `SPAN=1` 时保持原值，不再无条件沿用旧行为。
+- 修正进入 EL1 异常时 `DAIF` 掩码更新不完整的问题：
+  - 之前只置位了 `PSTATE.I`；
+  - 现在按 `AArch64.TakeException()` 把 `PSTATE.<D,A,I,F>` 全部置为 `1111`。
+- 修正 `ERET` 的两个真实语义缺口：
+  - `ERET` 现在会在异常返回时清空 local exclusive monitor；
+  - `ERET` 在 EL0 执行时不再导致模拟器内部“unexpected stop”，而是正确触发 `EC=0x00` 的 undefined 指令异常。
+- 修正 `HVC` / `SMC` 在 EL0 下的行为：
+  - 之前错误按同步异常 `EC=0x16/0x17` 处理；
+  - 现在在 EL0 下按架构要求走 undefined 指令异常。
+- 新增并接入 5 个定向裸机回归：
+  - [tests/arm64/pan_span_exception.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/pan_span_exception.S)
+    - 覆盖 `SPAN=0/1` 下异常入口 `PAN` 的差异行为；
+  - [tests/arm64/exception_daif_entry.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/exception_daif_entry.S)
+    - 覆盖同步异常进入 EL1 时 `DAIF=0b1111` 且 `SPSR_EL1` 保留原掩码；
+  - [tests/arm64/eret_clears_exclusive.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/eret_clears_exclusive.S)
+    - 覆盖 `LDXR -> svc/eret -> STXR` 必须失败；
+  - [tests/arm64/el0_eret_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_eret_undef.S)
+    - 覆盖 `ERET@EL0` 必须是 undefined；
+  - [tests/arm64/el0_hvc_smc_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_hvc_smc_undef.S)
+    - 覆盖 `HVC@EL0`、`SMC@EL0` 必须是 undefined。
+- 更新测试接线：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+
+## 本轮测试
+
+- 定向构建与单测：
+  - `timeout 600s cmake --build build -j`
+  - `timeout 600s tests/arm64/build_tests.sh`
+  - `timeout 120s ./build/aarchvm -bin tests/arm64/out/pan_span_exception.bin -load 0x0 -entry 0x0 -steps 300000`
+  - `timeout 120s ./build/aarchvm -bin tests/arm64/out/exception_daif_entry.bin -load 0x0 -entry 0x0 -steps 300000`
+  - `timeout 120s ./build/aarchvm -bin tests/arm64/out/eret_clears_exclusive.bin -load 0x0 -entry 0x0 -steps 300000`
+  - `timeout 120s ./build/aarchvm -bin tests/arm64/out/el0_eret_undef.bin -load 0x0 -entry 0x0 -steps 600000`
+  - `timeout 120s ./build/aarchvm -bin tests/arm64/out/el0_hvc_smc_undef.bin -load 0x0 -entry 0x0 -steps 600000`
+- 完整裸机回归：
+  - `timeout 1800s ./tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1800s ./tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 2400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 本轮连续补齐了 5 个高置信度、程序可感知的 Armv8-A 行为缺口，集中在：
+  - 异常入口对 `PAN` / `DAIF` 的更新；
+  - 异常返回对 local exclusive monitor 的影响；
+  - EL0 下若干特权指令的 undefined 语义。
+- 截至本轮结束，以下回归均已在最新代码状态下通过：
+  - `tests/arm64/run_all.sh`
+  - `tests/linux/run_functional_suite.sh`
+  - `tests/linux/run_functional_suite_smp.sh`
+- 仍不应宣称“已经完整实现 Armv8-A 全部 ISA/行为”：
+  - 当前这轮继续收口的是异常与特权指令语义；
+  - 后续仍值得继续系统审查 illegal return event、更细的 syndrome/ISS 细节，以及其他 EL0 下应为 undefined 的特权系统指令。
+
 # 修改日志 2026-03-19 10:24
 
 ## 本轮修改

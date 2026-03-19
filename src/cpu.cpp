@@ -1997,7 +1997,12 @@ bool Cpu::step() {
     return true;
   }
   if (insn == 0xD69F03E0u) { // ERET
+    if (sysregs_.in_el0()) {
+      enter_sync_exception(this_pc, 0x00u, 0u, false, 0);
+      return true;
+    }
     save_current_sp_to_bank();
+    clear_exclusive_monitor();
     pc_ = sysregs_.exception_return();
     load_current_sp_from_bank();
     if (trace_eret_lower_count_ < trace_eret_lower_limit_ && sysregs_.in_el0()) {
@@ -2040,6 +2045,10 @@ bool Cpu::step() {
     return false;
   }
   if ((insn & 0xFFE0001Fu) == 0xD4000002u) { // HVC #imm16
+    if (sysregs_.in_el0()) {
+      enter_sync_exception(this_pc, 0x00u, 0u, false, 0);
+      return true;
+    }
     if (callbacks_.smccc_call && callbacks_.smccc_call(*this, true, static_cast<std::uint16_t>((insn >> 5) & 0xFFFFu))) {
       return true;
     }
@@ -2047,6 +2056,10 @@ bool Cpu::step() {
     return true;
   }
   if ((insn & 0xFFE0001Fu) == 0xD4000003u) { // SMC #imm16
+    if (sysregs_.in_el0()) {
+      enter_sync_exception(this_pc, 0x00u, 0u, false, 0);
+      return true;
+    }
     if (callbacks_.smccc_call && callbacks_.smccc_call(*this, false, static_cast<std::uint16_t>((insn >> 5) & 0xFFFFu))) {
       return true;
     }

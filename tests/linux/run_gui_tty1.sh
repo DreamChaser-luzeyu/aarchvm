@@ -65,12 +65,12 @@ echo "-----------"
 # AARCHVM_UART_TX_REPLY="$UART_REPLY" \
 # "${AARCHVM_CMD[@]}"
 
-# (
-#   # sleep "$UBOOT_DELAY_SEC"
-#   printf '\n\n\n'
-#   # sleep "$PROMPT_DELAY_SEC"
-#   printf '%s\n' "$UBOOT_BOOT_CMDS"
-# ) | \
+(
+  # sleep "$UBOOT_DELAY_SEC"
+  printf '\n\n\n'
+  # sleep "$PROMPT_DELAY_SEC"
+  printf '%s\n' "$UBOOT_BOOT_CMDS"
+) | \
 AARCHVM_BUS_FASTPATH="$FASTPATH" \
 AARCHVM_TIMER_SCALE="$TIMER_SCALE" \
 "${AARCHVM_CMD[@]}"

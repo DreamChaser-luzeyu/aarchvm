@@ -14,6 +14,8 @@ constexpr std::uint32_t SysReg(std::uint32_t op0,
   return (op0 << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2;
 }
 
+constexpr std::uint64_t kSctlrEl1Span = 1ull << 23;
+
 } // namespace
 
 void SystemRegisters::reset() {
@@ -267,7 +269,13 @@ void SystemRegisters::exception_enter_irq(std::uint64_t return_pc) {
   esr_el1_ = 0;
   pstate_.mode = 0x5u;
   spsel_ = 1u;
+  pstate_.d = true;
+  pstate_.a = true;
+  if ((sctlr_el1_ & kSctlrEl1Span) == 0u) {
+    pstate_.pan = true;
+  }
   pstate_.i = true;
+  pstate_.f = true;
 }
 
 void SystemRegisters::exception_enter_sync(std::uint64_t return_pc,
@@ -281,7 +289,13 @@ void SystemRegisters::exception_enter_sync(std::uint64_t return_pc,
   far_el1_ = far_valid ? far : 0;
   pstate_.mode = 0x5u;
   spsel_ = 1u;
+  pstate_.d = true;
+  pstate_.a = true;
+  if ((sctlr_el1_ & kSctlrEl1Span) == 0u) {
+    pstate_.pan = true;
+  }
   pstate_.i = true;
+  pstate_.f = true;
 }
 
 std::uint64_t SystemRegisters::exception_return() {

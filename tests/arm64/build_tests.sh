@@ -65,12 +65,15 @@ build_asm_prog fpsimd_widen_sat
 build_asm_prog cpacr_fp_trap
 build_asm_prog cpacr_fp_mem_trap
 build_asm_prog pstate_pan
+build_asm_prog pan_span_exception
 build_asm_prog id_aa64_feature_regs
 build_asm_prog svc_sysreg_minimal
 build_asm_prog el0_sysreg_privilege
 build_asm_prog el0_idspace_undef
 build_asm_prog el0_special_regs_undef
 build_asm_prog el0_absent_pstate_features_undef
+build_asm_prog el0_eret_undef
+build_asm_prog el0_hvc_smc_undef
 build_asm_prog el0_daif_uma
 build_asm_prog sysreg_optional_absent
 build_asm_prog lse_atomics
@@ -104,6 +107,8 @@ build_asm_prog mmu_table_pxn_inherit
 build_asm_prog mmu_tcr_ips_mair_decode
 build_asm_prog mmu_af_fault
 build_asm_prog sync_exception_regs
+build_asm_prog exception_daif_entry
+build_asm_prog eret_clears_exclusive
 build_asm_prog nested_sync_depth
 build_asm_prog gic_timer_sysreg
 build_asm_prog gic_timer_rearm_no_spurious
