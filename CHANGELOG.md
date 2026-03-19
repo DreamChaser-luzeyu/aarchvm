@@ -1,3 +1,88 @@
+# 修改日志 2026-03-19 15:19
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程补齐一个可观测的标量 FP 比较语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fp_compare_flags.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_compare_flags.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 修正 `FCMP/FCMPE` 在 NaN 比较时对 `FPSR.IOC` 的处理：
+  - 修改前，`FCMP` 和 `FCMPE` 只更新 `NZCV`，不会把 invalid operation 反映到 `FPSR`；
+  - 修改后，`FCMPE` 遇到 qNaN 会置 `FPSR.IOC`，`FCMP` 遇到 qNaN 不置位；
+  - 对 sNaN，`FCMP`/`FCMPE` 都会置 `FPSR.IOC`。
+- 新增 NaN 位模式辅助逻辑，按 32/64-bit IEEE-754 编码识别 qNaN/sNaN，避免仅依赖宿主 `std::isnan`，把比较类指令的 `FPSR` 更新逻辑显式化。
+- 新增裸机单测 [tests/arm64/fp_compare_flags.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_compare_flags.S)，覆盖：
+  - qNaN 下 `FCMP` vs `FCMPE` 的 `FPSR.IOC` 差异；
+  - sNaN 下 `FCMP` 的 `FPSR.IOC`；
+  - `#0.0` 形式与寄存器形式；
+  - 单精度与双精度两条路径；
+  - unordered 比较对应的 `NZCV=0b0011`。
+
+## 本轮测试
+
+- 构建与定向验证：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 1200s tests/arm64/build_tests.sh`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_compare_flags.bin -load 0x0 -entry 0x0 -steps 200000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/cpacr_fp_structured_trap.bin -load 0x0 -entry 0x0 -steps 400000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮修掉的是一个真实且可由客体程序直接观测到的 FP 状态寄存器行为缺口，不是为了某个程序做特殊处理。
+- 修改后，`FCMP/FCMPE` 不再只改 `NZCV`，而是能把 qNaN/sNaN 的 invalid-operation 结果正确反映到 `FPSR.IOC`；新增单测以及完整裸机、Linux UMP/SMP 回归均通过。
+- 下一轮仍值得继续审的方向：
+  - 其他标量/向量 FP 指令对 `FPSR` 的异常标志更新是否还有缺口；
+  - `FRINT*`、`FMIN/FMAX`、`FMINNM/FMAXNM` 等对 sNaN/qNaN 的细粒度差异。
+
+# 修改日志 2026-03-19 15:05
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程补齐一个真实的 Armv8-A/FP trap 语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/cpacr_fp_structured_trap.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/cpacr_fp_structured_trap.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 修正 `insn_uses_fp_asimd()` 对 structured AdvSIMD whole-register memory 指令的识别不完整问题：
+  - 修改前，部分 `LD1/ST1/LD3/ST3/LD4/ST4` whole-register 及其 post-index 变体不会被判定为 FP/AdvSIMD 指令；
+  - 在 `CPACR_EL1.FPEN` 关闭或限制访问时，这些指令会错误执行，而不是按规范产生 trap。
+- 这轮补齐了缺失的 whole-register structured load/store 掩码覆盖，包括：
+  - `LD1/ST1` 2/3/4-register whole-register 形式；
+  - `LD3/ST3`、`LD4/ST4` whole-register 形式；
+  - 对应的 post-index immediate / register 变体。
+- 新增裸机单测 [tests/arm64/cpacr_fp_structured_trap.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/cpacr_fp_structured_trap.S)，覆盖：
+  - `CPACR_EL1=0` 时 EL1 对 structured AdvSIMD memory 指令的 trap；
+  - `FPEN=01` 时 EL0 的 trap；
+  - `FPEN=11` 时 EL0 的正常执行；
+  - 使用 `ld3 {v0.16b, v1.16b, v2.16b}, [x2]` 作为具体探针，确保命中此前漏判的 whole-register 家族。
+
+## 本轮测试
+
+- 构建与定向验证：
+  - `timeout 1200s tests/arm64/build_tests.sh`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/cpacr_fp_structured_trap.bin -load 0x0 -entry 0x0 -steps 400000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮修复的是 trap 分类逻辑里的真实 ISA 行为缺口，不是测试特判。
+- 修改后，whole-register structured AdvSIMD memory 指令在 `CPACR_EL1.FPEN` 约束下已经能走到正确的 trap/放行路径，新增单测与完整裸机、Linux UMP/SMP 回归均通过。
+- 但这不等于 Armv8-A ISA 行为已经全部审完；下一轮仍值得继续审的是：
+  - 其他 `insn_uses_fp_asimd()` 角落是否还有漏网的 FP/AdvSIMD 指令族；
+  - 更细的系统寄存器陷入条件与异常 syndrome 细节。
+
 # 修改日志 2026-03-19 12:55
 
 ## 本轮修改

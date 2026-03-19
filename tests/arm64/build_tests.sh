@@ -52,6 +52,7 @@ build_asm_prog fcmp_e
 build_asm_prog fp_scalar_convert
 build_asm_prog fp_fcvtzu_scalar
 build_asm_prog fp_fcvt_flags
+build_asm_prog fp_compare_flags
 build_asm_prog fp_scalar_fcsel
 build_asm_prog fp_scalar_fma
 build_asm_prog fp_scalar_misc
@@ -66,6 +67,7 @@ build_asm_prog fpsimd_structured_lane_ls
 build_asm_prog fpsimd_widen_sat
 build_asm_prog cpacr_fp_trap
 build_asm_prog cpacr_fp_mem_trap
+build_asm_prog cpacr_fp_structured_trap
 build_asm_prog pstate_pan
 build_asm_prog pan_span_exception
 build_asm_prog id_aa64_feature_regs

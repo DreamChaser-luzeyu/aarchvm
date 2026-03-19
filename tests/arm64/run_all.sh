@@ -122,6 +122,7 @@ run fcmp_e.bin 200000
 run fp_scalar_convert.bin 200000
 run fp_fcvtzu_scalar.bin 200000
 run fp_fcvt_flags.bin 200000
+run_expect fp_compare_flags.bin 200000 Q
 run fp_scalar_fcsel.bin 200000
 run fp_scalar_fma.bin 200000
 run fp_scalar_misc.bin 200000
@@ -136,6 +137,7 @@ run_expect fpsimd_structured_lane_ls.bin 800000 Y
 run fpsimd_widen_sat.bin 400000
 run cpacr_fp_trap.bin 300000
 run cpacr_fp_mem_trap.bin 300000
+run cpacr_fp_structured_trap.bin 400000
 run pstate_pan.bin 200000
 run_expect pan_span_exception.bin 300000 S
 run_expect id_aa64_feature_regs.bin 200000 I

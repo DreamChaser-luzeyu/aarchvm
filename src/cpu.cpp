@@ -339,6 +339,39 @@ constexpr std::uint64_t kFpsrIoc = 1ull << 0;
 constexpr std::uint64_t kFpsrIxc = 1ull << 4;
 
 template <typename UIntT>
+bool fp_is_nan_bits(UIntT bits) {
+  if constexpr (sizeof(UIntT) == 4u) {
+    return (bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu) != 0u;
+  } else {
+    return (bits & 0x7FF0000000000000ull) == 0x7FF0000000000000ull &&
+           (bits & 0x000FFFFFFFFFFFFFull) != 0u;
+  }
+}
+
+template <typename UIntT>
+bool fp_is_signaling_nan_bits(UIntT bits) {
+  if (!fp_is_nan_bits(bits)) {
+    return false;
+  }
+  if constexpr (sizeof(UIntT) == 4u) {
+    return (bits & 0x00400000u) == 0u;
+  } else {
+    return (bits & 0x0008000000000000ull) == 0u;
+  }
+}
+
+template <typename UIntT>
+std::uint64_t fp_compare_fpsr_bits(UIntT lhs_bits, UIntT rhs_bits, bool signaling_compare) {
+  const bool lhs_nan = fp_is_nan_bits(lhs_bits);
+  const bool rhs_nan = fp_is_nan_bits(rhs_bits);
+  if (fp_is_signaling_nan_bits(lhs_bits) || fp_is_signaling_nan_bits(rhs_bits) ||
+      (signaling_compare && (lhs_nan || rhs_nan))) {
+    return kFpsrIoc;
+  }
+  return 0u;
+}
+
+template <typename UIntT>
 UIntT fp_to_unsigned_rtz(long double value, std::uint64_t& fpsr_bits) {
   fpsr_bits = 0;
   if (std::isnan(value)) {
@@ -1787,8 +1820,18 @@ bool Cpu::insn_uses_fp_asimd(std::uint32_t insn) const {
   const bool asimd_structured_ls =
       (insn & 0xBFFFFC00u) == 0x0C407000u || (insn & 0xBFFFFC00u) == 0x0C007000u ||
       (insn & 0xBFFFFC00u) == 0x0CDF7000u || (insn & 0xBFFFFC00u) == 0x0C9F7000u ||
+      (insn & 0xBFFFFC00u) == 0x0C40A000u || (insn & 0xBFFFFC00u) == 0x0C00A000u ||
+      (insn & 0xBFFFFC00u) == 0x0CDFA000u || (insn & 0xBFFFFC00u) == 0x0C9FA000u ||
+      (insn & 0xBFFFFC00u) == 0x0C406000u || (insn & 0xBFFFFC00u) == 0x0C006000u ||
+      (insn & 0xBFFFFC00u) == 0x0CDF6000u || (insn & 0xBFFFFC00u) == 0x0C9F6000u ||
+      (insn & 0xBFFFFC00u) == 0x0C402000u || (insn & 0xBFFFFC00u) == 0x0C002000u ||
+      (insn & 0xBFFFFC00u) == 0x0CDF2000u || (insn & 0xBFFFFC00u) == 0x0C9F2000u ||
       (insn & 0xBFFFFC00u) == 0x0C408000u || (insn & 0xBFFFFC00u) == 0x0C008000u ||
       (insn & 0xBFFFFC00u) == 0x0CDF8000u || (insn & 0xBFFFFC00u) == 0x0C9F8000u ||
+      (insn & 0xBFFFFC00u) == 0x0C404000u || (insn & 0xBFFFFC00u) == 0x0C004000u ||
+      (insn & 0xBFFFFC00u) == 0x0CDF4000u || (insn & 0xBFFFFC00u) == 0x0C9F4000u ||
+      (insn & 0xBFFFFC00u) == 0x0C400000u || (insn & 0xBFFFFC00u) == 0x0C000000u ||
+      (insn & 0xBFFFFC00u) == 0x0CDF0000u || (insn & 0xBFFFFC00u) == 0x0C9F0000u ||
       (insn & 0xBF9F0000u) == 0x0D000000u || (insn & 0xBF800000u) == 0x0D800000u;
   if (fp_ls_unsigned_imm || fp_ls_pre_post || fp_ls_regoffset || fp_ls_unscaled || asimd_structured_ls) {
     return true;
@@ -5392,16 +5435,33 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
   if (((insn & 0xFF20FC1Fu) == 0x1E202000u) || ((insn & 0xFF20FC1Fu) == 0x1E202010u)) { // FCMP/FCMPE Sn, Sm / Dn, Dm
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
     const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    const bool signaling_compare = (insn & 0x10u) != 0u;
     if (ftype == 0u) {
-      const float lhs = read_fp32(rn);
-      const float rhs = read_fp32(rm);
-      set_fp_compare_flags(std::isnan(lhs) || std::isnan(rhs), lhs < rhs, lhs == rhs);
+      const std::uint32_t lhs_bits = static_cast<std::uint32_t>(qregs_[rn][0] & 0xFFFFFFFFu);
+      const std::uint32_t rhs_bits = static_cast<std::uint32_t>(qregs_[rm][0] & 0xFFFFFFFFu);
+      const bool unordered = fp_is_nan_bits(lhs_bits) || fp_is_nan_bits(rhs_bits);
+      if (unordered) {
+        set_fp_compare_flags(true, false, false);
+      } else {
+        const float lhs = std::bit_cast<float>(lhs_bits);
+        const float rhs = std::bit_cast<float>(rhs_bits);
+        set_fp_compare_flags(false, lhs < rhs, lhs == rhs);
+      }
+      sysregs_.fp_or_fpsr(fp_compare_fpsr_bits(lhs_bits, rhs_bits, signaling_compare));
       return true;
     }
     if (ftype == 1u) {
-      const double lhs = read_fp64(rn);
-      const double rhs = read_fp64(rm);
-      set_fp_compare_flags(std::isnan(lhs) || std::isnan(rhs), lhs < rhs, lhs == rhs);
+      const std::uint64_t lhs_bits = qregs_[rn][0];
+      const std::uint64_t rhs_bits = qregs_[rm][0];
+      const bool unordered = fp_is_nan_bits(lhs_bits) || fp_is_nan_bits(rhs_bits);
+      if (unordered) {
+        set_fp_compare_flags(true, false, false);
+      } else {
+        const double lhs = std::bit_cast<double>(lhs_bits);
+        const double rhs = std::bit_cast<double>(rhs_bits);
+        set_fp_compare_flags(false, lhs < rhs, lhs == rhs);
+      }
+      sysregs_.fp_or_fpsr(fp_compare_fpsr_bits(lhs_bits, rhs_bits, signaling_compare));
       return true;
     }
     return false;
@@ -5409,14 +5469,27 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
 
   if (((insn & 0xFF20FC1Fu) == 0x1E202008u) || ((insn & 0xFF20FC1Fu) == 0x1E202018u)) { // FCMP/FCMPE Sn|Dn, #0.0
     const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    const bool signaling_compare = (insn & 0x10u) != 0u;
     if (ftype == 0u) {
-      const float lhs = read_fp32(rn);
-      set_fp_compare_flags(std::isnan(lhs), lhs < 0.0f, lhs == 0.0f);
+      const std::uint32_t lhs_bits = static_cast<std::uint32_t>(qregs_[rn][0] & 0xFFFFFFFFu);
+      if (fp_is_nan_bits(lhs_bits)) {
+        set_fp_compare_flags(true, false, false);
+      } else {
+        const float lhs = std::bit_cast<float>(lhs_bits);
+        set_fp_compare_flags(false, lhs < 0.0f, lhs == 0.0f);
+      }
+      sysregs_.fp_or_fpsr(fp_compare_fpsr_bits(lhs_bits, 0u, signaling_compare));
       return true;
     }
     if (ftype == 1u) {
-      const double lhs = read_fp64(rn);
-      set_fp_compare_flags(std::isnan(lhs), lhs < 0.0, lhs == 0.0);
+      const std::uint64_t lhs_bits = qregs_[rn][0];
+      if (fp_is_nan_bits(lhs_bits)) {
+        set_fp_compare_flags(true, false, false);
+      } else {
+        const double lhs = std::bit_cast<double>(lhs_bits);
+        set_fp_compare_flags(false, lhs < 0.0, lhs == 0.0);
+      }
+      sysregs_.fp_or_fpsr(fp_compare_fpsr_bits(lhs_bits, static_cast<std::uint64_t>(0), signaling_compare));
       return true;
     }
     return false;
