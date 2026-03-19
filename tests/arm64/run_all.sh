@@ -129,12 +129,16 @@ run_expect fp_cond_compare.bin 200000 C
 run fp_scalar_fcsel.bin 200000
 run fp_scalar_fma.bin 200000
 run fp_scalar_misc.bin 200000
+run_expect fp_sqrt_flags.bin 300000 Q
+run_expect fp_roundint_flags.bin 300000 I
 run_expect fp_scalar_compare_misc.bin 300000 J
 run_expect fp_scalar_pairwise.bin 300000 Y
+run_expect fp_scalar_frecpx.bin 300000 X
 run fpsimd_ins_xtl.bin 300000
 run_expect fpsimd_fcvt_rounding.bin 400000 O
 run_expect fpsimd_fcvtxn_roundodd.bin 400000 X
 run_expect fpsimd_fp_estimate.bin 400000 E
+run_expect fpsimd_fp_step.bin 400000 S
 run_expect fpsimd_fp_convert_long_narrow.bin 400000 H
 run_expect fpsimd_fp_reducev.bin 400000 R
 run_expect fpsimd_fp_misc_rounding.bin 400000 V

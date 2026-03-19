@@ -435,6 +435,30 @@ constexpr UIntT fp_default_nan_bits() {
 }
 
 template <typename UIntT>
+constexpr std::uint32_t fp_exp_bits_count() {
+  if constexpr (sizeof(UIntT) == 4u) {
+    return 8u;
+  } else {
+    return 11u;
+  }
+}
+
+template <typename UIntT>
+constexpr int fp_exp_bias() {
+  if constexpr (sizeof(UIntT) == 4u) {
+    return 127;
+  } else {
+    return 1023;
+  }
+}
+
+template <typename UIntT>
+bool fp_is_inf_bits(UIntT bits) {
+  return (bits & fp_exp_mask_bits<UIntT>()) == fp_exp_mask_bits<UIntT>() &&
+         (bits & fp_frac_mask_bits<UIntT>()) == 0u;
+}
+
+template <typename UIntT>
 constexpr UIntT fp_inf_bits(bool sign) {
   return (sign ? fp_sign_mask_bits<UIntT>() : 0u) | fp_exp_mask_bits<UIntT>();
 }
@@ -451,6 +475,107 @@ constexpr UIntT fp_max_normal_bits(bool sign) {
   } else {
     return (sign ? 0x8000000000000000ull : 0u) | 0x7FEFFFFFFFFFFFFFull;
   }
+}
+
+template <typename UIntT>
+constexpr UIntT fp_two_bits() {
+  if constexpr (sizeof(UIntT) == 4u) {
+    return 0x40000000u;
+  } else {
+    return 0x4000000000000000ull;
+  }
+}
+
+template <typename UIntT>
+constexpr UIntT fp_one_point_five_bits() {
+  if constexpr (sizeof(UIntT) == 4u) {
+    return 0x3FC00000u;
+  } else {
+    return 0x3FF8000000000000ull;
+  }
+}
+
+template <typename UIntT>
+bool fp_is_exact_sqrt_positive_finite_bits(UIntT bits) {
+  static_assert(sizeof(UIntT) == 4u || sizeof(UIntT) == 8u);
+  const UIntT exp_mask = fp_exp_mask_bits<UIntT>();
+  const UIntT frac_mask = fp_frac_mask_bits<UIntT>();
+  const std::uint32_t frac_bits = fp_frac_bits_count<UIntT>();
+  const UIntT exp = (bits & exp_mask) >> frac_bits;
+  const UIntT frac = bits & frac_mask;
+  std::uint64_t significand = 0u;
+  int exponent = 0;
+
+  if (exp == 0u) {
+    if (frac == 0u) {
+      return true;
+    }
+    significand = static_cast<std::uint64_t>(frac);
+    exponent = 1 - fp_exp_bias<UIntT>() - static_cast<int>(frac_bits);
+  } else {
+    significand = (1ull << frac_bits) | static_cast<std::uint64_t>(frac);
+    exponent = static_cast<int>(exp) - fp_exp_bias<UIntT>() - static_cast<int>(frac_bits);
+  }
+
+  const unsigned shift = static_cast<unsigned>(__builtin_ctzll(significand));
+  significand >>= shift;
+  exponent += static_cast<int>(shift);
+  if ((exponent & 1) != 0) {
+    return false;
+  }
+
+  std::uint64_t root = static_cast<std::uint64_t>(std::sqrt(static_cast<long double>(significand)));
+  while (true) {
+    const std::uint64_t next = root + 1u;
+    if (next > significand / next) {
+      break;
+    }
+    if (next * next > significand) {
+      break;
+    }
+    root = next;
+  }
+  while (root > significand / root || root * root > significand) {
+    --root;
+  }
+  return root <= significand / root && root * root == significand;
+}
+
+template <typename UIntT, typename FloatT>
+UIntT fp_sqrt_bits(UIntT bits, std::uint64_t& fpsr_bits) {
+  static_assert(sizeof(UIntT) == 4u || sizeof(UIntT) == 8u);
+  fpsr_bits = 0u;
+
+  if (fp_is_signaling_nan_bits(bits)) {
+    fpsr_bits |= kFpsrIoc;
+    return fp_quiet_nan_bits(bits);
+  }
+  if (fp_is_nan_bits(bits)) {
+    return bits;
+  }
+
+  const bool sign = (bits & fp_sign_mask_bits<UIntT>()) != 0u;
+  const UIntT abs_bits = bits & ~fp_sign_mask_bits<UIntT>();
+  if (abs_bits == 0u) {
+    return bits;
+  }
+  if (fp_is_inf_bits(bits)) {
+    if (!sign) {
+      return bits;
+    }
+    fpsr_bits |= kFpsrIoc;
+    return fp_default_nan_bits<UIntT>();
+  }
+  if (sign) {
+    fpsr_bits |= kFpsrIoc;
+    return fp_default_nan_bits<UIntT>();
+  }
+
+  const UIntT result = std::bit_cast<UIntT>(std::sqrt(std::bit_cast<FloatT>(bits)));
+  if (!fp_is_exact_sqrt_positive_finite_bits(bits)) {
+    fpsr_bits |= kFpsrIxc;
+  }
+  return result;
 }
 
 bool fp_round_overflow_to_inf(std::uint32_t mode, bool sign) {
@@ -946,6 +1071,135 @@ UIntT fp_rsqrt_estimate_bits(UIntT bits, std::uint64_t& fpsr_bits) {
     return (static_cast<UIntT>(result_exp) << 52u) |
            static_cast<UIntT>(static_cast<std::uint64_t>(estimate & 0xFFu) << 44u);
   }
+}
+
+template <typename UIntT, typename FloatT>
+UIntT fp_recip_step_fused_bits(UIntT op1_bits_in, UIntT op2_bits, std::uint32_t fpcr_mode, std::uint64_t& fpsr_bits) {
+  static_assert(sizeof(UIntT) == 4u || sizeof(UIntT) == 8u);
+  fpsr_bits = 0u;
+
+  const UIntT sign_mask = fp_sign_mask_bits<UIntT>();
+  const UIntT exp_mask = fp_exp_mask_bits<UIntT>();
+  const UIntT frac_mask = fp_frac_mask_bits<UIntT>();
+  const UIntT exp_all_ones = exp_mask >> fp_frac_bits_count<UIntT>();
+  const UIntT op1_bits = op1_bits_in ^ sign_mask;
+
+  if (fp_is_signaling_nan_bits(op1_bits)) {
+    fpsr_bits |= kFpsrIoc;
+    return fp_quiet_nan_bits(op1_bits);
+  }
+  if (fp_is_signaling_nan_bits(op2_bits)) {
+    fpsr_bits |= kFpsrIoc;
+    return fp_quiet_nan_bits(op2_bits);
+  }
+  if (fp_is_nan_bits(op1_bits)) {
+    return op1_bits;
+  }
+  if (fp_is_nan_bits(op2_bits)) {
+    return op2_bits;
+  }
+
+  const bool sign1 = (op1_bits & sign_mask) != 0u;
+  const bool sign2 = (op2_bits & sign_mask) != 0u;
+  const UIntT exp1 = (op1_bits & exp_mask) >> fp_frac_bits_count<UIntT>();
+  const UIntT exp2 = (op2_bits & exp_mask) >> fp_frac_bits_count<UIntT>();
+  const UIntT frac1 = op1_bits & frac_mask;
+  const UIntT frac2 = op2_bits & frac_mask;
+  const bool inf1 = exp1 == exp_all_ones && frac1 == 0u;
+  const bool inf2 = exp2 == exp_all_ones && frac2 == 0u;
+  const bool zero1 = (op1_bits & ~sign_mask) == 0u;
+  const bool zero2 = (op2_bits & ~sign_mask) == 0u;
+
+  if ((inf1 && zero2) || (zero1 && inf2)) {
+    return fp_two_bits<UIntT>();
+  }
+  if (inf1 || inf2) {
+    return fp_inf_bits<UIntT>(sign1 ^ sign2);
+  }
+
+  const FloatT op1 = std::bit_cast<FloatT>(op1_bits);
+  const FloatT op2 = std::bit_cast<FloatT>(op2_bits);
+  const long double exact = static_cast<long double>(op1) * static_cast<long double>(op2) + 2.0L;
+  if (exact == 0.0L) {
+    return fp_zero_bits<UIntT>((fpcr_mode & 0x3u) == 2u);
+  }
+  return std::bit_cast<UIntT>(std::fma(op1, op2, static_cast<FloatT>(2.0)));
+}
+
+template <typename UIntT, typename FloatT>
+UIntT fp_rsqrt_step_fused_bits(UIntT op1_bits_in, UIntT op2_bits, std::uint32_t fpcr_mode, std::uint64_t& fpsr_bits) {
+  static_assert(sizeof(UIntT) == 4u || sizeof(UIntT) == 8u);
+  fpsr_bits = 0u;
+
+  const UIntT sign_mask = fp_sign_mask_bits<UIntT>();
+  const UIntT exp_mask = fp_exp_mask_bits<UIntT>();
+  const UIntT frac_mask = fp_frac_mask_bits<UIntT>();
+  const UIntT exp_all_ones = exp_mask >> fp_frac_bits_count<UIntT>();
+  const UIntT op1_bits = op1_bits_in ^ sign_mask;
+
+  if (fp_is_signaling_nan_bits(op1_bits)) {
+    fpsr_bits |= kFpsrIoc;
+    return fp_quiet_nan_bits(op1_bits);
+  }
+  if (fp_is_signaling_nan_bits(op2_bits)) {
+    fpsr_bits |= kFpsrIoc;
+    return fp_quiet_nan_bits(op2_bits);
+  }
+  if (fp_is_nan_bits(op1_bits)) {
+    return op1_bits;
+  }
+  if (fp_is_nan_bits(op2_bits)) {
+    return op2_bits;
+  }
+
+  const bool sign1 = (op1_bits & sign_mask) != 0u;
+  const bool sign2 = (op2_bits & sign_mask) != 0u;
+  const UIntT exp1 = (op1_bits & exp_mask) >> fp_frac_bits_count<UIntT>();
+  const UIntT exp2 = (op2_bits & exp_mask) >> fp_frac_bits_count<UIntT>();
+  const UIntT frac1 = op1_bits & frac_mask;
+  const UIntT frac2 = op2_bits & frac_mask;
+  const bool inf1 = exp1 == exp_all_ones && frac1 == 0u;
+  const bool inf2 = exp2 == exp_all_ones && frac2 == 0u;
+  const bool zero1 = (op1_bits & ~sign_mask) == 0u;
+  const bool zero2 = (op2_bits & ~sign_mask) == 0u;
+
+  if ((inf1 && zero2) || (zero1 && inf2)) {
+    return fp_one_point_five_bits<UIntT>();
+  }
+  if (inf1 || inf2) {
+    return fp_inf_bits<UIntT>(sign1 ^ sign2);
+  }
+
+  const FloatT op1 = std::bit_cast<FloatT>(op1_bits);
+  const FloatT op2 = std::bit_cast<FloatT>(op2_bits);
+  const long double numerator_exact = static_cast<long double>(op1) * static_cast<long double>(op2) + 3.0L;
+  if (numerator_exact == 0.0L) {
+    return fp_zero_bits<UIntT>((fpcr_mode & 0x3u) == 2u);
+  }
+  const FloatT numerator = std::fma(op1, op2, static_cast<FloatT>(3.0));
+  return std::bit_cast<UIntT>(std::ldexp(numerator, -1));
+}
+
+template <typename UIntT>
+UIntT fp_recip_exponent_bits(UIntT bits, std::uint64_t& fpsr_bits) {
+  static_assert(sizeof(UIntT) == 4u || sizeof(UIntT) == 8u);
+  fpsr_bits = 0u;
+  const UIntT sign = bits & fp_sign_mask_bits<UIntT>();
+  const UIntT exp_mask = fp_exp_mask_bits<UIntT>();
+  const std::uint32_t frac_bits = fp_frac_bits_count<UIntT>();
+  const UIntT exp_all_ones = exp_mask >> frac_bits;
+  const UIntT exp = (bits & exp_mask) >> frac_bits;
+  const UIntT max_exp = exp_all_ones - 1u;
+
+  if (fp_is_nan_bits(bits)) {
+    if (fp_is_signaling_nan_bits(bits)) {
+      fpsr_bits |= kFpsrIoc;
+    }
+    return fp_quiet_nan_bits(bits);
+  }
+
+  const UIntT result_exp = (exp == 0u) ? max_exp : ((~exp) & exp_all_ones);
+  return sign | (result_exp << frac_bits);
 }
 
 std::uint64_t fp32_to_fp64_bits(std::uint32_t bits, std::uint64_t& fpsr_bits) {
@@ -4590,6 +4844,27 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     }
     return value;
   };
+  const auto fp_round_int_bits = [&](auto bits, auto round_fn, bool exact) {
+    using UIntT = decltype(bits);
+    using FloatT = std::conditional_t<sizeof(UIntT) == 4u, float, double>;
+    std::uint64_t fpsr_bits = 0u;
+    if (fp_is_signaling_nan_bits(bits)) {
+      fpsr_bits |= kFpsrIoc;
+      return std::pair<UIntT, std::uint64_t>{fp_quiet_nan_bits(bits), fpsr_bits};
+    }
+    if (fp_is_nan_bits(bits) || fp_is_inf_bits(bits) || (bits & ~fp_sign_mask_bits<UIntT>()) == 0u) {
+      return std::pair<UIntT, std::uint64_t>{bits, fpsr_bits};
+    }
+    const FloatT value = std::bit_cast<FloatT>(bits);
+    FloatT rounded = round_fn(value);
+    if (rounded == static_cast<FloatT>(0.0)) {
+      rounded = std::copysign(static_cast<FloatT>(0.0), value);
+    }
+    if (exact && rounded != value) {
+      fpsr_bits |= kFpsrIxc;
+    }
+    return std::pair<UIntT, std::uint64_t>{std::bit_cast<UIntT>(rounded), fpsr_bits};
+  };
 
   // Minimal AdvSIMD/FP support for libc/busybox string routines.
   if ((insn & 0xBF20FC00u) == 0x0E003C00u) { // UMOV/MOV (lane to general)
@@ -5212,6 +5487,58 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
+  if ((insn & 0xBFA0FC00u) == 0x0E20FC00u || // FRECPS (vector)
+      (insn & 0xBFA0FC00u) == 0x0EA0FC00u) { // FRSQRTS (vector)
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const bool is_rsqrt = (insn & 0x00800000u) != 0u;
+    const std::uint32_t fpcr_mode = static_cast<std::uint32_t>((sysregs_.fpcr() >> 22) & 0x3u);
+    std::uint32_t esize_bits = 0u;
+    std::uint32_t lanes = 0u;
+    if (!vector_fp_shape(insn, esize_bits, lanes)) {
+      return false;
+    }
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0u, 0u};
+    std::uint64_t fpsr_bits = 0u;
+    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+      if (esize_bits == 32u) {
+        std::uint64_t lane_fpsr = 0u;
+        const std::uint32_t result = is_rsqrt
+            ? fp_rsqrt_step_fused_bits<std::uint32_t, float>(
+                  static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)),
+                  static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane)),
+                  fpcr_mode,
+                  lane_fpsr)
+            : fp_recip_step_fused_bits<std::uint32_t, float>(
+                  static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)),
+                  static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane)),
+                  fpcr_mode,
+                  lane_fpsr);
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 32u, lane, result);
+      } else {
+        std::uint64_t lane_fpsr = 0u;
+        const std::uint64_t result = is_rsqrt
+            ? fp_rsqrt_step_fused_bits<std::uint64_t, double>(
+                  vector_get_elem(lhs, 64u, lane),
+                  vector_get_elem(rhs, 64u, lane),
+                  fpcr_mode,
+                  lane_fpsr)
+            : fp_recip_step_fused_bits<std::uint64_t, double>(
+                  vector_get_elem(lhs, 64u, lane),
+                  vector_get_elem(rhs, 64u, lane),
+                  fpcr_mode,
+                  lane_fpsr);
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 64u, lane, result);
+      }
+    }
+    sysregs_.fp_or_fpsr(fpsr_bits);
+    qregs_[rd] = dst;
+    return true;
+  }
+
   if ((insn & 0x9F20FC00u) == 0x0E20FC00u) { // FDIV (vector)
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
     std::uint32_t esize_bits = 0;
@@ -5659,7 +5986,12 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
             }
             case 0x0EA0F800u: result_bits = std::bit_cast<std::uint32_t>(std::fabs(std::bit_cast<float>(value_bits))); break;
             case 0x2EA0F800u: result_bits = std::bit_cast<std::uint32_t>(-std::bit_cast<float>(value_bits)); break;
-            case 0x2EA1F800u: result_bits = std::bit_cast<std::uint32_t>(std::sqrt(std::bit_cast<float>(value_bits))); break;
+            case 0x2EA1F800u: {
+              std::uint64_t lane_fpsr = 0u;
+              result_bits = fp_sqrt_bits<std::uint32_t, float>(value_bits, lane_fpsr);
+              fpsr_bits |= lane_fpsr;
+              break;
+            }
             default: return false;
           }
           vector_set_elem(dst, 32u, lane, result_bits);
@@ -5682,7 +6014,12 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
             }
             case 0x0EE0F800u: result_bits = std::bit_cast<std::uint64_t>(std::fabs(std::bit_cast<double>(value_bits))); break;
             case 0x2EE0F800u: result_bits = std::bit_cast<std::uint64_t>(-std::bit_cast<double>(value_bits)); break;
-            case 0x2EE1F800u: result_bits = std::bit_cast<std::uint64_t>(std::sqrt(std::bit_cast<double>(value_bits))); break;
+            case 0x2EE1F800u: {
+              std::uint64_t lane_fpsr = 0u;
+              result_bits = fp_sqrt_bits<std::uint64_t, double>(value_bits, lane_fpsr);
+              fpsr_bits |= lane_fpsr;
+              break;
+            }
             default: return false;
           }
           vector_set_elem(dst, 64u, lane, result_bits);
@@ -5715,43 +6052,48 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
       const auto src = qregs_[rn];
       std::array<std::uint64_t, 2> dst = {0, 0};
       const std::uint32_t fpcr_mode = static_cast<std::uint32_t>((sysregs_.fpcr() >> 22) & 0x3u);
+      const bool exact = opcode == 0x2E219800u || opcode == 0x2E619800u;
+      std::uint64_t fpsr_bits = 0u;
       for (std::uint32_t lane = 0; lane < lanes; ++lane) {
         if (esize_bits == 32u) {
-          const float value = std::bit_cast<float>(static_cast<std::uint32_t>(vector_get_elem(src, 32u, lane)));
-          float result = value;
+          const std::uint32_t value_bits = static_cast<std::uint32_t>(vector_get_elem(src, 32u, lane));
+          std::pair<std::uint32_t, std::uint64_t> rounded = {value_bits, 0u};
           switch (opcode) {
-            case 0x0E218800u: result = fp_round_ties_even(value); break;
-            case 0x0EA18800u: result = std::ceil(value); break;
-            case 0x0E219800u: result = std::floor(value); break;
-            case 0x0EA19800u: result = std::trunc(value); break;
-            case 0x2E218800u: result = fp_round_ties_away(value); break;
+            case 0x0E218800u: rounded = fp_round_int_bits(value_bits, fp_round_ties_even, exact); break;
+            case 0x0EA18800u: rounded = fp_round_int_bits(value_bits, static_cast<float (*)(float)>(std::ceil), exact); break;
+            case 0x0E219800u: rounded = fp_round_int_bits(value_bits, static_cast<float (*)(float)>(std::floor), exact); break;
+            case 0x0EA19800u: rounded = fp_round_int_bits(value_bits, static_cast<float (*)(float)>(std::trunc), exact); break;
+            case 0x2E218800u: rounded = fp_round_int_bits(value_bits, fp_round_ties_away, exact); break;
             case 0x2E219800u:
             case 0x2EA19800u:
-              result = fp_round_by_mode(value, fpcr_mode);
+              rounded = fp_round_int_bits(value_bits, [&](float v) { return fp_round_by_mode(v, fpcr_mode); }, exact);
               break;
             default:
               return false;
           }
-          vector_set_elem(dst, 32u, lane, std::bit_cast<std::uint32_t>(result));
+          fpsr_bits |= rounded.second;
+          vector_set_elem(dst, 32u, lane, rounded.first);
         } else {
-          const double value = std::bit_cast<double>(vector_get_elem(src, 64u, lane));
-          double result = value;
+          const std::uint64_t value_bits = vector_get_elem(src, 64u, lane);
+          std::pair<std::uint64_t, std::uint64_t> rounded = {value_bits, 0u};
           switch (opcode) {
-            case 0x0E618800u: result = fp_round_ties_even(value); break;
-            case 0x0EE18800u: result = std::ceil(value); break;
-            case 0x0E619800u: result = std::floor(value); break;
-            case 0x0EE19800u: result = std::trunc(value); break;
-            case 0x2E618800u: result = fp_round_ties_away(value); break;
+            case 0x0E618800u: rounded = fp_round_int_bits(value_bits, fp_round_ties_even, exact); break;
+            case 0x0EE18800u: rounded = fp_round_int_bits(value_bits, static_cast<double (*)(double)>(std::ceil), exact); break;
+            case 0x0E619800u: rounded = fp_round_int_bits(value_bits, static_cast<double (*)(double)>(std::floor), exact); break;
+            case 0x0EE19800u: rounded = fp_round_int_bits(value_bits, static_cast<double (*)(double)>(std::trunc), exact); break;
+            case 0x2E618800u: rounded = fp_round_int_bits(value_bits, fp_round_ties_away, exact); break;
             case 0x2E619800u:
             case 0x2EE19800u:
-              result = fp_round_by_mode(value, fpcr_mode);
+              rounded = fp_round_int_bits(value_bits, [&](double v) { return fp_round_by_mode(v, fpcr_mode); }, exact);
               break;
             default:
               return false;
           }
-          vector_set_elem(dst, 64u, lane, std::bit_cast<std::uint64_t>(result));
+          fpsr_bits |= rounded.second;
+          vector_set_elem(dst, 64u, lane, rounded.first);
         }
       }
+      sysregs_.fp_or_fpsr(fpsr_bits);
       qregs_[rd] = dst;
       return true;
     }
@@ -6228,99 +6570,204 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     case 0x1E21C000u: { // FSQRT Sd/Dd, Sn/Dn
       const std::uint32_t rn_fp = (insn >> 5) & 0x1Fu;
       const std::uint32_t ftype = (insn >> 22) & 0x3u;
+      std::uint64_t fpsr_bits = 0u;
       if (ftype == 0u) {
-        write_fp32(rd, std::sqrt(read_fp32(rn_fp)));
+        const std::uint32_t result = fp_sqrt_bits<std::uint32_t, float>(
+            static_cast<std::uint32_t>(qregs_[rn_fp][0]),
+            fpsr_bits);
+        sysregs_.fp_or_fpsr(fpsr_bits);
+        qregs_[rd][0] = result;
+        qregs_[rd][1] = 0u;
         return true;
       }
       if (ftype == 1u) {
-        write_fp64(rd, std::sqrt(read_fp64(rn_fp)));
+        const std::uint64_t result = fp_sqrt_bits<std::uint64_t, double>(qregs_[rn_fp][0], fpsr_bits);
+        sysregs_.fp_or_fpsr(fpsr_bits);
+        qregs_[rd][0] = result;
+        qregs_[rd][1] = 0u;
         return true;
       }
       return false;
     }
-    case 0x5EA1D800u: { // FRECPE Sd, Sn
+    case 0x5E21F800u: { // FRECPX Sd/Dd, Sn/Dn
+      std::uint64_t fpsr_bits = 0u;
+      const std::uint32_t ftype = (insn >> 22) & 0x3u;
+      if (ftype == 2u) {
+        const std::uint32_t result = fp_recip_exponent_bits<std::uint32_t>(
+            static_cast<std::uint32_t>(qregs_[rn][0]),
+            fpsr_bits);
+        sysregs_.fp_or_fpsr(fpsr_bits);
+        qregs_[rd][0] = result;
+        qregs_[rd][1] = 0u;
+        return true;
+      }
+      if (ftype == 3u) {
+        const std::uint64_t result = fp_recip_exponent_bits<std::uint64_t>(qregs_[rn][0], fpsr_bits);
+        sysregs_.fp_or_fpsr(fpsr_bits);
+        qregs_[rd][0] = result;
+        qregs_[rd][1] = 0u;
+        return true;
+      }
+      return false;
+    }
+    case 0x5E22FC00u: // FRECPS Sd/Dd, Sn/Dm
+    case 0x5EA2FC00u: { // FRSQRTS Sd/Dd, Sn/Dm
+      const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+      const bool is_rsqrt = (insn & 0x00800000u) != 0u;
+      const std::uint32_t fpcr_mode = static_cast<std::uint32_t>((sysregs_.fpcr() >> 22) & 0x3u);
+      std::uint64_t fpsr_bits = 0u;
+      const std::uint32_t ftype = (insn >> 22) & 0x3u;
+      if (ftype == 2u) {
+        const std::uint32_t lhs = static_cast<std::uint32_t>(qregs_[rn][0]);
+        const std::uint32_t rhs = static_cast<std::uint32_t>(qregs_[rm][0]);
+        const std::uint32_t result = is_rsqrt
+            ? fp_rsqrt_step_fused_bits<std::uint32_t, float>(lhs, rhs, fpcr_mode, fpsr_bits)
+            : fp_recip_step_fused_bits<std::uint32_t, float>(lhs, rhs, fpcr_mode, fpsr_bits);
+        sysregs_.fp_or_fpsr(fpsr_bits);
+        qregs_[rd][0] = result;
+        qregs_[rd][1] = 0u;
+        return true;
+      }
+      if (ftype == 3u) {
+        const std::uint64_t lhs = qregs_[rn][0];
+        const std::uint64_t rhs = qregs_[rm][0];
+        const std::uint64_t result = is_rsqrt
+            ? fp_rsqrt_step_fused_bits<std::uint64_t, double>(lhs, rhs, fpcr_mode, fpsr_bits)
+            : fp_recip_step_fused_bits<std::uint64_t, double>(lhs, rhs, fpcr_mode, fpsr_bits);
+        sysregs_.fp_or_fpsr(fpsr_bits);
+        qregs_[rd][0] = result;
+        qregs_[rd][1] = 0u;
+        return true;
+      }
+      return false;
+    }
+    case 0x5E21D800u: { // FRECPE Sd/Dd, Sn/Dn
       std::uint64_t fpsr_bits = 0u;
       const std::uint32_t mode = static_cast<std::uint32_t>((sysregs_.fpcr() >> 22) & 0x3u);
-      const std::uint32_t result = fp_recip_estimate_bits<std::uint32_t>(
-          static_cast<std::uint32_t>(qregs_[rn][0]),
-          mode,
-          fpsr_bits);
-      sysregs_.fp_or_fpsr(fpsr_bits);
-      qregs_[rd][0] = result;
-      qregs_[rd][1] = 0u;
-      return true;
+      const std::uint32_t ftype = (insn >> 22) & 0x3u;
+      if (ftype == 2u) {
+        const std::uint32_t result = fp_recip_estimate_bits<std::uint32_t>(
+            static_cast<std::uint32_t>(qregs_[rn][0]),
+            mode,
+            fpsr_bits);
+        sysregs_.fp_or_fpsr(fpsr_bits);
+        qregs_[rd][0] = result;
+        qregs_[rd][1] = 0u;
+        return true;
+      }
+      if (ftype == 3u) {
+        const std::uint64_t result = fp_recip_estimate_bits<std::uint64_t>(qregs_[rn][0], mode, fpsr_bits);
+        sysregs_.fp_or_fpsr(fpsr_bits);
+        qregs_[rd][0] = result;
+        qregs_[rd][1] = 0u;
+        return true;
+      }
+      return false;
     }
-    case 0x5EE1D800u: { // FRECPE Dd, Dn
+    case 0x7E21D800u: { // FRSQRTE Sd/Dd, Sn/Dn
       std::uint64_t fpsr_bits = 0u;
-      const std::uint32_t mode = static_cast<std::uint32_t>((sysregs_.fpcr() >> 22) & 0x3u);
-      const std::uint64_t result = fp_recip_estimate_bits<std::uint64_t>(qregs_[rn][0], mode, fpsr_bits);
-      sysregs_.fp_or_fpsr(fpsr_bits);
-      qregs_[rd][0] = result;
-      qregs_[rd][1] = 0u;
-      return true;
-    }
-    case 0x7EA1D800u: { // FRSQRTE Sd, Sn
-      std::uint64_t fpsr_bits = 0u;
-      const std::uint32_t result = fp_rsqrt_estimate_bits<std::uint32_t>(
-          static_cast<std::uint32_t>(qregs_[rn][0]),
-          fpsr_bits);
-      sysregs_.fp_or_fpsr(fpsr_bits);
-      qregs_[rd][0] = result;
-      qregs_[rd][1] = 0u;
-      return true;
-    }
-    case 0x7EE1D800u: { // FRSQRTE Dd, Dn
-      std::uint64_t fpsr_bits = 0u;
-      const std::uint64_t result = fp_rsqrt_estimate_bits<std::uint64_t>(qregs_[rn][0], fpsr_bits);
-      sysregs_.fp_or_fpsr(fpsr_bits);
-      qregs_[rd][0] = result;
-      qregs_[rd][1] = 0u;
-      return true;
+      const std::uint32_t ftype = (insn >> 22) & 0x3u;
+      if (ftype == 2u) {
+        const std::uint32_t result = fp_rsqrt_estimate_bits<std::uint32_t>(
+            static_cast<std::uint32_t>(qregs_[rn][0]),
+            fpsr_bits);
+        sysregs_.fp_or_fpsr(fpsr_bits);
+        qregs_[rd][0] = result;
+        qregs_[rd][1] = 0u;
+        return true;
+      }
+      if (ftype == 3u) {
+        const std::uint64_t result = fp_rsqrt_estimate_bits<std::uint64_t>(qregs_[rn][0], fpsr_bits);
+        sysregs_.fp_or_fpsr(fpsr_bits);
+        qregs_[rd][0] = result;
+        qregs_[rd][1] = 0u;
+        return true;
+      }
+      return false;
     }
   }
 
   switch (insn & 0xFF3FFC00u) {
     case 0x1E244000u: // FRINTN
       if (((insn >> 22) & 0x3u) == 0u) {
-        write_fp32(rd, fp_round_ties_even(read_fp32(rn)));
+        const auto rounded = fp_round_int_bits(static_cast<std::uint32_t>(qregs_[rn][0]), fp_round_ties_even, false);
+        sysregs_.fp_or_fpsr(rounded.second);
+        qregs_[rd][0] = rounded.first;
+        qregs_[rd][1] = 0u;
       } else if (((insn >> 22) & 0x3u) == 1u) {
-        write_fp64(rd, fp_round_ties_even(read_fp64(rn)));
+        const auto rounded = fp_round_int_bits(qregs_[rn][0], fp_round_ties_even, false);
+        sysregs_.fp_or_fpsr(rounded.second);
+        qregs_[rd][0] = rounded.first;
+        qregs_[rd][1] = 0u;
       } else {
         return false;
       }
       return true;
     case 0x1E24C000u: // FRINTP
       if (((insn >> 22) & 0x3u) == 0u) {
-        write_fp32(rd, std::ceil(read_fp32(rn)));
+        const auto rounded = fp_round_int_bits(
+            static_cast<std::uint32_t>(qregs_[rn][0]),
+            static_cast<float (*)(float)>(std::ceil),
+            false);
+        sysregs_.fp_or_fpsr(rounded.second);
+        qregs_[rd][0] = rounded.first;
+        qregs_[rd][1] = 0u;
       } else if (((insn >> 22) & 0x3u) == 1u) {
-        write_fp64(rd, std::ceil(read_fp64(rn)));
+        const auto rounded = fp_round_int_bits(qregs_[rn][0], static_cast<double (*)(double)>(std::ceil), false);
+        sysregs_.fp_or_fpsr(rounded.second);
+        qregs_[rd][0] = rounded.first;
+        qregs_[rd][1] = 0u;
       } else {
         return false;
       }
       return true;
     case 0x1E254000u: // FRINTM
       if (((insn >> 22) & 0x3u) == 0u) {
-        write_fp32(rd, std::floor(read_fp32(rn)));
+        const auto rounded = fp_round_int_bits(
+            static_cast<std::uint32_t>(qregs_[rn][0]),
+            static_cast<float (*)(float)>(std::floor),
+            false);
+        sysregs_.fp_or_fpsr(rounded.second);
+        qregs_[rd][0] = rounded.first;
+        qregs_[rd][1] = 0u;
       } else if (((insn >> 22) & 0x3u) == 1u) {
-        write_fp64(rd, std::floor(read_fp64(rn)));
+        const auto rounded = fp_round_int_bits(qregs_[rn][0], static_cast<double (*)(double)>(std::floor), false);
+        sysregs_.fp_or_fpsr(rounded.second);
+        qregs_[rd][0] = rounded.first;
+        qregs_[rd][1] = 0u;
       } else {
         return false;
       }
       return true;
     case 0x1E25C000u: // FRINTZ
       if (((insn >> 22) & 0x3u) == 0u) {
-        write_fp32(rd, std::trunc(read_fp32(rn)));
+        const auto rounded = fp_round_int_bits(
+            static_cast<std::uint32_t>(qregs_[rn][0]),
+            static_cast<float (*)(float)>(std::trunc),
+            false);
+        sysregs_.fp_or_fpsr(rounded.second);
+        qregs_[rd][0] = rounded.first;
+        qregs_[rd][1] = 0u;
       } else if (((insn >> 22) & 0x3u) == 1u) {
-        write_fp64(rd, std::trunc(read_fp64(rn)));
+        const auto rounded = fp_round_int_bits(qregs_[rn][0], static_cast<double (*)(double)>(std::trunc), false);
+        sysregs_.fp_or_fpsr(rounded.second);
+        qregs_[rd][0] = rounded.first;
+        qregs_[rd][1] = 0u;
       } else {
         return false;
       }
       return true;
     case 0x1E264000u: // FRINTA
       if (((insn >> 22) & 0x3u) == 0u) {
-        write_fp32(rd, fp_round_ties_away(read_fp32(rn)));
+        const auto rounded = fp_round_int_bits(static_cast<std::uint32_t>(qregs_[rn][0]), fp_round_ties_away, false);
+        sysregs_.fp_or_fpsr(rounded.second);
+        qregs_[rd][0] = rounded.first;
+        qregs_[rd][1] = 0u;
       } else if (((insn >> 22) & 0x3u) == 1u) {
-        write_fp64(rd, fp_round_ties_away(read_fp64(rn)));
+        const auto rounded = fp_round_int_bits(qregs_[rn][0], fp_round_ties_away, false);
+        sysregs_.fp_or_fpsr(rounded.second);
+        qregs_[rd][0] = rounded.first;
+        qregs_[rd][1] = 0u;
       } else {
         return false;
       }
@@ -6328,9 +6775,21 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     case 0x1E274000u: { // FRINTX
       const std::uint32_t mode = static_cast<std::uint32_t>((sysregs_.fpcr() >> 22) & 0x3u);
       if (((insn >> 22) & 0x3u) == 0u) {
-        write_fp32(rd, fp_round_by_mode(read_fp32(rn), mode));
+        const auto rounded = fp_round_int_bits(
+            static_cast<std::uint32_t>(qregs_[rn][0]),
+            [&](float v) { return fp_round_by_mode(v, mode); },
+            true);
+        sysregs_.fp_or_fpsr(rounded.second);
+        qregs_[rd][0] = rounded.first;
+        qregs_[rd][1] = 0u;
       } else if (((insn >> 22) & 0x3u) == 1u) {
-        write_fp64(rd, fp_round_by_mode(read_fp64(rn), mode));
+        const auto rounded = fp_round_int_bits(
+            qregs_[rn][0],
+            [&](double v) { return fp_round_by_mode(v, mode); },
+            true);
+        sysregs_.fp_or_fpsr(rounded.second);
+        qregs_[rd][0] = rounded.first;
+        qregs_[rd][1] = 0u;
       } else {
         return false;
       }
@@ -6339,9 +6798,21 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     case 0x1E27C000u: { // FRINTI
       const std::uint32_t mode = static_cast<std::uint32_t>((sysregs_.fpcr() >> 22) & 0x3u);
       if (((insn >> 22) & 0x3u) == 0u) {
-        write_fp32(rd, fp_round_by_mode(read_fp32(rn), mode));
+        const auto rounded = fp_round_int_bits(
+            static_cast<std::uint32_t>(qregs_[rn][0]),
+            [&](float v) { return fp_round_by_mode(v, mode); },
+            false);
+        sysregs_.fp_or_fpsr(rounded.second);
+        qregs_[rd][0] = rounded.first;
+        qregs_[rd][1] = 0u;
       } else if (((insn >> 22) & 0x3u) == 1u) {
-        write_fp64(rd, fp_round_by_mode(read_fp64(rn), mode));
+        const auto rounded = fp_round_int_bits(
+            qregs_[rn][0],
+            [&](double v) { return fp_round_by_mode(v, mode); },
+            false);
+        sysregs_.fp_or_fpsr(rounded.second);
+        qregs_[rd][0] = rounded.first;
+        qregs_[rd][1] = 0u;
       } else {
         return false;
       }

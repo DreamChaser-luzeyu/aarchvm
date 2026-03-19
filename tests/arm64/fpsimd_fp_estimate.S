@@ -196,7 +196,7 @@ exp_frecpe_tiny:
 src_frsqrte_s:
     .word 0x40800000
 exp_frsqrte_s:
-    .word 0x3f348000
+    .word 0x3eff8000
 
 src_frsqrte_neg_d:
     .quad 0xbff0000000000000
@@ -217,7 +217,7 @@ exp_vec_frecpe_d:
 src_vec_frsqrte_s:
     .word 0x3f800000, 0x40800000, 0x7f800000, 0x00000000
 exp_vec_frsqrte_s:
-    .word 0x3f7f8000, 0x3f348000, 0x00000000, 0x7f800000
+    .word 0x3f7f8000, 0x3eff8000, 0x00000000, 0x7f800000
 
 src_vec_frsqrte_d:
     .quad 0x4000000000000000, 0xbff0000000000000

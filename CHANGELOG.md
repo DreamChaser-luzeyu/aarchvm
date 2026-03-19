@@ -1,3 +1,207 @@
+# 修改日志 2026-03-19 21:37
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程补齐 `FRINT*` 家族的 AArch64 `FPSR` 语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fp_roundint_flags.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_roundint_flags.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 新增统一的 round-to-integral helper：
+  - 对 `sNaN` 执行 quieting 并置 `FPSR.IOC`
+  - `qNaN` 透传
+  - `Inf` 与 `±0` 保持原值
+  - 对舍入到零的结果保留输入符号，生成 `-0.0`
+- 修正了标量与向量 `FRINTN/P/M/Z/A/I/X` 的标志行为：
+  - `FRINTX` 在结果与输入数值不相等时置 `FPSR.IXC`
+  - `FRINTI` 与 `FRINTN/P/M/Z/A` 不再错误地产生 `IXC`
+  - 向量路径逐 lane 聚合 `IOC/IXC`
+- 新增裸机单测 [tests/arm64/fp_roundint_flags.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_roundint_flags.S)：
+  - 覆盖标量与向量
+  - 覆盖 `FRINTN/FRINTX/FRINTI`
+  - 覆盖 `sNaN/qNaN`
+  - 覆盖 `FRINTX` 的 `IXC`
+  - 覆盖舍入为零时的负零符号
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 180s tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_roundint_flags.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_scalar_misc.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_fp_misc_rounding.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 2400s tests/arm64/run_all.sh`
+- `timeout 1200s tests/linux/run_functional_suite.sh`
+- `timeout 1200s tests/linux/run_functional_suite_smp.sh`
+- 结果：全部通过。
+
+# 修改日志 2026-03-19 21:27
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程补齐 `FSQRT` 的 AArch64 语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fp_sqrt_flags.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_sqrt_flags.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 新增统一 helper：
+  - `fp_is_inf_bits()`
+  - `fp_is_exact_sqrt_positive_finite_bits()`
+  - `fp_sqrt_bits()`
+- 修正标量与向量 `FSQRT` 的边界值与异常标志行为：
+  - `sNaN` 会 quiet 并置 `FPSR.IOC`
+  - `qNaN` 透传
+  - 负的非零有限数与 `-Inf` 返回 default NaN，并置 `FPSR.IOC`
+  - `-0.0` 保持为 `-0.0`
+  - `+Inf` 保持为 `+Inf`
+  - 非精确平方根如 `sqrt(2)` 现在会置 `FPSR.IXC`
+- 新增裸机单测 [tests/arm64/fp_sqrt_flags.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_sqrt_flags.S)：
+  - 覆盖标量/向量
+  - 覆盖单精度/双精度
+  - 覆盖 `sNaN`、负数 invalid、`-0.0`、`+Inf`、`sqrt(2)` 的 `IOC/IXC`
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 180s tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_sqrt_flags.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_scalar_misc.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 2400s tests/arm64/run_all.sh`
+- `timeout 1200s tests/linux/run_functional_suite.sh`
+- `timeout 1200s tests/linux/run_functional_suite_smp.sh`
+- 结果：全部通过。
+
+# 修改日志 2026-03-19 21:13
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程补齐 AArch64 标量浮点 reciprocal-exponent 语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fp_scalar_frecpx.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_scalar_frecpx.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 新增标量 `FRECPX`：
+  - `FRECPX Sd, Sn`
+  - `FRECPX Dd, Dn`
+- 新增 `fp_recip_exponent_bits<UIntT>()` helper，按手册 `FPRecpX()` 语义处理：
+  - qNaN 透传；
+  - sNaN quiet 后置 `FPSR.IOC`；
+  - 零与非规格化数返回 `sign:max_exp:0`；
+  - 规格化数与无穷大返回 `sign:NOT(exp):0`。
+- 修正了一处真实语义错误，而不是绕过问题：
+  - 之前指数翻转错误地与 `max_exp` 做与运算，会丢掉指数最低位；
+  - 现改为 `exp == 0 ? max_exp : ((~exp) & exp_all_ones)`，从而修正了如 `frecpx s?, 2.0` 这类输入的结果。
+- 新增裸机单测 [tests/arm64/fp_scalar_frecpx.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_scalar_frecpx.S)：
+  - 覆盖单精度与双精度；
+  - 覆盖 `1.0/2.0/0.0/subnormal/Inf/negative/sNaN`；
+  - 覆盖 `sNaN` quieting 与 `FPSR.IOC` 置位。
+
+## 本轮测试
+
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_scalar_frecpx.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 2400s tests/arm64/run_all.sh`
+- `timeout 1200s tests/linux/run_functional_suite.sh`
+- `timeout 1200s tests/linux/run_functional_suite_smp.sh`
+- 结果：全部通过。
+
+# 修改日志 2026-03-19 20:55
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程补齐 reciprocal / rsqrt step 家族的 AArch64 FP 语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fpsimd_fp_step.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fp_step.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 补上 `FRECPS/FRSQRTS`：
+  - 标量 `FRECPS Sd/Dd, Sn/Dm`
+  - 标量 `FRSQRTS Sd/Dd, Sn/Dm`
+  - 向量 `FRECPS Vd.2S/.4S/.2D, Vn, Vm`
+  - 向量 `FRSQRTS Vd.2S/.4S/.2D, Vn, Vm`
+- 新增 fused-step helper，按手册的 A64 `FPRecipStepFused/FPRSqrtStepFused` 语义实现：
+  - 第一个操作数先做符号翻转，再参与 NaN 处理；
+  - `sNaN` 会 quiet 并置 `FPSR.IOC`；
+  - `Inf x 0` / `0 x Inf` 的特殊值分别返回 `2.0` 与 `1.5`；
+  - 精确零结果按 `FPCR.RMode` 生成 `+0/-0`；
+  - 向量路径逐 lane 累积 `FPSR`。
+- 修正了一个真实的 decode bug，而不是绕过问题：
+  - vector `FRSQRTS` 与 `FDIV` 的掩码存在重叠，之前会落入错误的 `FDIV` 路径；
+  - 现在将更具体的 `FRECPS/FRSQRTS` 识别放在前面，并分别匹配 `FRECPS` 与 `FRSQRTS` 的 opcode 基值。
+- 新增裸机单测 [tests/arm64/fpsimd_fp_step.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fp_step.S)：
+  - 覆盖标量与向量、单精度与双精度；
+  - 覆盖 `sNaN` quieting、`FPSR.IOC`、`Inf x 0` 特例；
+  - 覆盖 `FPCR.RMode = RM` 时精确零结果的负零符号。
+
+## 本轮测试
+
+- 构建与定向验证：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 180s tests/arm64/build_tests.sh`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_fp_step.bin -load 0x0 -entry 0x0 -steps 400000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮补齐的是 `FRECPS/FRSQRTS` 的真实 ISA 行为，不是测试特判。
+- 新增裸机单测以及完整 bare-metal、Linux UMP、Linux SMP 回归均已通过。
+- 继续往下审时，当前仍值得优先关注的高置信度缺口主要还有：
+  - `FPCR` 更细的 `DN/FZ/AH` 影响；
+  - reciprocal / rsqrt 家族中尚未覆盖的 `FRECPX`；
+  - 更系统的 IEEE 例外位更新，尤其普通 FP 算术对 `IXC/UFC/OFC` 的一致性。
+
+# 修改日志 2026-03-19 20:33
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程补齐 reciprocal / rsqrt estimate 家族的一组真实 FP 语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fpsimd_fp_estimate.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fp_estimate.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 补上 `FRECPE/FRSQRTE`：
+  - 标量 `FRECPE Sd/Dd, Sn/Dn`
+  - 标量 `FRSQRTE Sd/Dd, Sn/Dn`
+  - 向量 `FRECPE Vd.2S/.4S/.2D, Vn`
+  - 向量 `FRSQRTE Vd.2S/.4S/.2D, Vn`
+- 新增 reciprocal / rsqrt estimate helper：
+  - 复用位级 NaN / Infinity / Zero 分类逻辑；
+  - 按 Arm ARM 的整数 estimate 伪码生成近似值；
+  - 正确处理 `sNaN` quieting 与 `FPSR.IOC`；
+  - 处理 tiny 输入、零、无穷大与负数输入的边界语义。
+- 修正了这组实现过程中的两个真实问题：
+  - 标量 `FRECPE/FRSQRTE` 最初使用了未掩码的 case 常量，导致 masked `switch` 无法命中；
+  - 标量 `ftype` 实际编码是 `2`/`3`，而不是 `0`/`1`。
+- 同时修正了测试期望中的一个错误：
+  - [tests/arm64/fpsimd_fp_estimate.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fp_estimate.S)
+  - `frsqrte s, 4.0f` 的正确期望值是 `0x3eff8000`，先前误写成了 `2.0f` 对应的结果。
+
+## 本轮测试
+
+- 构建与定向验证：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 180s tests/arm64/build_tests.sh`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_fp_estimate.bin -load 0x0 -entry 0x0 -steps 400000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮补齐的是 `FRECPE/FRSQRTE` 的真实 ISA 语义，不是测试特判。
+- 新增裸机单测以及完整 bare-metal、Linux UMP、Linux SMP 回归均已通过。
+- 继续往下审时，当前仍值得优先关注的高置信度缺口主要还有：
+  - reciprocal / rsqrt step 家族：`FRECPS/FRSQRTS`
+  - `FPCR` 更细的 `DN/FZ/AH` 影响
+  - 更系统的 IEEE 例外位更新，尤其普通 FP 算术对 `IXC/UFC/OFC` 的一致性
+
 # 修改日志 2026-03-19 19:52
 
 ## 本轮修改
