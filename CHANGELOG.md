@@ -1717,3 +1717,46 @@
   - `tests/arm64/run_all.sh`
   - `tests/linux/run_functional_suite.sh`
   - `tests/linux/run_functional_suite_smp.sh`
+
+# 修改日志 2026-03-19 13:58
+
+## 本轮修改
+
+- 继续审阅 `cpu.cpp` 中 AdvSIMD structured load/store 的实现，确认 whole-register 结构访存仍有明显语义缺口：
+  - `LD1/ST1` 仅覆盖了单寄存器与部分 2-register 读路径；
+  - `LD3/ST3/LD4/ST4` whole-register 变体完全缺失。
+- 在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中补齐 whole-register structured AdvSIMD 访存：
+  - `LD1/ST1` 2/3/4 consecutive-register 变体；
+  - 上述 `LD1/ST1` 的 post-index 变体；
+  - `LD3/ST3` no-post 与 post-index；
+  - `LD4/ST4` no-post 与 post-index。
+- 把原先 `LD2/ST2` 的字节交织路径抽象成通用 helper，统一了：
+  - 顺序 whole-register 结构访存；
+  - 交织/反交织的 `LDn/STn` 字节搬运路径。
+- 新增裸机单测 [tests/arm64/fpsimd_structured_ls_more.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_structured_ls_more.S)，覆盖：
+  - `LD1/ST1` 2/3/4-register whole-register 变体；
+  - `LD3/ST3/LD4/ST4` 的 8B/16B、no-post/post-index 组合；
+  - post-index 写回与内存布局检查。
+- 将新测试接入：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+
+## 本轮测试
+
+- 定向构建与新单测：
+  - `cmake --build build -j`
+  - `tests/arm64/build_tests.sh`
+  - `timeout 30s ./build/aarchvm -bin tests/arm64/out/fpsimd_structured_ls_more.bin -load 0x0 -entry 0x0 -steps 600000`
+- 完整裸机回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 900s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 1200s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 本轮补的是 Armv8-A/AdvSIMD 里一个真实且明确的 ISA 缺口，而不是测试特判：
+  - 修改前，最小 `LD3` 探针会落入未实现路径并最终异常停机；
+  - 修改后，新增 whole-register structured load/store 用例与完整主线回归均通过。
+- 这轮之后，whole-register 结构访存的覆盖显著更完整了，但我仍未把所有 lane/replicate 类 structured AdvSIMD 访存都补齐；那部分仍是后续继续审阅的候选缺口。

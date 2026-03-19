@@ -6445,35 +6445,69 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     }
     return false;
   };
-  const auto load_vec_ld2_bytes = [&](std::uint64_t addr, std::uint32_t vt, std::size_t reg_bytes) -> bool {
-    std::array<std::uint64_t, 2> first = {0, 0};
-    std::array<std::uint64_t, 2> second = {0, 0};
-    for (std::size_t lane = 0; lane < reg_bytes; ++lane) {
-      const auto a = mmu_read(addr + lane * 2u, 1u);
-      const auto b = mmu_read(addr + lane * 2u + 1u, 1u);
-      if (!a.has_value() || !b.has_value()) {
+  const auto load_vec_seq_bytes = [&](std::uint64_t addr,
+                                      std::uint32_t vt,
+                                      std::size_t reg_bytes,
+                                      std::size_t reg_count) -> bool {
+    for (std::size_t reg_idx = 0; reg_idx < reg_count; ++reg_idx) {
+      if (!load_vec(addr + reg_idx * reg_bytes, (vt + static_cast<std::uint32_t>(reg_idx)) & 0x1Fu, reg_bytes)) {
         return false;
       }
-      vector_set_elem(first, 8u, static_cast<std::uint32_t>(lane), *a & 0xFFu);
-      vector_set_elem(second, 8u, static_cast<std::uint32_t>(lane), *b & 0xFFu);
     }
-    qregs_[vt] = first;
-    qregs_[(vt + 1u) & 0x1Fu] = second;
     return true;
   };
-  const auto store_vec_st2_bytes = [&](std::uint64_t addr, std::uint32_t vt, std::size_t reg_bytes) -> bool {
-    const auto first = qregs_[vt];
-    const auto second = qregs_[(vt + 1u) & 0x1Fu];
-    for (std::size_t lane = 0; lane < reg_bytes; ++lane) {
-      if (!mmu_write(addr + lane * 2u, vector_get_elem(first, 8u, static_cast<std::uint32_t>(lane)) & 0xFFu, 1u) ||
-          !mmu_write(addr + lane * 2u + 1u, vector_get_elem(second, 8u, static_cast<std::uint32_t>(lane)) & 0xFFu, 1u)) {
+  const auto store_vec_seq_bytes = [&](std::uint64_t addr,
+                                       std::uint32_t vt,
+                                       std::size_t reg_bytes,
+                                       std::size_t reg_count) -> bool {
+    for (std::size_t reg_idx = 0; reg_idx < reg_count; ++reg_idx) {
+      if (!store_vec(addr + reg_idx * reg_bytes, (vt + static_cast<std::uint32_t>(reg_idx)) & 0x1Fu, reg_bytes)) {
         return false;
+      }
+    }
+    return true;
+  };
+  const auto load_vec_struct_bytes = [&](std::uint64_t addr,
+                                         std::uint32_t vt,
+                                         std::size_t reg_bytes,
+                                         std::size_t reg_count) -> bool {
+    std::array<std::array<std::uint64_t, 2>, 4> regs{};
+    for (std::size_t lane = 0; lane < reg_bytes; ++lane) {
+      for (std::size_t reg_idx = 0; reg_idx < reg_count; ++reg_idx) {
+        const auto value = mmu_read(addr + lane * reg_count + reg_idx, 1u);
+        if (!value.has_value()) {
+          return false;
+        }
+        vector_set_elem(regs[reg_idx], 8u, static_cast<std::uint32_t>(lane), *value & 0xFFu);
+      }
+    }
+    for (std::size_t reg_idx = 0; reg_idx < reg_count; ++reg_idx) {
+      qregs_[(vt + static_cast<std::uint32_t>(reg_idx)) & 0x1Fu] = regs[reg_idx];
+    }
+    return true;
+  };
+  const auto store_vec_struct_bytes = [&](std::uint64_t addr,
+                                          std::uint32_t vt,
+                                          std::size_t reg_bytes,
+                                          std::size_t reg_count) -> bool {
+    std::array<std::array<std::uint64_t, 2>, 4> regs{};
+    for (std::size_t reg_idx = 0; reg_idx < reg_count; ++reg_idx) {
+      regs[reg_idx] = qregs_[(vt + static_cast<std::uint32_t>(reg_idx)) & 0x1Fu];
+    }
+    for (std::size_t lane = 0; lane < reg_bytes; ++lane) {
+      for (std::size_t reg_idx = 0; reg_idx < reg_count; ++reg_idx) {
+        if (!mmu_write(addr + lane * reg_count + reg_idx,
+                       vector_get_elem(regs[reg_idx], 8u, static_cast<std::uint32_t>(lane)) & 0xFFu,
+                       1u)) {
+          return false;
+        }
       }
     }
     return true;
   };
 
-  // Minimal SIMD&FP memory subset used by the current libc/busybox path.
+  // SIMD&FP memory subset, including whole-register structured load/store
+  // forms needed by user-space code generation and AdvSIMD compliance tests.
   if ((insn & 0xFFC00000u) == 0x3D800000u || (insn & 0xFFC00000u) == 0x3DC00000u ||
       (insn & 0xFFC00000u) == 0x3D000000u || (insn & 0xFFC00000u) == 0x3D400000u ||
       (insn & 0xFFC00000u) == 0x7D000000u || (insn & 0xFFC00000u) == 0x7D400000u ||
@@ -6634,11 +6668,143 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     return true;
   }
 
+  if ((insn & 0xBFFFFC00u) == 0x0C40A000u) { // LD1 {Vt.8B/16B,Vt2.8B/16B}, [Xn|SP]
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::size_t reg_bytes = q ? 16u : 8u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    if (!load_vec_seq_bytes(addr, rt, reg_bytes, 2u)) {
+      data_abort(addr);
+    }
+    return true;
+  }
+
+  if ((insn & 0xBFFFFC00u) == 0x0C00A000u) { // ST1 {Vt.8B/16B,Vt2.8B/16B}, [Xn|SP]
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::size_t reg_bytes = q ? 16u : 8u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    if (!store_vec_seq_bytes(addr, rt, reg_bytes, 2u)) {
+      data_abort(addr);
+    }
+    return true;
+  }
+
+  if ((insn & 0xBFFFFC00u) == 0x0CDFA000u) { // LD1 {Vt.8B/16B,Vt2.8B/16B}, [Xn|SP], #imm
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::size_t reg_bytes = q ? 16u : 8u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    if (!load_vec_seq_bytes(addr, rt, reg_bytes, 2u)) {
+      data_abort(addr);
+      return true;
+    }
+    set_sp_or_reg(rn, addr + reg_bytes * 2u, false);
+    return true;
+  }
+
+  if ((insn & 0xBFFFFC00u) == 0x0C9FA000u) { // ST1 {Vt.8B/16B,Vt2.8B/16B}, [Xn|SP], #imm
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::size_t reg_bytes = q ? 16u : 8u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    if (!store_vec_seq_bytes(addr, rt, reg_bytes, 2u)) {
+      data_abort(addr);
+      return true;
+    }
+    set_sp_or_reg(rn, addr + reg_bytes * 2u, false);
+    return true;
+  }
+
+  if ((insn & 0xBFFFFC00u) == 0x0C406000u) { // LD1 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B}, [Xn|SP]
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::size_t reg_bytes = q ? 16u : 8u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    if (!load_vec_seq_bytes(addr, rt, reg_bytes, 3u)) {
+      data_abort(addr);
+    }
+    return true;
+  }
+
+  if ((insn & 0xBFFFFC00u) == 0x0C006000u) { // ST1 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B}, [Xn|SP]
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::size_t reg_bytes = q ? 16u : 8u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    if (!store_vec_seq_bytes(addr, rt, reg_bytes, 3u)) {
+      data_abort(addr);
+    }
+    return true;
+  }
+
+  if ((insn & 0xBFFFFC00u) == 0x0CDF6000u) { // LD1 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B}, [Xn|SP], #imm
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::size_t reg_bytes = q ? 16u : 8u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    if (!load_vec_seq_bytes(addr, rt, reg_bytes, 3u)) {
+      data_abort(addr);
+      return true;
+    }
+    set_sp_or_reg(rn, addr + reg_bytes * 3u, false);
+    return true;
+  }
+
+  if ((insn & 0xBFFFFC00u) == 0x0C9F6000u) { // ST1 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B}, [Xn|SP], #imm
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::size_t reg_bytes = q ? 16u : 8u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    if (!store_vec_seq_bytes(addr, rt, reg_bytes, 3u)) {
+      data_abort(addr);
+      return true;
+    }
+    set_sp_or_reg(rn, addr + reg_bytes * 3u, false);
+    return true;
+  }
+
+  if ((insn & 0xBFFFFC00u) == 0x0C402000u) { // LD1 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B,Vt4.8B/16B}, [Xn|SP]
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::size_t reg_bytes = q ? 16u : 8u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    if (!load_vec_seq_bytes(addr, rt, reg_bytes, 4u)) {
+      data_abort(addr);
+    }
+    return true;
+  }
+
+  if ((insn & 0xBFFFFC00u) == 0x0C002000u) { // ST1 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B,Vt4.8B/16B}, [Xn|SP]
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::size_t reg_bytes = q ? 16u : 8u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    if (!store_vec_seq_bytes(addr, rt, reg_bytes, 4u)) {
+      data_abort(addr);
+    }
+    return true;
+  }
+
+  if ((insn & 0xBFFFFC00u) == 0x0CDF2000u) { // LD1 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B,Vt4.8B/16B}, [Xn|SP], #imm
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::size_t reg_bytes = q ? 16u : 8u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    if (!load_vec_seq_bytes(addr, rt, reg_bytes, 4u)) {
+      data_abort(addr);
+      return true;
+    }
+    set_sp_or_reg(rn, addr + reg_bytes * 4u, false);
+    return true;
+  }
+
+  if ((insn & 0xBFFFFC00u) == 0x0C9F2000u) { // ST1 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B,Vt4.8B/16B}, [Xn|SP], #imm
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::size_t reg_bytes = q ? 16u : 8u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    if (!store_vec_seq_bytes(addr, rt, reg_bytes, 4u)) {
+      data_abort(addr);
+      return true;
+    }
+    set_sp_or_reg(rn, addr + reg_bytes * 4u, false);
+    return true;
+  }
+
   if ((insn & 0xBFFFFC00u) == 0x0C408000u) { // LD2 {Vt.8B/16B,Vt2.8B/16B}, [Xn|SP]
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::size_t reg_bytes = q ? 16u : 8u;
     const std::uint64_t addr = sp_or_reg(rn);
-    if (!load_vec_ld2_bytes(addr, rt, reg_bytes)) {
+    if (!load_vec_struct_bytes(addr, rt, reg_bytes, 2u)) {
       data_abort(addr);
     }
     return true;
@@ -6648,7 +6814,7 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::size_t reg_bytes = q ? 16u : 8u;
     const std::uint64_t addr = sp_or_reg(rn);
-    if (!store_vec_st2_bytes(addr, rt, reg_bytes)) {
+    if (!store_vec_struct_bytes(addr, rt, reg_bytes, 2u)) {
       data_abort(addr);
     }
     return true;
@@ -6658,7 +6824,7 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::size_t reg_bytes = q ? 16u : 8u;
     const std::uint64_t addr = sp_or_reg(rn);
-    if (!load_vec_ld2_bytes(addr, rt, reg_bytes)) {
+    if (!load_vec_struct_bytes(addr, rt, reg_bytes, 2u)) {
       data_abort(addr);
       return true;
     }
@@ -6670,7 +6836,7 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::size_t reg_bytes = q ? 16u : 8u;
     const std::uint64_t addr = sp_or_reg(rn);
-    if (!store_vec_st2_bytes(addr, rt, reg_bytes)) {
+    if (!store_vec_struct_bytes(addr, rt, reg_bytes, 2u)) {
       data_abort(addr);
       return true;
     }
@@ -6678,14 +6844,91 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     return true;
   }
 
-  if ((insn & 0xBFFFFC00u) == 0x0C40A000u) { // LD1 {Vt.8B,Vt2.8B}/{Vt.16B,Vt2.16B}, [Xn|SP]
+  if ((insn & 0xBFFFFC00u) == 0x0C404000u) { // LD3 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B}, [Xn|SP]
     const bool q = ((insn >> 30) & 1u) != 0u;
-    const std::size_t size = q ? 16u : 8u;
-    const std::uint32_t rt2 = (rt + 1u) & 0x1Fu;
+    const std::size_t reg_bytes = q ? 16u : 8u;
     const std::uint64_t addr = sp_or_reg(rn);
-    if (!load_vec(addr, rt, size) || !load_vec(addr + size, rt2, size)) {
+    if (!load_vec_struct_bytes(addr, rt, reg_bytes, 3u)) {
       data_abort(addr);
     }
+    return true;
+  }
+
+  if ((insn & 0xBFFFFC00u) == 0x0C004000u) { // ST3 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B}, [Xn|SP]
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::size_t reg_bytes = q ? 16u : 8u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    if (!store_vec_struct_bytes(addr, rt, reg_bytes, 3u)) {
+      data_abort(addr);
+    }
+    return true;
+  }
+
+  if ((insn & 0xBFFFFC00u) == 0x0CDF4000u) { // LD3 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B}, [Xn|SP], #imm
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::size_t reg_bytes = q ? 16u : 8u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    if (!load_vec_struct_bytes(addr, rt, reg_bytes, 3u)) {
+      data_abort(addr);
+      return true;
+    }
+    set_sp_or_reg(rn, addr + reg_bytes * 3u, false);
+    return true;
+  }
+
+  if ((insn & 0xBFFFFC00u) == 0x0C9F4000u) { // ST3 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B}, [Xn|SP], #imm
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::size_t reg_bytes = q ? 16u : 8u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    if (!store_vec_struct_bytes(addr, rt, reg_bytes, 3u)) {
+      data_abort(addr);
+      return true;
+    }
+    set_sp_or_reg(rn, addr + reg_bytes * 3u, false);
+    return true;
+  }
+
+  if ((insn & 0xBFFFFC00u) == 0x0C400000u) { // LD4 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B,Vt4.8B/16B}, [Xn|SP]
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::size_t reg_bytes = q ? 16u : 8u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    if (!load_vec_struct_bytes(addr, rt, reg_bytes, 4u)) {
+      data_abort(addr);
+    }
+    return true;
+  }
+
+  if ((insn & 0xBFFFFC00u) == 0x0C000000u) { // ST4 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B,Vt4.8B/16B}, [Xn|SP]
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::size_t reg_bytes = q ? 16u : 8u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    if (!store_vec_struct_bytes(addr, rt, reg_bytes, 4u)) {
+      data_abort(addr);
+    }
+    return true;
+  }
+
+  if ((insn & 0xBFFFFC00u) == 0x0CDF0000u) { // LD4 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B,Vt4.8B/16B}, [Xn|SP], #imm
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::size_t reg_bytes = q ? 16u : 8u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    if (!load_vec_struct_bytes(addr, rt, reg_bytes, 4u)) {
+      data_abort(addr);
+      return true;
+    }
+    set_sp_or_reg(rn, addr + reg_bytes * 4u, false);
+    return true;
+  }
+
+  if ((insn & 0xBFFFFC00u) == 0x0C9F0000u) { // ST4 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B,Vt4.8B/16B}, [Xn|SP], #imm
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::size_t reg_bytes = q ? 16u : 8u;
+    const std::uint64_t addr = sp_or_reg(rn);
+    if (!store_vec_struct_bytes(addr, rt, reg_bytes, 4u)) {
+      data_abort(addr);
+      return true;
+    }
+    set_sp_or_reg(rn, addr + reg_bytes * 4u, false);
     return true;
   }
 

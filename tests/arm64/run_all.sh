@@ -131,6 +131,7 @@ run fpsimd_arith_shift_perm.bin 300000
 run fpsimd_fp_vector.bin 400000
 run fpsimd_more_perm_fp.bin 400000
 run fpsimd_structured_ls.bin 400000
+run_expect fpsimd_structured_ls_more.bin 600000 Y
 run fpsimd_widen_sat.bin 400000
 run cpacr_fp_trap.bin 300000
 run cpacr_fp_mem_trap.bin 300000
