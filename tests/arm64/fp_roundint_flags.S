@@ -88,6 +88,48 @@ _start:
     cmp  x2, #1
     b.ne fail
 
+    mov  x3, #(1 << 25)
+    msr  fpcr, x3
+    isb
+    msr  fpsr, xzr
+    adr  x22, src_vec_dn
+    ldr  q13, [x22]
+    frintn v12.4s, v13.4s
+    str  q12, [x21, #64]
+    add  x0, x21, #64
+    adr  x1, exp_vec_dn
+    bl   check16
+    mrs  x2, fpsr
+    cmp  x2, #1
+    b.ne fail
+
+    mov  x3, #(1 << 24)
+    msr  fpcr, x3
+    isb
+    msr  fpsr, xzr
+    adr  x22, src_neg_sub_s
+    ldr  s15, [x22]
+    frintx s14, s15
+    str  s14, [x21, #80]
+    add  x0, x21, #80
+    adr  x1, exp_neg_zero_s
+    bl   check4
+    mrs  x2, fpsr
+    cmp  x2, #0x80
+    b.ne fail
+
+    msr  fpsr, xzr
+    adr  x22, src_vec_fz
+    ldr  q17, [x22]
+    frinti v16.4s, v17.4s
+    str  q16, [x21, #96]
+    add  x0, x21, #96
+    adr  x1, exp_vec_fz
+    bl   check16
+    mrs  x2, fpsr
+    cmp  x2, #0x80
+    b.ne fail
+
     movz x0, #'I'
     str  x0, [x20]
     brk  #0
@@ -152,5 +194,20 @@ src_vec_i:
 exp_vec_i:
     .quad 0x4000000000000000, 0x7ff8123456789abc
 
+src_vec_dn:
+    .word 0x7fc12345, 0x7f812345, 0x3f99999a, 0x80000001
+exp_vec_dn:
+    .word 0x7fc00000, 0x7fc00000, 0x3f800000, 0x80000000
+
+src_neg_sub_s:
+    .word 0x80000001
+exp_neg_zero_s:
+    .word 0x80000000
+
+src_vec_fz:
+    .word 0x80000001, 0x00000001, 0x00000000, 0x80000000
+exp_vec_fz:
+    .word 0x80000000, 0x00000000, 0x00000000, 0x80000000
+
 dst:
-    .space 64
+    .space 112

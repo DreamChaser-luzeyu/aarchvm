@@ -3150,3 +3150,138 @@
   - 其余 FP helper 中 `FZ`/`DN`/异常位映射是否还存在边角不一致；
   - 尚未系统覆盖的 `FRINT*`、compare/misc 与 NaN payload/sign 传播细节；
   - 如果未来宣告 `FEAT_AFP`，则需要单独补 `FPCR.AH` 的真实语义，而不是沿用当前“等价于 AH=0”的行为。
+
+# 修改日志 2026-03-20 12:11
+
+## 本轮修改
+
+- 扩充 `FRECPX` 标量裸机单测覆盖：
+  - [tests/arm64/fp_scalar_frecpx.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_scalar_frecpx.S)
+- 新增覆盖的程序可见边界：
+  - `qNaN` 在 `DN=0` 下保持 payload、`FPSR` 不置位；
+  - `qNaN/sNaN` 在 `DN=1` 下返回 default NaN，且仅 `sNaN` 置 `FPSR.IOC`；
+  - `FZ=1` 下负 subnormal 输入会被视为带符号零，结果保留符号并置 `FPSR.IDC`。
+- 这轮没有修改模拟器执行语义；新增的是此前缺失的回归覆盖，用于把 `FRECPX` 的 `DN/FZ/NaN/符号` 边界纳入常规验证。
+
+## 本轮测试
+
+- 局部 ISA 语义探针：
+  - 使用 `qemu-aarch64` 对 `FRECPX` 的 `qNaN/sNaN`、`DN`、`FZ`、`±0/±Inf/负 subnormal` 行为做 userspace 局部核对。
+  - 注意：这里只把 `qemu-aarch64` 当单条 ISA 语义探针，不作为 system 级结论。
+- 定向构建：
+  - `timeout 300s tests/arm64/build_tests.sh`
+- 定向验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_scalar_frecpx.bin -load 0x0 -entry 0x0 -steps 500000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1800s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮暂未发现 `FRECPX` 的真实实现错误；当前 helper 行为与这批新核对的边界语义一致。
+- 但此前 `FRECPX` 的回归只覆盖了常规 normal/zero/subnormal/Inf/sNaN 路径，没有把 `DN` 和 `FZ` 下的若干关键边界固定住，因此仍存在未来回归时无报警退化的风险。
+- 这轮补完后，`FRECPX` 在 `NaN payload/default-NaN`、`IOC/IDC`、以及符号保持这几条线上都有了稳定回归。
+
+# 修改日志 2026-03-20 12:18
+
+## 本轮修改
+
+- 扩充 `FP estimate` 家族裸机单测覆盖：
+  - [tests/arm64/fpsimd_fp_estimate.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fp_estimate.S)
+- 新增覆盖的程序可见边界：
+  - `FPCR.DN=1` 下向量 `FRECPE` 对 `{qNaN, sNaN, +Inf, -0.0}` 的返回值与异常位；
+  - `FPCR.DN=1` 下向量 `FRSQRTE` 对 `{qNaN, sNaN}` 的 default-NaN 行为与 `IOC`；
+  - 标量 `FRECPE/FRSQRTE` 对 `-0.0` 的 `-Inf` 结果与 `DZC`。
+- 这轮没有修改模拟器执行语义；新增的是此前缺失的 correctness coverage，用于把 `estimate` 家族在 `DN/NaN/负零` 这些边界固定进常规回归。
+
+## 本轮测试
+
+- 局部 ISA 语义探针：
+  - 使用 `qemu-aarch64` 对上述 `FRECPE/FRSQRTE` 边界做 userspace 局部核对。
+  - 注意：这里只把 `qemu-aarch64` 当单条 ISA 语义探针，不作为 system 级结论。
+- 定向构建：
+  - `timeout 300s tests/arm64/build_tests.sh`
+- 定向验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_fp_estimate.bin -load 0x0 -entry 0x0 -steps 500000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1800s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮暂未发现 `FRECPE/FRSQRTE estimate` helper 的真实实现错误；当前行为与这批新核对的边界一致。
+- 真实收获是把原先未被回归固定住的 `DN/default-NaN/FPSR` 边界补齐，降低未来回归无告警退化的风险。
+
+# 修改日志 2026-03-20 12:27
+
+## 本轮修改
+
+- 扩充 `FRINT* / round-int` 家族裸机单测覆盖：
+  - [tests/arm64/fp_roundint_flags.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_roundint_flags.S)
+- 新增覆盖的程序可见边界：
+  - `FPCR.DN=1` 下向量 `FRINTN` 对 `{qNaN, sNaN, normal, negative subnormal}` 的结果与 `FPSR.IOC`；
+  - `FPCR.FZ=1` 下标量 `FRINTX` 对负 subnormal 的 signed-zero 结果与 `FPSR.IDC`；
+  - `FPCR.FZ=1` 下向量 `FRINTI` 对正负 subnormal / signed zero 的逐 lane 结果与聚合 `FPSR.IDC`。
+- 这轮没有修改模拟器执行语义；新增的是此前缺失的 correctness coverage，用于把 `round-int` 家族在 `DN/FZ/NaN/subnormal` 这些边界固定进常规回归。
+
+## 本轮测试
+
+- 局部 ISA 语义探针：
+  - 使用 `qemu-aarch64` 对上述 `FRINTN/FRINTX/FRINTI` 边界做 userspace 局部核对。
+  - 注意：这里只把 `qemu-aarch64` 当单条 ISA 语义探针，不作为 system 级结论。
+- 定向构建：
+  - `timeout 300s tests/arm64/build_tests.sh`
+- 定向验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_roundint_flags.bin -load 0x0 -entry 0x0 -steps 500000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1800s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮暂未发现 `FRINT*` 执行 helper 的真实实现错误；当前行为与这批新核对的边界一致。
+- 当前收获仍然是补齐 correctness net，把此前未被持续验证的 `DN/default-NaN` 与 `FZ/subnormal/signed-zero` 行为固定住。
+
+# 修改日志 2026-03-20 12:35
+
+## 本轮修改
+
+- 扩充 `AdvSIMD pairwise/reduce` 家族裸机单测覆盖：
+  - [tests/arm64/fpsimd_fp_pairwise.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fp_pairwise.S)
+  - [tests/arm64/fpsimd_fp_reducev.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fp_reducev.S)
+- 新增覆盖的程序可见边界：
+  - `FMAXP/FMINP/FMAXV/FMINV/FMAXNMV/FMINNMV` 在 `qNaN + sNaN` 混合时的 NaN 选择顺序与 payload 保留；
+  - `FPCR.DN=1` 下 pairwise / reduce 对 all-NaN 与 mixed-NaN+numeric 的结果与 `FPSR.IOC`；
+  - `FPCR.FZ=1` 下 reduce numeric min/max 对 subnormal 刷零后的 signed-zero 结果与 `FPSR.IDC`。
+- 这轮没有修改模拟器执行语义；新增的是此前缺失的 correctness coverage，用于把 `pairwise/reduce` 路径中最容易悄悄退化的 `DN/FZ/NaN payload/signed-zero` 边界固定进常规回归。
+
+## 本轮测试
+
+- 局部 ISA 语义探针：
+  - 使用 `qemu-aarch64` 对 `FMAXP/FMINP/FMAXV/FMINV/FMAXNMV/FMINNMV` 的 NaN 顺序、`DN`、`FZ` 边界做 userspace 局部核对。
+  - 注意：这里只把 `qemu-aarch64` 当单条 ISA 语义探针，不作为 system 级结论。
+- 定向构建：
+  - `timeout 300s tests/arm64/build_tests.sh`
+- 定向验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_fp_pairwise.bin -load 0x0 -entry 0x0 -steps 500000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_fp_reducev.bin -load 0x0 -entry 0x0 -steps 500000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1800s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮暂未发现 `pairwise/reduce` helper 的真实执行语义错误；当前行为与这批新核对的边界一致。
+- 真实收获仍然是补网：把此前没有被系统固定住的 `sNaN 优先级 / payload 传播 / DN default-NaN / FZ signed-zero` 规则纳入常规回归。

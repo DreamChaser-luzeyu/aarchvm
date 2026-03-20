@@ -95,6 +95,62 @@ _start:
     cmp  x2, #1
     b.ne fail7
 
+    mov  x24, #(1 << 25)
+    msr  fpcr, x24
+    isb
+
+    msr  fpsr, xzr
+    adr  x22, src_dn_nan_mixed
+    ldr  q13, [x22]
+    fmaxv s14, v13.4s
+    str  s14, [x21, #32]
+    ldr  w2, [x21, #32]
+    ldr  w3, =0x7fc00000
+    cmp  w2, w3
+    b.ne fail8
+    mrs  x2, fpsr
+    cmp  x2, #1
+    b.ne fail8
+
+    msr  fpsr, xzr
+    fmaxnmv s15, v13.4s
+    str  s15, [x21, #36]
+    ldr  w2, [x21, #36]
+    ldr  w3, =0x00000001
+    cmp  w2, w3
+    b.ne fail9
+    mrs  x2, fpsr
+    cmp  x2, #1
+    b.ne fail9
+
+    mov  x24, #(1 << 24)
+    msr  fpcr, x24
+    isb
+
+    msr  fpsr, xzr
+    adr  x22, src_fz_clean
+    ldr  q16, [x22]
+    fmaxnmv s17, v16.4s
+    str  s17, [x21, #40]
+    ldr  w2, [x21, #40]
+    ldr  w3, =0x00000000
+    cmp  w2, w3
+    b.ne failA
+    mrs  x2, fpsr
+    cmp  x2, #0x80
+    b.ne failA
+
+    msr  fpsr, xzr
+    fminnmv s18, v16.4s
+    str  s18, [x21, #44]
+    ldr  w2, [x21, #44]
+    ldr  w3, =0x80000000
+    cmp  w2, w3
+    b.ne failB
+    mrs  x2, fpsr
+    cmp  x2, #0x80
+    b.ne failB
+
     movz x0, #'R'
     str  x0, [x20]
     brk  #0
@@ -119,6 +175,18 @@ fail6:
     b done
 fail7:
     movz x0, #'7'
+    b done
+fail8:
+    movz x0, #'8'
+    b done
+fail9:
+    movz x0, #'9'
+    b done
+failA:
+    movz x0, #'A'
+    b done
+failB:
+    movz x0, #'B'
 done:
     str  x0, [x20]
     brk  #0
@@ -135,6 +203,10 @@ src_qnan_prop:
     .word 0x3f800000, 0x7fc12345, 0x40e00000, 0x40200000
 src_snan:
     .word 0x3f800000, 0x7f812345, 0x40200000, 0x40800000
+src_dn_nan_mixed:
+    .word 0x7fc12345, 0x7f812345, 0x00000001, 0x80000001
+src_fz_clean:
+    .word 0x80000001, 0x00000001, 0x00000000, 0x80000000
 
 dst:
-    .space 32
+    .space 48

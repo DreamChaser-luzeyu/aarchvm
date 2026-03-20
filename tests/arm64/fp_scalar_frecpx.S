@@ -7,6 +7,8 @@ _start:
     movz x25, #0x0030, lsl #16
     msr  cpacr_el1, x25
     isb
+    msr  fpcr, xzr
+    isb
 
     msr  fpsr, xzr
     adr  x22, src_one_s
@@ -143,6 +145,114 @@ _start:
     adr  x1, exp_neg_d
     bl   check8
 
+    msr  fpsr, xzr
+    adr  x22, src_qnan_s
+    ldr  s29, [x22]
+    frecpx s28, s29
+    str  s28, [x21, #88]
+    movz x23, #'F'
+    add  x0, x21, #88
+    adr  x1, exp_qnan_s
+    bl   check4
+    mrs  x2, fpsr
+    cbnz x2, failF
+
+    msr  fpsr, xzr
+    adr  x22, src_qnan_d
+    ldr  d31, [x22]
+    frecpx d30, d31
+    str  d30, [x21, #96]
+    movz x23, #'G'
+    add  x0, x21, #96
+    adr  x1, exp_qnan_d
+    bl   check8
+    mrs  x2, fpsr
+    cbnz x2, failG
+
+    movz x24, #0x0200, lsl #16
+    msr  fpcr, x24
+    isb
+
+    msr  fpsr, xzr
+    adr  x22, src_qnan_s
+    ldr  s29, [x22]
+    frecpx s28, s29
+    str  s28, [x21, #104]
+    movz x23, #'H'
+    add  x0, x21, #104
+    adr  x1, exp_dn_nan_s
+    bl   check4
+    mrs  x2, fpsr
+    cbnz x2, failH
+
+    msr  fpsr, xzr
+    adr  x22, src_snan_s
+    ldr  s29, [x22]
+    frecpx s28, s29
+    str  s28, [x21, #108]
+    movz x23, #'I'
+    add  x0, x21, #108
+    adr  x1, exp_dn_nan_s
+    bl   check4
+    mrs  x2, fpsr
+    cmp  x2, #1
+    b.ne failI
+
+    msr  fpsr, xzr
+    adr  x22, src_qnan_d
+    ldr  d31, [x22]
+    frecpx d30, d31
+    str  d30, [x21, #112]
+    movz x23, #'J'
+    add  x0, x21, #112
+    adr  x1, exp_dn_nan_d
+    bl   check8
+    mrs  x2, fpsr
+    cbnz x2, failJ
+
+    msr  fpsr, xzr
+    adr  x22, src_snan_d
+    ldr  d31, [x22]
+    frecpx d30, d31
+    str  d30, [x21, #120]
+    movz x23, #'K'
+    add  x0, x21, #120
+    adr  x1, exp_dn_nan_d
+    bl   check8
+    mrs  x2, fpsr
+    cmp  x2, #1
+    b.ne failK
+
+    movz x24, #0x0100, lsl #16
+    msr  fpcr, x24
+    isb
+
+    msr  fpsr, xzr
+    adr  x22, src_negsub_s_fz
+    ldr  s29, [x22]
+    frecpx s28, s29
+    str  s28, [x21, #128]
+    movz x23, #'L'
+    add  x0, x21, #128
+    adr  x1, exp_negsub_s_fz
+    bl   check4
+    mrs  x2, fpsr
+    cmp  x2, #0x80
+    b.ne failL
+
+    msr  fpsr, xzr
+    adr  x22, src_negsub_d_fz
+    ldr  d31, [x22]
+    frecpx d30, d31
+    str  d30, [x21, #136]
+    movz x23, #'M'
+    add  x0, x21, #136
+    adr  x1, exp_negsub_d_fz
+    bl   check8
+    mrs  x2, fpsr
+    cmp  x2, #0x80
+    b.ne failM
+
     movz x0, #'X'
     str  x0, [x20]
     brk  #0
@@ -169,6 +279,30 @@ fail6:
     b done
 failD:
     movz x0, #'D'
+    b done
+failF:
+    movz x0, #'F'
+    b done
+failG:
+    movz x0, #'G'
+    b done
+failH:
+    movz x0, #'H'
+    b done
+failI:
+    movz x0, #'I'
+    b done
+failJ:
+    movz x0, #'J'
+    b done
+failK:
+    movz x0, #'K'
+    b done
+failL:
+    movz x0, #'L'
+    b done
+failM:
+    movz x0, #'M'
 done:
     str  x0, [x20]
     brk  #0
@@ -186,8 +320,13 @@ src_inf_s:   .word 0x7f800000
 exp_inf_s:   .word 0x00000000
 src_snan_s:  .word 0x7f812345
 exp_snan_s:  .word 0x7fc12345
+src_qnan_s:  .word 0x7fc12345
+exp_qnan_s:  .word 0x7fc12345
+exp_dn_nan_s: .word 0x7fc00000
 src_neg_s:   .word 0xbf800000
 exp_neg_s:   .word 0xc0000000
+src_negsub_s_fz: .word 0x80000001
+exp_negsub_s_fz: .word 0xff000000
 
 src_one_d:   .quad 0x3ff0000000000000
 exp_one_d:   .quad 0x4000000000000000
@@ -201,9 +340,14 @@ src_inf_d:   .quad 0x7ff0000000000000
 exp_inf_d:   .quad 0x0000000000000000
 src_snan_d:  .quad 0x7ff0123456789abc
 exp_snan_d:  .quad 0x7ff8123456789abc
+src_qnan_d:  .quad 0x7ff8123456789abc
+exp_qnan_d:  .quad 0x7ff8123456789abc
+exp_dn_nan_d: .quad 0x7ff8000000000000
 src_neg_d:   .quad 0xbff0000000000000
 exp_neg_d:   .quad 0xc000000000000000
+src_negsub_d_fz: .quad 0x8000000000000001
+exp_negsub_d_fz: .quad 0xffe0000000000000
 
     .balign 16
 dst:
-    .space 88
+    .space 144

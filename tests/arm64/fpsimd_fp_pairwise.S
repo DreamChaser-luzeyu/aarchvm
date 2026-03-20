@@ -81,6 +81,37 @@ _start:
     cmp  x2, #1
     b.ne fail6
 
+    msr  fpcr, xzr
+    msr  fpsr, xzr
+    adr  x22, src_nan_order_4s
+    ldr  q13, [x22]
+    ldr  q14, [x22]
+    fmaxp v12.4s, v13.4s, v14.4s
+    str  q12, [x21, #96]
+    add  x0, x21, #96
+    adr  x1, exp_nan_order_4s
+    bl   check16_7
+    mrs  x2, fpsr
+    cmp  x2, #1
+    b.ne fail7
+
+    mov  x24, #(1 << 25)
+    msr  fpcr, x24
+    isb
+    msr  fpsr, xzr
+    adr  x22, src_dn_nan_2d_a
+    ldr  q15, [x22]
+    adr  x22, src_dn_nan_2d_b
+    ldr  q16, [x22]
+    fminnmp v14.2d, v15.2d, v16.2d
+    str  q14, [x21, #112]
+    add  x0, x21, #112
+    adr  x1, exp_dn_nan_2d
+    bl   check16_8
+    mrs  x2, fpsr
+    cmp  x2, #1
+    b.ne fail8
+
     movz x0, #'Z'
     str  x0, [x20]
     brk  #0
@@ -151,6 +182,28 @@ check16_6:
     b.ne fail6
     ret
 
+check16_7:
+    ldr  x2, [x0]
+    ldr  x3, [x1]
+    cmp  x2, x3
+    b.ne fail7
+    ldr  x2, [x0, #8]
+    ldr  x3, [x1, #8]
+    cmp  x2, x3
+    b.ne fail7
+    ret
+
+check16_8:
+    ldr  x2, [x0]
+    ldr  x3, [x1]
+    cmp  x2, x3
+    b.ne fail8
+    ldr  x2, [x0, #8]
+    ldr  x3, [x1, #8]
+    cmp  x2, x3
+    b.ne fail8
+    ret
+
 fail1:
     movz x0, #'1'
     b done
@@ -168,6 +221,12 @@ fail5:
     b done
 fail6:
     movz x0, #'6'
+    b done
+fail7:
+    movz x0, #'7'
+    b done
+fail8:
+    movz x0, #'8'
 done:
     str  x0, [x20]
     brk  #0
@@ -216,5 +275,17 @@ src_minnmp_4s_b:
 exp_minnmp_4s:
     .word 0x7fc12345, 0xc0400000, 0x40000000, 0x3f000000
 
+src_nan_order_4s:
+    .word 0x7fc11111, 0x7f822222, 0x7f833333, 0x7fc44444
+exp_nan_order_4s:
+    .word 0x7fc22222, 0x7fc33333, 0x7fc22222, 0x7fc33333
+
+src_dn_nan_2d_a:
+    .quad 0x7ff8111111111111, 0x7ff0222222222222
+src_dn_nan_2d_b:
+    .quad 0x7ff8333333333333, 0x7ff0444444444444
+exp_dn_nan_2d:
+    .quad 0x7ff8000000000000, 0x7ff8000000000000
+
 dst:
-    .space 96
+    .space 128

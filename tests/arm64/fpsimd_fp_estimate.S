@@ -121,6 +121,65 @@ _start:
     cmp  x2, #1
     b.ne failA
 
+    mov  x24, #(1 << 25)
+    msr  fpcr, x24
+    isb
+
+    msr  fpsr, xzr
+    adr  x22, src_dn_vec_frecpe_s
+    ldr  q21, [x22]
+    frecpe v20.4s, v21.4s
+    str  q20, [x21, #112]
+    movz x23, #'B'
+    add  x0, x21, #112
+    adr  x1, exp_dn_vec_frecpe_s
+    bl   check16
+    mrs  x2, fpsr
+    cmp  x2, #3
+    b.ne failB
+
+    msr  fpsr, xzr
+    adr  x22, src_dn_vec_frsqrte_d
+    ldr  q23, [x22]
+    frsqrte v22.2d, v23.2d
+    str  q22, [x21, #128]
+    movz x23, #'C'
+    add  x0, x21, #128
+    adr  x1, exp_dn_vec_frsqrte_d
+    bl   check16
+    mrs  x2, fpsr
+    cmp  x2, #1
+    b.ne failC
+
+    msr  fpcr, xzr
+    isb
+
+    msr  fpsr, xzr
+    adr  x22, src_frecpe_negzero_s
+    ldr  s25, [x22]
+    frecpe s24, s25
+    str  s24, [x21, #144]
+    movz x23, #'D'
+    add  x0, x21, #144
+    adr  x1, exp_neg_inf_s
+    bl   check4
+    mrs  x2, fpsr
+    cmp  x2, #2
+    b.ne failD
+
+    msr  fpsr, xzr
+    adr  x22, src_frsqrte_negzero_s
+    ldr  s27, [x22]
+    frsqrte s26, s27
+    str  s26, [x21, #148]
+    movz x23, #'F'
+    add  x0, x21, #148
+    adr  x1, exp_neg_inf_s
+    bl   check4
+    mrs  x2, fpsr
+    cmp  x2, #2
+    b.ne failF
+
     movz x0, #'E'
     str  x0, [x20]
     brk  #0
@@ -167,6 +226,18 @@ fail8:
     b done
 failA:
     movz x0, #'A'
+    b done
+failB:
+    movz x0, #'B'
+    b done
+failC:
+    movz x0, #'C'
+    b done
+failD:
+    movz x0, #'D'
+    b done
+failF:
+    movz x0, #'F'
 done:
     str  x0, [x20]
     brk  #0
@@ -192,11 +263,17 @@ src_frecpe_tiny:
     .word 0x00010000
 exp_frecpe_tiny:
     .word 0x7f800000
+src_frecpe_negzero_s:
+    .word 0x80000000
+exp_neg_inf_s:
+    .word 0xff800000
 
 src_frsqrte_s:
     .word 0x40800000
 exp_frsqrte_s:
     .word 0x3eff8000
+src_frsqrte_negzero_s:
+    .word 0x80000000
 
 src_frsqrte_neg_d:
     .quad 0xbff0000000000000
@@ -224,5 +301,15 @@ src_vec_frsqrte_d:
 exp_vec_frsqrte_d:
     .quad 0x3fe6900000000000, 0x7ff8000000000000
 
+src_dn_vec_frecpe_s:
+    .word 0x7fc12345, 0x7f812345, 0x7f800000, 0x80000000
+exp_dn_vec_frecpe_s:
+    .word 0x7fc00000, 0x7fc00000, 0x00000000, 0xff800000
+
+src_dn_vec_frsqrte_d:
+    .quad 0x7ff8123456789abc, 0x7ff0123456789abc
+exp_dn_vec_frsqrte_d:
+    .quad 0x7ff8000000000000, 0x7ff8000000000000
+
 dst:
-    .space 112
+    .space 160
