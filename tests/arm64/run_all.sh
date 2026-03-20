@@ -10,6 +10,8 @@ cmake --build build -j
 
 tests/arm64/build_tests.sh
 
+export AARCHVM_BRK_MODE=halt
+
 run() {
   local bin="$1"
   local steps="$2"
@@ -27,6 +29,13 @@ run_expect() {
   local steps="$2"
   local expected="$3"
   test "$(./build/aarchvm -bin "tests/arm64/out/${bin}" -load 0x0 -entry 0x0 -steps "$steps" | tr -d '\r\n')" = "$expected"
+}
+
+run_expect_trap() {
+  local bin="$1"
+  local steps="$2"
+  local expected="$3"
+  test "$(AARCHVM_BRK_MODE=trap ./build/aarchvm -bin "tests/arm64/out/${bin}" -load 0x0 -entry 0x0 -steps "$steps" | tr -d '\r\n')" = "$expected"
 }
 
 run_expect instr_legacy_each.bin 3000000 E
@@ -101,6 +110,12 @@ test "$(./build/aarchvm -bin tests/arm64/out/el0_absent_pstate_features_undef.bi
 test "$(./build/aarchvm -bin tests/arm64/out/el0_eret_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'E'
 test "$(./build/aarchvm -bin tests/arm64/out/el0_hvc_smc_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'H'
 test "$(./build/aarchvm -bin tests/arm64/out/el1_hvc_smc_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'J'
+run_expect_trap brk_exception.bin 600000 B
+run_expect_trap hlt_undef.bin 600000 H
+test "$(./build/aarchvm -bin tests/arm64/out/pacm_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'M'
+test "$(./build/aarchvm -bin tests/arm64/out/flagm_sys_undef.bin -load 0x0 -entry 0x0 -steps 800000 | tr -d '\r\n')" = 'G'
+test "$(./build/aarchvm -bin tests/arm64/out/system_feature_absent_undef.bin -load 0x0 -entry 0x0 -steps 1200000 | tr -d '\r\n')" = 'W'
+test "$(./build/aarchvm -bin tests/arm64/out/dcps_drps_non_debug_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'D'
 test "$(./build/aarchvm -bin tests/arm64/out/illegal_state_return.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'I'
 test "$(./build/aarchvm -bin tests/arm64/out/special_pstate_regform.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'Y'
 test "$(./build/aarchvm -bin tests/arm64/out/el0_tlbi_cache_undef.bin -load 0x0 -entry 0x0 -steps 800000 | tr -d '\r\n')" = 'K'

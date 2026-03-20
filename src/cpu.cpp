@@ -36,6 +36,14 @@ bool debug_slow_mode_enabled() {
   return enabled;
 }
 
+bool brk_halt_mode_enabled() {
+  static const bool enabled = []() {
+    const char* value = std::getenv("AARCHVM_BRK_MODE");
+    return value != nullptr && std::strcmp(value, "halt") == 0;
+  }();
+  return enabled;
+}
+
 constexpr std::uint16_t kDecodedFlagSf = 1u << 0;
 constexpr std::uint16_t kDecodedFlagSetFlags = 1u << 1;
 constexpr std::uint16_t kDecodedFlagSub = 1u << 2;
@@ -3444,6 +3452,20 @@ bool Cpu::step() {
     }
     return true;
   }
+  if ((insn & 0xFFE0001Fu) == 0xD4A00001u ||  // DCPS1 #imm16
+      (insn & 0xFFE0001Fu) == 0xD4A00002u ||  // DCPS2 #imm16
+      (insn & 0xFFE0001Fu) == 0xD4A00003u) {  // DCPS3 #imm16
+    // The current model does not implement Debug state, so DCPS<n> is always
+    // UNDEFINED in the only architecturally reachable state (Non-debug).
+    enter_sync_exception(this_pc, 0x00u, 0u, false, 0u);
+    return true;
+  }
+  if (insn == 0xD6BF03E0u) { // DRPS
+    // DRPS is a Debug-state-only return path. Without Debug state support,
+    // Non-debug execution must observe it as UNDEFINED.
+    enter_sync_exception(this_pc, 0x00u, 0u, false, 0u);
+    return true;
+  }
   if ((insn & 0xFFE0001Fu) == 0xD4200000u) {
     if (trace_brk_) {
       std::cerr << "BRK: pc=0x" << std::hex << this_pc;
@@ -3461,8 +3483,16 @@ bool Cpu::step() {
       }
       std::cerr << std::dec << '\n';
     }
-    halted_ = true; // BRK
-    return false;
+    if (brk_halt_mode_enabled()) {
+      halted_ = true;
+      return false;
+    }
+    enter_sync_exception(this_pc, 0x3Cu, (insn >> 5) & 0xFFFFu, false, 0);
+    return true;
+  }
+  if ((insn & 0xFFE0001Fu) == 0xD4400000u) { // HLT #imm16
+    enter_sync_exception(this_pc, 0x00u, 0u, false, 0u);
+    return true;
   }
   if ((insn & 0xFFE0001Fu) == 0xD4000002u) { // HVC #imm16
     if (sysregs_.in_el0()) {
@@ -4425,9 +4455,13 @@ bool Cpu::exec_branch(std::uint32_t insn) {
 
 bool Cpu::exec_system(std::uint32_t insn) {
   // HINT instructions. Keep the architecturally visible wait/event semantics,
-  // but otherwise treat hint-space operations such as BTI/PAC/AUT as no-ops
-  // for the current minimal Linux bring-up model.
+  // but otherwise keep the current model aligned with the architected
+  // absent-feature behavior for each allocated hint encoding.
   if ((insn & 0xFFFFF01Fu) == 0xD503201Fu) {
+    const auto undefined_current_instruction = [&]() {
+      enter_sync_exception(pc_ - 4u, 0x00u, 0u, false, 0u);
+      return true;
+    };
     const auto trap_wfx = [&](std::uint32_t iss) {
       enter_sync_exception(pc_ - 4u, 0x01u, iss, false, 0u);
       return true;
@@ -4460,6 +4494,10 @@ bool Cpu::exec_system(std::uint32_t insn) {
     case 0x05u: // SEVL
       event_register_ = true;
       return true;
+    case 0x27u: // PACM
+      // FEAT_PAuth_LR is not implemented by the current model, so PACM must be
+      // UNDEFINED rather than a silently ignored hint.
+      return undefined_current_instruction();
     default:
       return true;
     }
@@ -4505,6 +4543,29 @@ bool Cpu::exec_system(std::uint32_t insn) {
                          0u);
     return true;
   };
+
+  // FEAT_FlagM / FEAT_FlagM2 are absent in the current model, so these
+  // system-encoding flag-manipulation instructions must be UNDEFINED rather
+  // than turning into EL0 system-access traps via the generic MSR/sysreg path.
+  if (insn == 0xD500401Fu ||  // CFINV
+      insn == 0xD500405Fu ||  // AXFLAG
+      insn == 0xD500403Fu) {  // XAFLAG
+    return undefined_current_instruction();
+  }
+
+  // Several optional extensions add architected system-encoding instructions
+  // that are UNDEFINED when the corresponding feature is absent. If we let
+  // them fall through to the generic MSR/sysreg path then EL0 execution is
+  // misreported as EC=0x18 system-access trap instead of EC=0 undefined.
+  if (insn == 0xD50330FFu ||                        // SB (FEAT_SB)
+      (insn & 0xFFFFFFE0u) == 0xD5031000u ||        // WFET Xt (FEAT_WFxT)
+      (insn & 0xFFFFFFE0u) == 0xD5031020u ||        // WFIT Xt (FEAT_WFxT)
+      (insn & 0xFFFFFFE0u) == 0xD50B7380u ||        // CFP RCTX, Xt (FEAT_SPECRES)
+      (insn & 0xFFFFFFE0u) == 0xD50B73A0u ||        // DVP RCTX, Xt (FEAT_SPECRES)
+      (insn & 0xFFFFFFE0u) == 0xD50B73C0u ||        // COSP RCTX, Xt (FEAT_SPECRES2)
+      (insn & 0xFFFFFFE0u) == 0xD50B73E0u) {        // CPP RCTX, Xt (FEAT_SPECRES)
+    return undefined_current_instruction();
+  }
 
   const auto el0_uci_enabled = [&]() {
     return !sysregs_.in_el0() || (sysregs_.sctlr_el1() & kSctlrEl1Uci) != 0u;

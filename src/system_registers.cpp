@@ -15,6 +15,11 @@ constexpr std::uint32_t SysReg(std::uint32_t op0,
 }
 
 constexpr std::uint64_t kSctlrEl1Span = 1ull << 23;
+constexpr std::uint64_t kIdAa64Dfr0El1DebugMinimal =
+    (0x0ull << 28) |  // CTX_CMPs: 1 context-aware breakpoint.
+    (0x1ull << 20) |  // WRPs: 2 watchpoints.
+    (0x1ull << 12) |  // BRPs: 2 breakpoints.
+    0x6ull;           // DebugVer: Armv8.0 debug architecture.
 
 } // namespace
 
@@ -29,7 +34,7 @@ void SystemRegisters::reset() {
   dczid_el0_ = 0x4ull;
   id_aa64pfr0_el1_ = 0x0000000000000011ull;
   id_aa64pfr1_el1_ = 0;
-  id_aa64dfr0_el1_ = 0;
+  id_aa64dfr0_el1_ = kIdAa64Dfr0El1DebugMinimal;
   id_aa64dfr1_el1_ = 0;
   id_aa64isar0_el1_ = 0x0000000000210000ull;
   id_aa64isar1_el1_ = 0;

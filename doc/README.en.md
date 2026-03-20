@@ -302,6 +302,9 @@ Common options:
 - `-decode <fast|slow>`: switch decode execution path, default is the fast path
 - `-fb-sdl <on|off>`: explicitly enable or disable the SDL framebuffer window
 
+Behavior-control environment variables:
+- `AARCHVM_BRK_MODE=trap|halt`: control how the emulator handles A64 `BRK`. The default is `trap`, which follows the architected Breakpoint Instruction exception model. `halt` keeps the historical bare-metal test behavior where `BRK` immediately stops the emulator; `tests/arm64/run_all.sh` exports this mode for legacy stop semantics.
+
 Interactive serial shortcut:
 - when stdin is a TTY, press `Ctrl+A`, then `x` to stop the emulator immediately
 - if `-snapshot-save <file>` is active, the final snapshot is still written during this exit path

@@ -1,3 +1,190 @@
+# 修改日志 2026-03-20 20:55
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮收的是一组 absent extension 的 system-encoding 指令在 EL0 下会被误分类为 `system access trap` 的问题：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/system_feature_absent_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/system_feature_absent_undef.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 审阅 ARM ARM 并对照现有解码后确认，当前模型未声明也未实现以下特性，因此相应指令在任意异常级的程序可见行为都必须是 `UNDEFINED`：
+  - `SB` (`FEAT_SB`)
+  - `WFET` / `WFIT` (`FEAT_WFxT`)
+  - `CFP RCTX` / `DVP RCTX` / `CPP RCTX` (`FEAT_SPECRES`)
+  - `COSP RCTX` (`FEAT_SPECRES2`)
+- 旧实现里，这些编码在 EL1 下通常会因为未命中已知 sysreg 写路径而最终落到未定义指令异常，但在 EL0 下会先被通用 `MSR sysreg` 访问控制逻辑拦住，错误地产生 `EC=0x18` 的 system access trap。
+- 这轮在 `exec_system()` 中把这组 absent-feature system encodings 显式建模为 `UNDEFINED`，从根上避免 EL0 误 trap。
+- 同时新增裸机单测 `system_feature_absent_undef`，覆盖：
+  - EL1 与 EL0 执行 `SB`
+  - EL1 与 EL0 执行 `WFET` / `WFIT`
+  - EL1 与 EL0 执行 `CFP RCTX` / `DVP RCTX` / `COSP RCTX` / `CPP RCTX`
+  - 统一校验 `ESR_EL1.EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`，并校验 `ELR_EL1` 指向 faulting instruction。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 120s ./build/aarchvm -bin tests/arm64/out/system_feature_absent_undef.bin -load 0x0 -entry 0x0 -steps 1200000`
+- `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_system_absent.log 2>&1'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_system_absent_ump.log 2>&1'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_system_absent_smp.log 2>&1'`
+- 结果：通过。
+
+# 修改日志 2026-03-20 20:40
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮收的是 `FlagM/FlagM2` 缺失时三条 system-encoding 指令的 EL0 可见语义：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/flagm_sys_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/flagm_sys_undef.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 审阅 ARM ARM 并对照现有解码后确认：
+  - `CFINV` 依赖 `FEAT_FlagM`；
+  - `AXFLAG` / `XAFLAG` 依赖 `FEAT_FlagM2`；
+  - 当前模型没有实现这些特性，也没有在 ID 寄存器中声明它们存在；
+  - 因此 guest 在任意异常级执行这三条指令时，程序可见行为都必须是 `UNDEFINED`。
+- 旧实现里，EL1 下这三条编码大多会因为“未命中已知 sysreg”最终落到通用未定义路径，但 EL0 下会先被通用 `MSR sysreg` 访问控制逻辑拦住，错误地产生 `EC=0x18` 的 system access trap。
+- 这轮将 `CFINV/AXFLAG/XAFLAG` 在 `exec_system()` 中显式建模为当前模型下的 `UNDEFINED`，避免它们在 EL0 被误分类为系统寄存器访问 trap。
+- 同时新增裸机单测 `flagm_sys_undef`，覆盖：
+  - EL1 执行 `CFINV`、`AXFLAG`、`XAFLAG`；
+  - EL0 执行 `CFINV`、`AXFLAG`、`XAFLAG`；
+  - 统一校验 `ESR_EL1.EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`，并校验 `ELR_EL1` 指向 faulting instruction。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 120s ./build/aarchvm -bin tests/arm64/out/flagm_sys_undef.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_flagm.log 2>&1'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_flagm_ump.log 2>&1'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_flagm_smp.log 2>&1'`
+- 结果：通过。
+
+# 修改日志 2026-03-20 20:26
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮收的是 hint 空间里 `PACM` 的程序可见语义边界：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/pacm_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/pacm_undef.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 审阅 ARM ARM 后确认，`PACM` 虽然编码位于 A64 hint 空间，但它不是“无条件可吞掉”的普通 hint：
+  - `PACM` 依赖 `FEAT_PAuth_LR`；
+  - 当前模型没有实现，也没有在 ID 寄存器中声明 `FEAT_PAuth_LR`；
+  - 因此 guest 执行 `PACM` 时，程序可见行为必须是 `UNDEFINED`，而不是静默 no-op。
+- 旧实现把整段 hint 空间里未专门处理的编码默认按 no-op 吞掉，这会把 `PACM` 错误地伪装成“可执行但无效果”。
+- 这轮把 `PACM` 从通用 hint/no-op 路径中摘出来，在当前模型下显式走 `EC=0` 的同步未定义指令异常。
+- 同时新增裸机单测 `pacm_undef`，覆盖：
+  - EL1 执行 `PACM`；
+  - EL0 执行 `PACM`；
+  - 校验 `ESR_EL1.EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`，并校验 `ELR_EL1` 指向 faulting instruction。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 120s ./build/aarchvm -bin tests/arm64/out/pacm_undef.bin -load 0x0 -entry 0x0 -steps 600000`
+- `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_pacm.log 2>&1'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_pacm_ump.log 2>&1'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_pacm_smp.log 2>&1'`
+- 结果：通过。
+
+# 修改日志 2026-03-20 20:10
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮收的是 debug system register 可见行为与 `ID_AA64DFR0_EL1` 声明不一致的问题：
+  - [src/system_registers.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/system_registers.cpp)
+  - [include/aarchvm/system_registers.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/system_registers.hpp)
+  - [tests/arm64/id_aa64_feature_regs.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/id_aa64_feature_regs.S)
+- 审阅代码时发现，当前模型已经向 guest 暴露了一组最小 debug/OS-lock sysreg：
+  - `MDSCR_EL1`
+  - `OSDLR_EL1` / `OSLAR_EL1` / `OSLSR_EL1`
+  - `DBGBVR<n>_EL1` / `DBGBCR<n>_EL1`
+  - `DBGWVR<n>_EL1` / `DBGWCR<n>_EL1`
+- 但 `ID_AA64DFR0_EL1` 之前仍返回全 0，这会让 guest 观察到“debug 架构 absent，但相关 sysreg 却可直接访问”的矛盾状态。
+- 这轮将 `ID_AA64DFR0_EL1` 调整为与当前最小实现一致的声明值：
+  - `DebugVer=0b0110`，即 Armv8.0 debug architecture；
+  - `BRPs=0b0001`，即 2 个断点；
+  - `WRPs=0b0001`，即 2 个观察点；
+  - `CTX_CMPs=0b0000`，即 1 个 context-aware breakpoint；
+  - 其它相关字段继续保持 0；
+  - `ID_AA64DFR1_EL1` 保持 0，表示没有扩展数量字段。
+- 同时扩充了现有的 `id_aa64_feature_regs` 裸机测试，把 `ID_AA64DFR0_EL1/ID_AA64DFR1_EL1` 的当前声明固定进回归。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 120s bash -lc 'v=$(./build/aarchvm -bin tests/arm64/out/id_aa64_feature_regs.bin -load 0x0 -entry 0x0 -steps 400000 | tr -d "\r\n"); printf "[%s]\n" "$v"; test "$v" = I'`
+- `timeout 120s bash -lc 'v=$(AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/instr_legacy_each.bin -load 0x0 -entry 0x0 -steps 3000000 | tr -d "\r\n"); printf "[%s]\n" "$v"; test "$v" = E'`
+- `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_20260320_dfr0_debug.log 2>&1'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_20260320_dfr0_debug.log 2>&1'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_smp_20260320_dfr0_debug.log 2>&1'`
+- 结果：通过。
+
+# 修改日志 2026-03-20 20:01
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮收的是 `debug/system` 边界里 `DCPS<n>/DRPS` 的 Non-debug 可见语义：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/dcps_drps_non_debug_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/dcps_drps_non_debug_undef.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 审阅 ARM ARM 后确认：
+  - `DCPS1/DCPS2/DCPS3` 只在 Debug state 下有定义；当前模型未实现 Debug state，因此 guest 在 Non-debug state 执行时必须观察到 `UNDEFINED`。
+  - `DRPS` 同样是 Debug-state-only 指令；在当前模型里对 guest 也必须表现为 `UNDEFINED`。
+- 旧实现虽然大多数情况下会因为“未命中任何解码路径”最终落到通用 `UNDEFINED`，但这条语义并没有被显式建模，也没有单测固定。
+- 这轮修改将这四个编码显式接入 system/exception 路径，统一走 `EC=0` 的同步未定义指令异常，并新增裸机单测覆盖：
+  - `dcps_drps_non_debug_undef`：依次执行 `DCPS1/DCPS2/DCPS3/DRPS`，校验 `ESR_EL1.EC=0`、`IL=1`、`ISS=0`、`ELR_EL1` 指向 faulting instruction、`FAR_EL1=0`。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 120s bash -lc 'v=$(./build/aarchvm -bin tests/arm64/out/dcps_drps_non_debug_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d "\r\n"); printf "[%s]\n" "$v"; test "$v" = D'`
+- `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_20260320_dcps_drps.log 2>&1'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_20260320_dcps_drps.log 2>&1'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_smp_20260320_dcps_drps.log 2>&1'`
+- 结果：通过。
+
+# 修改日志 2026-03-20 19:48
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮收的是 `trap / undef / no-op` 边界里 `BRK/HLT` 的程序可见语义：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/brk_exception.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/brk_exception.S)
+  - [tests/arm64/hlt_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/hlt_undef.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [doc/README.en.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/README.en.md)
+  - [doc/README.zh.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/README.zh.md)
+- 审阅 ARM ARM 后，这轮明确并固定了两条边界：
+  - `BRK #imm16` 默认不再直接停机，而是按架构要求进入 Breakpoint Instruction exception，`EC=0x3c`，`ISS[15:0]=imm16`，且返回地址保持在 `BRK` 指令本身；
+  - `HLT #imm16` 在当前没有 Debug state / halting debug 支持的模型下，按 `UNDEFINED` 处理，而不是伪装成可执行 no-op 或其它异常。
+- 为兼容现有大量把 `BRK` 当“测试结束指令”的裸机回归，这轮新增行为控制环境变量：
+  - `AARCHVM_BRK_MODE=trap|halt`；
+  - 默认值是 `trap`；
+  - `tests/arm64/run_all.sh` 导出 `AARCHVM_BRK_MODE=halt`，保持历史 bare-metal 测试停机语义不变。
+- 同时新增两条专门的裸机单测：
+  - `brk_exception`：覆盖 EL1/EL0 `BRK`，校验 `ESR_EL1/ELR_EL1/FAR_EL1` 与 `imm16`；
+  - `hlt_undef`：覆盖 EL1/EL0 `HLT`，校验其走 `UNDEFINED` 异常路径。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 120s bash -lc 'v=$(AARCHVM_BRK_MODE=trap ./build/aarchvm -bin tests/arm64/out/brk_exception.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d "\r\n"); printf "[%s]\n" "$v"; test "$v" = B'`
+- `timeout 120s bash -lc 'v=$(AARCHVM_BRK_MODE=trap ./build/aarchvm -bin tests/arm64/out/hlt_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d "\r\n"); printf "[%s]\n" "$v"; test "$v" = H'`
+- `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_20260320_brk_hlt.log 2>&1'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_20260320_brk_hlt.log 2>&1'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_smp_20260320_brk_hlt.log 2>&1'`
+- 结果：通过。
+
 # 修改日志 2026-03-20 18:29
 
 ## 本轮修改

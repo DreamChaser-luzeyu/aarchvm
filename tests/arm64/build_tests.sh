@@ -109,6 +109,12 @@ build_asm_prog el0_absent_pstate_features_undef
 build_asm_prog el0_eret_undef
 build_asm_prog el0_hvc_smc_undef
 build_asm_prog el1_hvc_smc_undef
+build_asm_prog brk_exception
+build_asm_prog hlt_undef
+build_asm_prog pacm_undef
+build_asm_prog flagm_sys_undef
+build_asm_prog system_feature_absent_undef
+build_asm_prog dcps_drps_non_debug_undef
 build_asm_prog illegal_state_return
 build_asm_prog special_pstate_regform
 build_asm_prog el0_tlbi_cache_undef

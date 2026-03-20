@@ -26,6 +26,15 @@ _start:
     subs xzr, x2, x3
     b.ne fail4
 
+    mrs  x2, id_aa64dfr0_el1
+    movz x3, #0x1006
+    movk x3, #0x0010, lsl #16
+    subs xzr, x2, x3
+    b.ne fail5
+
+    mrs  x2, id_aa64dfr1_el1
+    cbnz x2, fail6
+
     movz x0, #'I'
     str  x0, [x1]
     movz x0, #'\n'
@@ -46,6 +55,14 @@ fail3:
     b fail
 fail4:
     movz x0, #'4'
+    str  x0, [x1]
+    b fail
+fail5:
+    movz x0, #'5'
+    str  x0, [x1]
+    b fail
+fail6:
+    movz x0, #'6'
     str  x0, [x1]
 fail:
     movz x0, #'F'

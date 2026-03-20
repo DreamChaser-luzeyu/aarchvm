@@ -302,6 +302,9 @@ mkdir -p out/initramfs-full-root/{dev,proc,sys,tmp,run,root,mnt,etc}
 - `-decode <fast|slow>`：切换解码执行路径，默认使用快路径
 - `-fb-sdl <on|off>`：显式打开或关闭 SDL framebuffer 窗口
 
+行为控制环境变量：
+- `AARCHVM_BRK_MODE=trap|halt`：控制 A64 `BRK` 的处理方式。默认值是 `trap`，即按架构要求产生 Breakpoint Instruction exception。`halt` 保留历史上的裸机测试停机语义，使 `BRK` 立即终止模拟器；`tests/arm64/run_all.sh` 会导出这个模式，以兼容现有裸机回归。
+
 交互式串口快捷键：
 - 当 stdin 是终端时，可按 `Ctrl+A`，再按 `x`，立即终止模拟器
 - 如果同时启用了 `-snapshot-save <file>`，这条退出路径仍会在结束前写出快照

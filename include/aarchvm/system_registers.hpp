@@ -121,7 +121,7 @@ private:
   std::uint64_t dczid_el0_ = 0x4ull;
   std::uint64_t id_aa64pfr0_el1_ = 0x0000000000000011ull;
   std::uint64_t id_aa64pfr1_el1_ = 0;
-  std::uint64_t id_aa64dfr0_el1_ = 0;
+  std::uint64_t id_aa64dfr0_el1_ = 0x0000000000101006ull;
   std::uint64_t id_aa64dfr1_el1_ = 0;
   std::uint64_t id_aa64isar0_el1_ = 0x0000000000210000ull;
   std::uint64_t id_aa64isar1_el1_ = 0;
