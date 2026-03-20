@@ -156,6 +156,198 @@ _start:
     cmp  x2, #1
     b.ne failC
 
+    msr  fpcr, xzr
+    msr  fpsr, xzr
+    adr  x22, src_frecps_s_inexact
+    ldr  s1, [x22]
+    ldr  s2, [x22, #4]
+    frecps s0, s1, s2
+    str  s0, [x21, #112]
+    movz x23, #'D'
+    add  x0, x21, #112
+    adr  x1, exp_frecps_s_inexact_rne
+    bl   check4
+    mrs  x2, fpsr
+    cmp  x2, #0x10
+    b.ne failD
+
+    mov  x24, #(2 << 22)
+    msr  fpcr, x24
+    msr  fpsr, xzr
+    adr  x22, src_frecps_s_inexact
+    ldr  s1, [x22]
+    ldr  s2, [x22, #4]
+    frecps s0, s1, s2
+    str  s0, [x21, #116]
+    movz x23, #'E'
+    add  x0, x21, #116
+    adr  x1, exp_frecps_s_inexact_rm
+    bl   check4
+    mrs  x2, fpsr
+    cmp  x2, #0x10
+    b.ne failE
+
+    msr  fpcr, xzr
+    msr  fpsr, xzr
+    adr  x22, src_frecps_d_inexact
+    ldr  d3, [x22]
+    ldr  d4, [x22, #8]
+    frecps d2, d3, d4
+    str  d2, [x21, #120]
+    movz x23, #'F'
+    add  x0, x21, #120
+    adr  x1, exp_frecps_d_inexact_rne
+    bl   check8
+    mrs  x2, fpsr
+    cmp  x2, #0x10
+    b.ne failF
+
+    mov  x24, #(2 << 22)
+    msr  fpcr, x24
+    msr  fpsr, xzr
+    adr  x22, src_frecps_d_inexact
+    ldr  d3, [x22]
+    ldr  d4, [x22, #8]
+    frecps d2, d3, d4
+    str  d2, [x21, #128]
+    movz x23, #'G'
+    add  x0, x21, #128
+    adr  x1, exp_frecps_d_inexact_rm
+    bl   check8
+    mrs  x2, fpsr
+    cmp  x2, #0x10
+    b.ne failG
+
+    msr  fpcr, xzr
+    msr  fpsr, xzr
+    adr  x22, src_frsqrts_s_inexact
+    ldr  s11, [x22]
+    ldr  s12, [x22, #4]
+    frsqrts s10, s11, s12
+    str  s10, [x21, #136]
+    movz x23, #'H'
+    add  x0, x21, #136
+    adr  x1, exp_frsqrts_s_inexact_rne
+    bl   check4
+    mrs  x2, fpsr
+    cmp  x2, #0x10
+    b.ne failH
+
+    mov  x24, #(2 << 22)
+    msr  fpcr, x24
+    msr  fpsr, xzr
+    adr  x22, src_frsqrts_s_inexact
+    ldr  s11, [x22]
+    ldr  s12, [x22, #4]
+    frsqrts s10, s11, s12
+    str  s10, [x21, #140]
+    movz x23, #'I'
+    add  x0, x21, #140
+    adr  x1, exp_frsqrts_s_inexact_rm
+    bl   check4
+    mrs  x2, fpsr
+    cmp  x2, #0x10
+    b.ne failI
+
+    msr  fpcr, xzr
+    msr  fpsr, xzr
+    adr  x22, src_frsqrts_d_inexact
+    ldr  d13, [x22]
+    ldr  d14, [x22, #8]
+    frsqrts d12, d13, d14
+    str  d12, [x21, #144]
+    movz x23, #'J'
+    add  x0, x21, #144
+    adr  x1, exp_frsqrts_d_inexact_rne
+    bl   check8
+    mrs  x2, fpsr
+    cmp  x2, #0x10
+    b.ne failJ
+
+    mov  x24, #(2 << 22)
+    msr  fpcr, x24
+    msr  fpsr, xzr
+    adr  x22, src_frsqrts_d_inexact
+    ldr  d13, [x22]
+    ldr  d14, [x22, #8]
+    frsqrts d12, d13, d14
+    str  d12, [x21, #152]
+    movz x23, #'K'
+    add  x0, x21, #152
+    adr  x1, exp_frsqrts_d_inexact_rm
+    bl   check8
+    mrs  x2, fpsr
+    cmp  x2, #0x10
+    b.ne failK
+
+    msr  fpcr, xzr
+    msr  fpsr, xzr
+    adr  x22, src_vec_frecps_s_inexact
+    ldr  q22, [x22]
+    adr  x22, src_vec_frecps_s_inexact_rhs
+    ldr  q23, [x22]
+    frecps v21.4s, v22.4s, v23.4s
+    str  q21, [x21, #160]
+    movz x23, #'L'
+    add  x0, x21, #160
+    adr  x1, exp_vec_frecps_s_inexact_rne
+    bl   check16
+    mrs  x2, fpsr
+    cmp  x2, #0x10
+    b.ne failL
+
+    mov  x24, #(2 << 22)
+    msr  fpcr, x24
+    msr  fpsr, xzr
+    adr  x22, src_vec_frecps_s_inexact
+    ldr  q22, [x22]
+    adr  x22, src_vec_frecps_s_inexact_rhs
+    ldr  q23, [x22]
+    frecps v21.4s, v22.4s, v23.4s
+    str  q21, [x21, #176]
+    movz x23, #'M'
+    add  x0, x21, #176
+    adr  x1, exp_vec_frecps_s_inexact_rm
+    bl   check16
+    mrs  x2, fpsr
+    cmp  x2, #0x10
+    b.ne failM
+
+    msr  fpcr, xzr
+    msr  fpsr, xzr
+    adr  x22, src_vec_frsqrts_s_inexact
+    ldr  q28, [x22]
+    adr  x22, src_vec_frsqrts_s_inexact_rhs
+    ldr  q29, [x22]
+    frsqrts v27.4s, v28.4s, v29.4s
+    str  q27, [x21, #192]
+    movz x23, #'N'
+    add  x0, x21, #192
+    adr  x1, exp_vec_frsqrts_s_inexact_rne
+    bl   check16
+    mrs  x2, fpsr
+    cmp  x2, #0x10
+    b.ne failN
+
+    mov  x24, #(2 << 22)
+    msr  fpcr, x24
+    msr  fpsr, xzr
+    adr  x22, src_vec_frsqrts_s_inexact
+    ldr  q28, [x22]
+    adr  x22, src_vec_frsqrts_s_inexact_rhs
+    ldr  q29, [x22]
+    frsqrts v27.4s, v28.4s, v29.4s
+    str  q27, [x21, #208]
+    movz x23, #'O'
+    add  x0, x21, #208
+    adr  x1, exp_vec_frsqrts_s_inexact_rm
+    bl   check16
+    mrs  x2, fpsr
+    cmp  x2, #0x10
+    b.ne failO
+
+    msr  fpcr, xzr
+
     movz x0, #'S'
     str  x0, [x20]
     brk  #0
@@ -199,6 +391,42 @@ failA:
     b done
 failC:
     movz x0, #'C'
+    b done
+failD:
+    movz x0, #'D'
+    b done
+failE:
+    movz x0, #'E'
+    b done
+failF:
+    movz x0, #'F'
+    b done
+failG:
+    movz x0, #'G'
+    b done
+failH:
+    movz x0, #'H'
+    b done
+failI:
+    movz x0, #'I'
+    b done
+failJ:
+    movz x0, #'J'
+    b done
+failK:
+    movz x0, #'K'
+    b done
+failL:
+    movz x0, #'L'
+    b done
+failM:
+    movz x0, #'M'
+    b done
+failN:
+    movz x0, #'N'
+    b done
+failO:
+    movz x0, #'O'
 done:
     str  x0, [x20]
     brk  #0
@@ -274,6 +502,53 @@ src_vec_frsqrts_d_rhs:
 exp_vec_frsqrts_d:
     .quad 0x3ff4000000000000, 0xfff8123456789abc
 
+src_frecps_s_inexact:
+    .word 0x3f4ccccd, 0x3f19999a
+exp_frecps_s_inexact_rne:
+    .word 0x3fc28f5c
+exp_frecps_s_inexact_rm:
+    .word 0x3fc28f5b
+
+src_frecps_d_inexact:
+    .quad 0x3fe999999999999a, 0x3fe3333333333333
+exp_frecps_d_inexact_rne:
+    .quad 0x3ff851eb851eb852
+exp_frecps_d_inexact_rm:
+    .quad 0x3ff851eb851eb851
+
+src_frsqrts_s_inexact:
+    .word 0x3f4ccccd, 0x3f19999a
+exp_frsqrts_s_inexact_rne:
+    .word 0x3fa147ae
+exp_frsqrts_s_inexact_rm:
+    .word 0x3fa147ad
+
+src_frsqrts_d_inexact:
+    .quad 0x3fe999999999999a, 0x3fe3333333333333
+exp_frsqrts_d_inexact_rne:
+    .quad 0x3ff428f5c28f5c29
+exp_frsqrts_d_inexact_rm:
+    .quad 0x3ff428f5c28f5c28
+
+    .balign 16
+src_vec_frecps_s_inexact:
+    .word 0x3f4ccccd, 0x3f800000, 0x40000000, 0xbf800000
+src_vec_frecps_s_inexact_rhs:
+    .word 0x3f19999a, 0x3f000000, 0x3f800000, 0x40000000
+exp_vec_frecps_s_inexact_rne:
+    .word 0x3fc28f5c, 0x3fc00000, 0x00000000, 0x40800000
+exp_vec_frecps_s_inexact_rm:
+    .word 0x3fc28f5b, 0x3fc00000, 0x80000000, 0x40800000
+
+src_vec_frsqrts_s_inexact:
+    .word 0x3f4ccccd, 0x3f800000, 0x40000000, 0xbf800000
+src_vec_frsqrts_s_inexact_rhs:
+    .word 0x3f19999a, 0x3f000000, 0x3f800000, 0x40000000
+exp_vec_frsqrts_s_inexact_rne:
+    .word 0x3fa147ae, 0x3fa00000, 0x3f000000, 0x40200000
+exp_vec_frsqrts_s_inexact_rm:
+    .word 0x3fa147ad, 0x3fa00000, 0x3f000000, 0x40200000
+
     .balign 16
 dst:
-    .space 112
+    .space 224

@@ -1,3 +1,191 @@
+# 修改日志 2026-03-20 03:30
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮补的是 `FPCR.FZ` 在 unary/misc/estimate/round-int 路径上的程序可见语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fp_fz_misc.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_fz_misc.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 修正内容：
+  - `FSQRT` 现在会在 `NaN` 处理后先按 `FZ` flush subnormal 输入，并在结果侧统一复用输出 flush helper；
+  - `FRINT*` 共用 round-int helper 现在会先按 `FZ` flush subnormal 输入，因此 `FRINTN/FRINTX/FRINTI` 等路径对 subnormal 输入会返回带符号零，并正确置 `FPSR.IDC`；
+  - `FRECPX` 现在对 `FZ=1` 的 subnormal 输入按 zero 语义处理，结果与 `FPSR.IDC` 对齐；
+  - `FRECPE/FRSQRTE` 现在同样先按 `FZ` flush 输入，并补上此前缺失的 zero-input `FPSR.DZC`，因此“literal zero”和“`FZ` 把 subnormal flush 成 zero”两种情况都能得到正确的 `DZC`；
+  - `FRECPE/FRSQRTE/FSQRT` 的计算结果在需要时会经过统一的输出 denormal flush 路径，避免 `FZ` 下残留 guest 可见 subnormal 结果。
+- 新增裸机单测 [tests/arm64/fp_fz_misc.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_fz_misc.S)：
+  - 覆盖 scalar `FSQRT S/D`、`FRINTN S/D`、`FRECPX S/D`、`FRECPE S/D`、`FRSQRTE S/D`；
+  - 覆盖 `FRECPE(0.0)` 与 `FRSQRTE(0.0)` 的 `FPSR.DZC`；
+  - 覆盖 vector `FSQRT v4s`、`FRINTN v4s`、`FRECPE v4s`、`FRSQRTE v4s`；
+  - 同时校验结果 bit pattern 与 `FPSR.IDC/DZC`。
+
+## 本轮测试
+
+- 定向构建：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 300s tests/arm64/build_tests.sh`
+- 定向验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_fz_misc.bin -load 0x0 -entry 0x0 -steps 500000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_fp_estimate.bin -load 0x0 -entry 0x0 -steps 400000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_roundint_flags.bin -load 0x0 -entry 0x0 -steps 300000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_scalar_frecpx.bin -load 0x0 -entry 0x0 -steps 300000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1800s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+- 结果：通过。
+
+# 修改日志 2026-03-20 03:15
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”第一阶段，这一轮补的是 `FPCR.FZ` 在普通浮点算术与 compare 路径上的 guest 可见语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fp_fz_arith_compare.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_fz_arith_compare.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 当前实现此前只把 `FPCR.RMode` 与 `FPCR.DN` 接到了主要 helper，`FPCR.FZ` 基本没有进入执行路径，导致以下程序可见错误：
+  - subnormal 输入没有被 flush 成带符号的零；
+  - subnormal 输出没有被 flush 成带符号的零；
+  - `FPSR.IDC` 与 `FPSR.UFC` 没有按 `FZ` 语义更新；
+  - compare 指令把 subnormal 当成普通非零值比较，和真实 Armv8-A 行为不一致。
+- 这轮补了一个保守但真实的闭环：
+  - 新增 `FZ` 控制位抽取与 `FPSR.IDC` 常量；
+  - 新增输入/输出 denormal flush helper；
+  - 将 helper 接入 `fp_binary_arith_bits(...)` 与 `fp_fma_bits(...)`，使 `FADD/FSUB/FMUL/FDIV/FABD` 及依赖这些 helper 的向量/标量路径获得 `FZ` 语义；
+  - 将 `FCMP/FCMPE/FCCMP/FCCMPE` 以及 `FCMEQ/FCMGE/FCMGT/FACGE/FACGT` 的标量/向量路径接入输入 denormal flush，使比较结果与 `FPSR.IDC` 对齐 guest 可见行为。
+- 新增裸机单测 [tests/arm64/fp_fz_arith_compare.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_fz_arith_compare.S)：
+  - 覆盖 scalar `FADD S/D` 的输入 flush；
+  - 覆盖 scalar `FMUL S/D` 的输出 flush；
+  - 覆盖 `FCMP` 旗标比较与 `FCMEQ` 结果比较；
+  - 覆盖向量 `FADD` 与向量 `FCMEQ`；
+  - 同时检查 `FPSR.IDC == 0x80` 与 `FPSR.UFC == 0x8`。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_fz_arith_compare.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_compare_flags.bin -load 0x0 -entry 0x0 -steps 200000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_scalar_compare_flags.bin -load 0x0 -entry 0x0 -steps 200000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_arith_fpcr_flags.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 2400s tests/arm64/run_all.sh`
+- `timeout 1800s tests/linux/run_functional_suite.sh`
+- `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+- 结果：通过。
+
+# 修改日志 2026-03-20 02:54
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”第一阶段，这一轮补的是 `FSQRT` 的 guest 可见舍入与异常语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fp_sqrt_rounding.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_sqrt_rounding.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 修正 `FSQRT` 此前直接调用 `std::sqrt(...)` 的问题：
+  - 旧实现绕过了统一的 `host_fp_eval(...)` 路径，因此 `FPCR.RMode` 并不真正参与 `FSQRT` 的结果舍入；
+  - 旧实现只在“非精确平方根”时手工置位 `FPSR.IXC`，没有和其它浮点指令一样通过宿主浮点异常统一映射 `FPSR`；
+  - `sNaN/qNaN/default-NaN` 传播也没有复用现有的统一 NaN 处理 helper。
+- 现在的行为调整为：
+  - `fp_sqrt_bits(...)` 新增 `fpcr_mode` 参数，并通过 `host_fp_eval(...)` 执行实际开方；
+  - 标量与向量 `FSQRT` 都会按 `FPCR.RMode` 产生 guest 可见结果；
+  - `FPSR` 由统一的宿主异常映射产生，不再单独手搓 `IXC`；
+  - `NaN`、`-0`、负有限值、`-Inf`、`+Inf` 的程序可见结果继续按当前已实现规则保留，并统一走 NaN 语义处理路径。
+- 新增裸机单测 [tests/arm64/fp_sqrt_rounding.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_sqrt_rounding.S)：
+  - 覆盖 scalar `FSQRT S` 的 `RNE/RU`；
+  - 覆盖 scalar `FSQRT D` 的 `RNE/RM`；
+  - 覆盖 vector `FSQRT v4s` 与 `v2d`；
+  - 同时检查结果 bit pattern 与 `FPSR.IXC`。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_sqrt_rounding.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_sqrt_flags.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_fp_misc_rounding.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 2400s tests/arm64/run_all.sh`
+- `timeout 1800s tests/linux/run_functional_suite.sh`
+- `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+- 结果：通过。
+
+# 修改日志 2026-03-20 02:20
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”第一阶段，这一轮补的是整数转浮点路径里一个真实的解码与语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fp_int_to_fp_rounding.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_int_to_fp_rounding.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 修正 `SCVTF/UCVTF (scalar SIMD&FP)` 与 `FRECPE/FRSQRTE` 的 opcode 解码冲突：
+  - 之前 `exec_data_processing()` 里更早的 `switch (insn & 0xFF3FFC00u)` 先吃掉了 `0x5E21D800` / `0x7E21D800`；
+  - 当 `ftype=0/1` 时，这两个 case 会直接 `return false`，导致 `scvtf s?, s?` 与 `ucvtf d?, d?` 永远落到 `UNIMPL`，再被同步异常向量误导到测试代码附近；
+  - 现改为在同一组 case 中按 `ftype` 正确区分：
+    - `ftype=0/1` 走 `SCVTF/UCVTF (scalar SIMD&FP)`；
+    - `ftype=2/3` 保持 `FRECPE/FRSQRTE`。
+- 延续上一轮已经加入的整数转浮点 helper，使以下路径都遵守 guest 可见语义：
+  - `SCVTF/UCVTF` 现在按 `FPCR.RMode` 舍入；
+  - 对不可精确表示的整数转浮点，正确置位 `FPSR.IXC`；
+  - 标量 GP 源寄存器路径与标量 SIMD&FP 源寄存器路径行为一致。
+- 清理了新单测里的临时调试分支，不再保留仅用于定位问题的 `x24='a'/'b'` 与额外 `fail*_flags` 分支。
+- 新增裸机单测 [tests/arm64/fp_int_to_fp_rounding.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_int_to_fp_rounding.S)：
+  - 覆盖 `SCVTF/UCVTF` 的 GP 源寄存器路径与 scalar SIMD&FP 源寄存器路径；
+  - 覆盖 single / double；
+  - 覆盖 `RNE`、`+Inf`、`-Inf`；
+  - 覆盖 exact / inexact 与 `FPSR.IXC`。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_int_to_fp_rounding.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 2400s tests/arm64/run_all.sh`
+- `timeout 1800s tests/linux/run_functional_suite.sh`
+- `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+- 结果：通过。
+
+# 修改日志 2026-03-20 01:29
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”第一阶段，这一轮针对 `FPCR.DN` 在普通浮点算术路径上的遗漏做收口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fp_dn_arith.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_dn_arith.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 修正了两层叠加导致的 `DN=1` 语义缺口：
+  - 多个标量/向量算术、融合乘加、pairwise 加法等调用点此前只把 `FPCR.RMode` 两位传给底层 helper，直接丢掉了 `FPCR.DN`；
+  - 更关键的是，`fp_binary_arith_bits(...)` 与 `fp_fma_bits(...)` 自身此前直接把 NaN 交给宿主 `libm`，绕过了已有的 `fp_process_nan_binary/ternary(...)`，导致 `DN=1` 即使在调用点上传递下来也无法真正生效。
+- 现在的行为调整为：
+  - 相关算术/融合乘加/舍入相关 `FP` 路径统一读取完整的 `current_fpcr_ctl()`；
+  - 普通二元浮点算术与融合乘加在进入宿主计算前，先按 guest 规则处理 `qNaN/sNaN/default-NaN`；
+  - 因此 `FPCR.DN=1` 时，`FADD/FSUB/FMUL/FDIV/FABD/FNMUL/FMADD/FMSUB/FNMADD/FNMSUB` 以及对应的多条向量/pairwise 路径，不再错误保留输入 NaN payload，而会返回 guest 可见的 default-NaN；
+  - `sNaN` 仍会正确置位 `FPSR.IOC`，`qNaN` 不会错误置位。
+- 新增裸机单测 [tests/arm64/fp_dn_arith.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_dn_arith.S)：
+  - 覆盖 scalar `FADD`；
+  - 覆盖 scalar `FMADD`；
+  - 覆盖 scalar `FDIV`；
+  - 覆盖 vector `FADD`；
+  - 覆盖 vector `FADDP`；
+  - 同时覆盖 `qNaN/sNaN`、`default-NaN` 与 `FPSR.IOC`。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_dn_arith.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_dn_misc.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_arith_fpcr_flags.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_arith_fpcr_flags.bin -load 0x0 -entry 0x0 -steps 500000`
+- `timeout 2400s tests/arm64/run_all.sh`
+- `timeout 1800s tests/linux/run_functional_suite.sh`
+- `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+- 结果：通过。
+
 # 修改日志 2026-03-20 00:19
 
 ## 本轮修改
@@ -2632,3 +2820,138 @@
   - reciprocal / rsqrt estimate 与 step 家族，如 `FRECPE/FRECPS/FRSQRTE/FRSQRTS`；
   - 更高阶的精度转换族，尤其 `FCVTN/FCVTN2/FCVTL/FCVTL2/FCVTXN*` 对 `FPCR` 舍入模式与异常位的完整语义；
   - 更细粒度的 `FPCR` 行为，如 `AH/FZ/FZ16/DN` 与 NaN / subnormal / flush-to-zero 的交互。
+
+# 修改日志 2026-03-20 12:25
+
+## 本轮修改
+
+- 修正标量 SIMD&FP compare 结果类指令漏置 `FPSR.IOC` 的程序可见语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+- 具体覆盖的指令族：
+  - 标量寄存器 compare：`FCMEQ/FCMGE/FCMGT`
+  - 标量绝对值 compare：`FACGE/FACGT`
+  - 标量零比较：`FCMEQ/FCMGE/FCMGT/FCMLE/FCMLT ..., #0.0`
+- 修复内容：
+  - 当输入含 `sNaN` 时，这些路径现在会像向量 compare 路径一样正确置 `FPSR.IOC`；
+  - 当输入仅含 `qNaN` 时，仍保持 quiet compare 语义，不误置 `IOC`；
+  - 结果寄存器的 all-ones / zero compare 掩码行为保持不变，只修正异常状态寄存器的程序可见结果。
+- 新增专门的裸机单测 [tests/arm64/fp_scalar_compare_flags.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_scalar_compare_flags.S)，并接入：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 新单测覆盖：
+  - `FCMEQ` 标量寄存器 compare 遇到 `qNaN` 时结果为假且 `FPSR` 保持清零；
+  - `FCMGE` 标量寄存器 compare 遇到 `sNaN` 时结果为假且 `FPSR.IOC=1`；
+  - `FACGT` 标量绝对值 compare 遇到 `sNaN` 时结果为假且 `FPSR.IOC=1`；
+  - `FCMGT ..., #0.0` 标量零 compare 遇到 `sNaN` 时结果为假且 `FPSR.IOC=1`。
+
+## 本轮测试
+
+- 定向构建：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 300s tests/arm64/build_tests.sh`
+- 定向验证：
+  - `timeout 30s ./build/aarchvm -bin tests/arm64/out/fp_scalar_compare_flags.bin -load 0x0 -entry 0x0 -steps 200000`
+  - `timeout 30s ./build/aarchvm -bin tests/arm64/out/fpsimd_compare_flags.bin -load 0x0 -entry 0x0 -steps 300000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1800s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮补的是一个“结果寄存器对，但异常状态错”的真实程序可见缺口，不是测试绕过。
+- 向量 compare 家族与标量 compare 家族在 `FPSR.IOC` 语义上现在已经对齐。
+- `TODO` 中“浮点 / AdvSIMD 语义收尾”仍未完成；目前下一批仍值得优先审的点是：
+  - `FPCR.DN/FZ/AH` 对 arithmetic / convert / sqrt / estimate / round-int helper 的真实影响；
+  - `FPSR` 其余异常位在标量与向量 convert / sqrt / estimate 路径中的一致性；
+  - `qNaN/sNaN/default-NaN/subnormal/±0` 在尚未系统验证的 FP helper 中的传播细节。
+
+# 修改日志 2026-03-20 01:47
+
+## 本轮修改
+
+- 修正 `FMAX/FMIN/FMAXNM/FMINNM` 家族对 `FPCR.DN` 的程序可见语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+- 具体覆盖的路径：
+  - 标量 `FMAX/FMIN/FMAXNM/FMINNM`
+  - 向量 `FMAX/FMIN/FMAXNM/FMINNM`
+  - pairwise `FMAXP/FMINP/FMAXNMP/FMINNMP`
+  - reduce `FMAXV/FMINV/FMAXNMV/FMINNMV`
+- 修复内容：
+  - `FMAX/FMIN` 在 `DN=1` 且任一输入为 NaN 时，现在返回 `Default NaN`；
+  - `FMAXNM/FMINNM` 在 `DN=1` 时，现在仅在“任一输入为 `sNaN`”或“两边都为 NaN”时返回 `Default NaN`，而 `numeric + qNaN` 仍返回 numeric；
+  - 所有相关调用点统一传入当前 `FPCR` 控制位，而不是仅按舍入模式处理。
+- 新增专门的裸机单测 [tests/arm64/fp_minmax_dn.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_minmax_dn.S)，并接入：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 新单测覆盖：
+  - 标量 `FMAX` + `qNaN` 在 `DN=1` 下返回 `Default NaN`
+  - 标量 `FMINNM` + `qNaN` 在 `DN=1` 下保留 numeric
+  - 标量 `FMAXNM` 在双 `qNaN` 下返回 `Default NaN`
+  - 标量 `FMIN` + `sNaN` 在 `DN=1` 下返回 `Default NaN` 且置 `FPSR.IOC`
+  - pairwise / vector / reduce 路径下的 `DN=1` 传播语义
+
+## 本轮测试
+
+- 定向验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_minmax_dn.bin -load 0x0 -entry 0x0 -steps 400000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_minmax_nan_flags.bin -load 0x0 -entry 0x0 -steps 300000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_scalar_pairwise.bin -load 0x0 -entry 0x0 -steps 300000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_fp_reducev.bin -load 0x0 -entry 0x0 -steps 400000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1800s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮补的是 `FPCR.DN` 对 min/max 家族的真实 ISA 语义缺口，不是测试特判。
+- 当前 `FMAX/FMIN/FMAXNM/FMINNM` 的标量、向量、pairwise、reduce 路径在 `DN=1` 下已经对齐到架构手册要求。
+- “Armv8-A 程序可见正确性收尾计划”仍未结束；下一批仍值得优先审的点是：
+  - `FPCR.FZ/FZ16/AH` 在 arithmetic / convert / sqrt / estimate helper 中的系统性影响；
+  - `Default NaN` 与 `subnormal` 语义在其余 FP helper 中的一致性；
+  - 尚未系统验证的 FP convert / estimate / misc 路径在 `DN/FZ` 组合下的边界行为。
+
+# 修改日志 2026-03-20 02:39
+
+## 本轮修改
+
+- 修正 `FRECPS/FRSQRTS` 标量与向量路径对 `FPCR.RMode` 和 `FPSR.IXC` 的程序可见语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+- 修复方式：
+  - 保留原有 `NaN`、`Inf*0`、精确零结果等显式特判；
+  - 将普通计算路径统一切到 `host_fp_eval(...)`，使其真正受当前 `FPCR.RMode` 控制；
+  - 将宿主浮点环境抛出的异常映射回 `FPSR`，补齐此前缺失的 `IXC` 置位。
+- 扩展裸机单测 [tests/arm64/fpsimd_fp_step.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fp_step.S)：
+  - 新增 `FRECPS` / `FRSQRTS` 的标量 `S/D` inexact case；
+  - 新增向量 `4S` inexact case；
+  - 对 `RNE` 与 `RM` 两种舍入模式分别校验结果 bit pattern；
+  - 对上述 case 明确校验 `FPSR.IXC=1`。
+
+## 本轮测试
+
+- 定向构建：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 300s tests/arm64/build_tests.sh`
+- 定向验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_fp_step.bin -load 0x0 -entry 0x0 -steps 400000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1800s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮补的是 `FRECPS/FRSQRTS` 的真实程序可见语义缺口，不是针对特定测试点的绕过。
+- 当前 `FRECPS/FRSQRTS` 已经不再固定使用宿主默认舍入模式；`RNE/RM` 在标量与向量路径都能观察到正确结果差异。
+- 对 `FRECPS/FRSQRTS`，此前遗漏的 `FPSR.IXC` 现在已经能在 inexact case 中稳定置位。
+- `TODO` 中“浮点 / AdvSIMD 语义收尾”仍未结束；下一批仍值得优先审的点是：
+  - `FPCR.DN/FZ/AH` 在其余 arithmetic / convert / sqrt / estimate / round-int helper 中的系统性影响；
+  - 其余 FP helper 的 `FPSR` 置位一致性；
+  - 尚未系统差分过的 `qNaN/sNaN/default-NaN/subnormal/±0/Inf` 传播细节。

@@ -123,17 +123,25 @@ run fp_scalar_convert.bin 200000
 run fp_fcvtzu_scalar.bin 200000
 run fp_fcvt_flags.bin 200000
 run_expect fp_fcvt_rounding_scalar.bin 300000 R
+run_expect fp_int_to_fp_rounding.bin 300000 I
 run_expect fp_compare_flags.bin 200000 Q
+run_expect fp_scalar_compare_flags.bin 200000 K
 run_expect fp_absneg_nan_flags.bin 300000 N
 run_expect fpsimd_compare_flags.bin 300000 G
 run_expect fp_minmax_nan_flags.bin 300000 M
+run_expect fp_minmax_dn.bin 400000 X
 run_expect fp_cond_compare.bin 200000 C
 run fp_scalar_fcsel.bin 200000
 run fp_scalar_fma.bin 200000
 run_expect fp_arith_fpcr_flags.bin 300000 A
+run_expect fp_fz_arith_compare.bin 300000 F
+run_expect fp_fz_misc.bin 500000 Z
 run fp_scalar_misc.bin 200000
 run_expect fp_sqrt_flags.bin 300000 Q
+run_expect fp_sqrt_rounding.bin 300000 R
 run_expect fp_roundint_flags.bin 300000 I
+run_expect fp_dn_arith.bin 400000 T
+run_expect fp_dn_misc.bin 400000 D
 run_expect fp_scalar_compare_misc.bin 300000 J
 run_expect fp_scalar_pairwise.bin 300000 Y
 run_expect fp_scalar_frecpx.bin 300000 X
