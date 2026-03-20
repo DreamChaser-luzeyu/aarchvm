@@ -87,8 +87,17 @@ _start:
     // AT should perform a fresh walk and observe the updated PTE before TLBI.
     at   s1e1r, x30
     mrs  x13, par_el1
-    movz x14, #0x0052, lsl #16
-    subs xzr, x13, x14
+    tbnz x13, #0, fail
+    tbz  x13, #11, fail
+    ubfx x14, x13, #12, #44
+    movz x15, #0x0520
+    subs xzr, x14, x15
+    b.ne fail
+    lsr  x14, x13, #56
+    cbnz x14, fail
+    ubfx x14, x13, #7, #2
+    movz x15, #2
+    subs xzr, x14, x15
     b.ne fail
 
     // Data access should still observe old mapping before TLBI.
@@ -102,8 +111,17 @@ _start:
 
     at   s1e1r, x30
     mrs  x13, par_el1
-    movz x14, #0x0052, lsl #16
-    subs xzr, x13, x14
+    tbnz x13, #0, fail
+    tbz  x13, #11, fail
+    ubfx x14, x13, #12, #44
+    movz x15, #0x0520
+    subs xzr, x14, x15
+    b.ne fail
+    lsr  x14, x13, #56
+    cbnz x14, fail
+    ubfx x14, x13, #7, #2
+    movz x15, #2
+    subs xzr, x14, x15
     b.ne fail
 
     ldr  x12, [x30]

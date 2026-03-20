@@ -216,6 +216,13 @@ handle_sys_trap:
     b handler_fail
 
 trap_mrs_daif:
+    movz x24, #0xffff
+    movk x24, #0x01ff, lsl #16
+    and  x25, x20, x24
+    movz x24, #0xd005
+    movk x24, #0x0032, lsl #16
+    cmp  x25, x24
+    b.ne fail2
     adr  x24, trap_flags
     ldr  x25, [x24]
     orr  x25, x25, #1
@@ -224,6 +231,13 @@ trap_mrs_daif:
     b return_to_el1
 
 trap_msr_daif:
+    movz x24, #0xffff
+    movk x24, #0x01ff, lsl #16
+    and  x25, x20, x24
+    movz x24, #0xd004
+    movk x24, #0x0032, lsl #16
+    cmp  x25, x24
+    b.ne fail3
     adr  x24, trap_flags
     ldr  x25, [x24]
     orr  x25, x25, #2
@@ -232,6 +246,13 @@ trap_msr_daif:
     b return_to_el1
 
 trap_msr_daifset:
+    movz x24, #0xffff
+    movk x24, #0x01ff, lsl #16
+    and  x25, x20, x24
+    movz x24, #0xd3fe
+    movk x24, #0x000c, lsl #16
+    cmp  x25, x24
+    b.ne fail4
     adr  x24, trap_flags
     ldr  x25, [x24]
     orr  x25, x25, #4
@@ -240,6 +261,13 @@ trap_msr_daifset:
     b return_to_el1
 
 trap_msr_daifclr:
+    movz x24, #0xffff
+    movk x24, #0x01ff, lsl #16
+    and  x25, x20, x24
+    movz x24, #0xd3fe
+    movk x24, #0x000e, lsl #16
+    cmp  x25, x24
+    b.ne fail5
     adr  x24, trap_flags
     ldr  x25, [x24]
     orr  x25, x25, #8

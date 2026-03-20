@@ -108,6 +108,8 @@ build_asm_prog el0_special_regs_undef
 build_asm_prog el0_absent_pstate_features_undef
 build_asm_prog el0_eret_undef
 build_asm_prog el0_hvc_smc_undef
+build_asm_prog el1_hvc_smc_undef
+build_asm_prog illegal_state_return
 build_asm_prog el0_tlbi_cache_undef
 build_asm_prog el0_dc_ivac_undef
 build_asm_prog dc_cva_persist_absent

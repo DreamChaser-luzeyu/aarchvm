@@ -40,6 +40,7 @@ sync_spx:
 sync_handler:
     // ESR_EL1.EC must be 0x21 (instruction abort, same EL).
     mrs  x2, esr_el1
+    tbz  x2, #25, fail_from_handler
     tbnz x2, #31, ec_b31_ok
     b fail_from_handler
 ec_b31_ok:

@@ -200,6 +200,7 @@ sync_lower:
 
 lower_sync_handler:
     mrs  x20, esr_el1
+    tbz  x20, #25, handler_fail
     ubfx x21, x20, #26, #6
     movz x22, #0x18
     cmp  x21, x22
@@ -230,6 +231,13 @@ handle_sys_trap:
     b handler_fail
 
 trap_mrs_ctr:
+    movz x24, #0xffff
+    movk x24, #0x01ff, lsl #16
+    and  x25, x20, x24
+    movz x24, #0xc001
+    movk x24, #0x0032, lsl #16
+    cmp  x25, x24
+    b.ne fail2
     adr  x24, trap_flags
     ldr  x25, [x24]
     orr  x25, x25, #1
@@ -238,6 +246,13 @@ trap_mrs_ctr:
     b return_to_el1
 
 trap_mrs_far:
+    movz x24, #0xffff
+    movk x24, #0x01ff, lsl #16
+    and  x25, x20, x24
+    movz x24, #0x1801
+    movk x24, #0x0030, lsl #16
+    cmp  x25, x24
+    b.ne fail5
     adr  x24, trap_flags
     ldr  x25, [x24]
     orr  x25, x25, #2
@@ -261,6 +276,13 @@ handle_undef:
     b handler_fail
 
 trap_msr_tcr:
+    movz x24, #0xffff
+    movk x24, #0x01ff, lsl #16
+    and  x25, x20, x24
+    movz x24, #0x0800
+    movk x24, #0x0034, lsl #16
+    cmp  x25, x24
+    b.ne fail7
     adr  x24, trap_flags
     ldr  x25, [x24]
     orr  x25, x25, #8
@@ -269,6 +291,13 @@ trap_msr_tcr:
     b return_to_el1
 
 trap_msr_daifset:
+    movz x24, #0xffff
+    movk x24, #0x01ff, lsl #16
+    and  x25, x20, x24
+    movz x24, #0xd3fe
+    movk x24, #0x000c, lsl #16
+    cmp  x25, x24
+    b.ne fail8
     adr  x24, trap_flags
     ldr  x25, [x24]
     orr  x25, x25, #16

@@ -219,6 +219,13 @@ handle_sys_trap:
     b handler_fail
 
 trap_ic_ivau:
+    movz x24, #0xffff
+    movk x24, #0x01ff, lsl #16
+    and  x25, x20, x24
+    movz x24, #0xdc0a
+    movk x24, #0x0012, lsl #16
+    cmp  x25, x24
+    b.ne fail1
     adr  x24, trap_flags
     ldr  x25, [x24]
     orr  x25, x25, #1
@@ -227,6 +234,13 @@ trap_ic_ivau:
     b return_to_el1
 
 trap_dc_zva:
+    movz x24, #0xffff
+    movk x24, #0x01ff, lsl #16
+    and  x25, x20, x24
+    movz x24, #0xdc08
+    movk x24, #0x0012, lsl #16
+    cmp  x25, x24
+    b.ne fail3
     adr  x24, trap_flags
     ldr  x25, [x24]
     orr  x25, x25, #4

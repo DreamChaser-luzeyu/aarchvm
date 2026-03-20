@@ -157,6 +157,20 @@ el0_allowed:
     cmp  x9, x8
     b.hi el0_fail
 
+    movn x10, #0
+    msr  cntv_tval_el0, x10
+    mrs  x11, cntv_tval_el0
+    lsr  x12, x11, #32
+    cbnz x12, el0_fail
+    tbz  x11, #31, el0_fail
+
+    movn x13, #0
+    msr  cntp_tval_el0, x13
+    mrs  x14, cntp_tval_el0
+    lsr  x15, x14, #32
+    cbnz x15, el0_fail
+    tbz  x14, #31, el0_fail
+
     svc  #0x20
 
 el0_fail:
@@ -196,6 +210,13 @@ handle_sys_trap:
     b handler_fail
 
 trap_cntvct:
+    movz x24, #0xffff
+    movk x24, #0x01ff, lsl #16
+    and  x25, x20, x24
+    movz x24, #0xf801
+    movk x24, #0x0034, lsl #16
+    cmp  x25, x24
+    b.ne fail1
     adr  x24, trap_flags
     ldr  x25, [x24]
     orr  x25, x25, #1
@@ -204,6 +225,13 @@ trap_cntvct:
     b return_to_el1
 
 trap_cntpct:
+    movz x24, #0xffff
+    movk x24, #0x01ff, lsl #16
+    and  x25, x20, x24
+    movz x24, #0xf801
+    movk x24, #0x0032, lsl #16
+    cmp  x25, x24
+    b.ne fail2
     adr  x24, trap_flags
     ldr  x25, [x24]
     orr  x25, x25, #2
@@ -212,6 +240,13 @@ trap_cntpct:
     b return_to_el1
 
 trap_cntv_tval:
+    movz x24, #0xffff
+    movk x24, #0x01ff, lsl #16
+    and  x25, x20, x24
+    movz x24, #0xf807
+    movk x24, #0x0030, lsl #16
+    cmp  x25, x24
+    b.ne fail3
     adr  x24, trap_flags
     ldr  x25, [x24]
     orr  x25, x25, #4
@@ -220,6 +255,13 @@ trap_cntv_tval:
     b return_to_el1
 
 trap_cntp_ctl:
+    movz x24, #0xffff
+    movk x24, #0x01ff, lsl #16
+    and  x25, x20, x24
+    movz x24, #0xf804
+    movk x24, #0x0032, lsl #16
+    cmp  x25, x24
+    b.ne fail4
     adr  x24, trap_flags
     ldr  x25, [x24]
     orr  x25, x25, #8

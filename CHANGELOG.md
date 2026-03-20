@@ -1,3 +1,126 @@
+# 修改日志 2026-03-20 15:00
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮补的是 cache maintenance fault 的 `ESR_EL1.ISS` 语义尾差：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [include/aarchvm/cpu.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/cpu.hpp)
+  - [tests/arm64/mmu_cache_maint_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_cache_maint_fault.S)
+- 根据 ARM ARM，cache maintenance 和 address translation system instruction 触发 synchronous Data Abort 时：
+  - `ISS.CM` 必须为 `1`；
+  - `ISS.WnR` 必须为 `1`；
+  - 即使具体翻译路径内部是按读权限做地址解析，guest 看到的 syndrome 也不能退化成普通 read fault。
+- 旧实现里，`IC IVAU`、`DC CVAC/CVAU/CIVAC` 以及 `DC ZVA` 的 fault 路径会直接复用普通 `data_abort(...)` 组装：
+  - 导致 `CM=0`；
+  - 且 `IC IVAU` / `DC CVA*` 这类路径会把 `WnR` 错报成 `0`。
+- 这轮新增了 `data_abort_iss(...)` 辅助逻辑，并让上述 cache maintenance fault 路径统一走 `CM=1 + WnR=1` 的 syndrome 组装。
+- 对应地增强了裸机用例 `mmu_cache_maint_fault`：
+  - 现在会显式校验 `ESR_EL1.CM==1`；
+  - 会校验 `ESR_EL1.WnR==1`；
+  - 在原有 `DC CVAC/CVAU/CIVAC`、`IC IVAU` 基础上新增了 `DC ZVA` fault 覆盖。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/mmu_cache_maint_fault.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/el0_cache_ops_privilege.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 2400s tests/arm64/run_all.sh`
+- `timeout 1800s tests/linux/run_functional_suite.sh`
+- `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+- 结果：通过。
+
+# 修改日志 2026-03-20 14:54
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮收的是通用定时器 sysreg 这一组的 guest 可见语义与 trap 覆盖：
+  - [src/generic_timer.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/generic_timer.cpp)
+  - [tests/arm64/cntkctl_el0_timer_access.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/cntkctl_el0_timer_access.S)
+- 将 `CNT{P,V}_TVAL_EL0` 的读回实现显式写成“取 `(CVAL - Count)` 的低 32 位后零扩展到 64 位”，避免依赖宿主机对有符号窄化/再扩展的实现细节。
+- 增强了 `cntkctl_el0_timer_access` 裸机用例：
+  - denied path 现在会校验 `CNTVCT_EL0`、`CNTPCT_EL0`、`CNTV_TVAL_EL0`、`CNTP_CTL_EL0` 在 `EL0` 且 `CNTKCTL_EL1` 未放开时 trap 的完整 `ISS[24:0]`；
+  - allowed path 新增了负 `TVAL` 读回检查，确认 `MRS CNT{P,V}_TVAL_EL0` 返回值高 32 位保持为 0，低 32 位保留倒计时视图，不会错误符号扩展成 `0xffffffffffffxxxx`。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/cntkctl_el0_timer_access.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/gic_timer_sysreg.bin -load 0x0 -entry 0x0 -steps 2000000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/gic_timer_phys_sysreg.bin -load 0x0 -entry 0x0 -steps 2000000`
+- `timeout 2400s tests/arm64/run_all.sh`
+- `timeout 1800s tests/linux/run_functional_suite.sh`
+- `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+- 结果：通过。
+
+# 修改日志 2026-03-20 14:44
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮补的是 `EC=0x18` system instruction trap syndrome 的程序可见编码错误：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/el0_daif_uma.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_daif_uma.S)
+  - [tests/arm64/el0_sysreg_privilege.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_sysreg_privilege.S)
+  - [tests/arm64/el0_cache_ops_privilege.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_cache_ops_privilege.S)
+- 根据 ARM ARM，`ESR_ELx.EC=0x18` 的 `ISS` 字段布局应为：
+  - `ISS[21:20]=Op0`
+  - `ISS[19:17]=Op2`
+  - `ISS[16:14]=Op1`
+  - `ISS[13:10]=CRn`
+  - `ISS[9:5]=Rt`
+  - `ISS[4:1]=CRm`
+  - `ISS[0]=Direction`
+- 旧实现把 `Rt` 错放到了 `ISS[4:0]`，并把 `Direction` 错放到了 `ISS[21]`，导致所有 `MRS/MSR/system instruction trap` 的 syndrome 编码都可能错位。
+- 这轮修正了 `sysreg_trap_iss(...)` 的打包逻辑，并修正了 `MSR DAIFSet/#imm4`、`MSR DAIFClr/#imm4` 在 `EL0` 且 `SCTLR_EL1.UMA=0` 时错误上报 `ISS=0` 的问题；现在它们会像其他 system instruction trap 一样携带完整的 `ISS` 编码。
+- 对应地增强了裸机单测：
+  - `el0_daif_uma` 现在会校验 `MRS/ MSR DAIF` 以及 `MSR DAIFSet/DAIFClr` trap 的完整 `ISS[24:0]`；
+  - `el0_sysreg_privilege` 现在会校验 `MRS CTR_EL0`、`MRS FAR_EL1`、`MSR TCR_EL1, X0`、`MSR DAIFSet, #0xf` 的完整 `ISS`；
+  - `el0_cache_ops_privilege` 现在会校验 `IC IVAU`、`DC ZVA` trap 的完整 `ISS`。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/el0_daif_uma.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/el0_sysreg_privilege.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/el0_cache_ops_privilege.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 2400s tests/arm64/run_all.sh`
+- `timeout 1800s tests/linux/run_functional_suite.sh`
+- `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+- 结果：通过。
+
+# 修改日志 2026-03-20 13:02
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮补的是 `HVC/SMC` 在当前仅实现 `EL0/EL1` 模型下的程序可见异常语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/el1_hvc_smc_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el1_hvc_smc_undef.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 根据手册，`EL2` 未实现时 `HVC` 在 `EL1` 必须是 `UNDEFINED`；`EL3` 未实现且未被更高层 trap 时，`SMC` 在 `EL1` 也必须是 `UNDEFINED`。
+- 旧实现里，`EL1` 执行 `HVC/SMC` 在没有 `SMCCC` 回调处理时，会伪造 `EC=0x16/0x17` 的同步异常，这与当前处理器模型只实现 `EL0/EL1` 的事实不一致。
+- 现在的行为调整为：
+  - `EL0` 的 `HVC/SMC` 继续按 `UNDEFINED` 处理；
+  - `EL1` 的 `HVC/SMC` 在 `SMCCC` 回调成功处理时仍可直接返回，保持现有 `PSCI` 路径可用；
+  - `EL1` 的 `HVC/SMC` 在回调未处理时改为真正的 `UNDEFINED` 异常，`ESR_EL1.EC=0`、`ISS=0`、`ELR_EL1` 指向故障指令。
+- 新增裸机单测 [tests/arm64/el1_hvc_smc_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el1_hvc_smc_undef.S)：
+  - 覆盖 `EL1 HVC #imm16` 与 `EL1 SMC #imm16` 在无回调兜底时的 `UNDEFINED` 行为；
+  - 校验 `ESR_EL1.EC==0`；
+  - 校验 `ESR_EL1.ISS==0`；
+  - 校验 `ELR_EL1` 指向原始 `HVC/SMC` 指令，而不是下一条指令。
+
+## 本轮测试
+
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 1200s cmake --build build -j`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/el1_hvc_smc_undef.bin -load 0x0 -entry 0x0 -steps 600000`
+- `timeout 2400s tests/arm64/run_all.sh`
+- `timeout 1800s tests/linux/run_functional_suite.sh`
+- `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+- 结果：通过。
+
 # 修改日志 2026-03-20 03:30
 
 ## 本轮修改
@@ -3285,3 +3408,149 @@
 
 - 这轮暂未发现 `pairwise/reduce` helper 的真实执行语义错误；当前行为与这批新核对的边界一致。
 - 真实收获仍然是补网：把此前没有被系统固定住的 `sNaN 优先级 / payload 传播 / DN default-NaN / FZ signed-zero` 规则纳入常规回归。
+
+# 修改日志 2026-03-20 15:14
+
+## 本轮修改
+
+- 修正 cache maintenance / address-translation 类 system instruction fault 的 syndrome 编码：
+  - [include/aarchvm/cpu.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/cpu.hpp)
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/mmu_cache_maint_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_cache_maint_fault.S)
+- 现在 `IC IVAU`、`DC CVAC/CVAU/CIVAC`、`DC ZVA`、`AT S1E*` fault 不再复用普通 data abort ISS，而是按 Armv8-A 程序可见要求上报：
+  - `CM=1`
+  - `WnR=1`
+- 补齐 `PAR_EL1` 成功态的 guest 可见字段编码：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/mmu_at_tlb_observe.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_at_tlb_observe.S)
+  - [tests/arm64/mmu_at_el0_permissions.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_at_el0_permissions.S)
+  - [tests/arm64/mmu_tcr_ips_mair_decode.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_tcr_ips_mair_decode.S)
+  - [tests/arm64/mmu_tlb_cache.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_tlb_cache.S)
+  - [tests/arm64/mmu_af_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_af_fault.S)
+- `AT` 成功后现在会对 guest 填充：
+  - `PA[55:12]`
+  - `bit11 = RES1`
+  - `SH`
+  - `ATTR`
+- 当前仍维持高性能导向的最小模型，不追求安全态 / RME / `PAR_EL1` 非当前实现范围位段的精确建模。
+
+## 本轮测试
+
+- 定向构建：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 300s tests/arm64/build_tests.sh`
+- 定向 ISA / MMU 验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/mmu_cache_maint_fault.bin -load 0x0 -entry 0x0 -steps 4000000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/el0_cache_ops_privilege.bin -load 0x0 -entry 0x0 -steps 800000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/mmu_tlb_cache.bin -load 0x0 -entry 0x0 -steps 5000000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/mmu_at_tlb_observe.bin -load 0x0 -entry 0x0 -steps 4000000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/mmu_at_el0_permissions.bin -load 0x0 -entry 0x0 -steps 4000000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/mmu_tcr_ips_mair_decode.bin -load 0x0 -entry 0x0 -steps 4000000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/mmu_af_fault.bin -load 0x0 -entry 0x0 -steps 4000000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 2400s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮是真正的 guest 可见语义修正，不只是补 coverage。
+- 当前 `ESR_EL1.ISS` 与 `PAR_EL1` 的这两处程序可见缺口已被补上，并已经纳入常规裸机与 Linux 回归。
+- 上一轮 Linux UMP 失败是并行执行 `tests/linux/run_functional_suite.sh` 与 `tests/linux/run_functional_suite_smp.sh` 共享 `initramfs` staging 目录导致的脚本级假失败；串行执行后回归通过。
+
+# 修改日志 2026-03-20 15:27
+
+## 本轮修改
+
+- 补齐 `ERET` 非法返回与 `PSTATE.IL` 的程序可见最小闭环：
+  - [include/aarchvm/system_registers.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/system_registers.hpp)
+  - [src/system_registers.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/system_registers.cpp)
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+- 现在当 `SPSR_EL1` 指定非法返回状态时，`ERET` 不会直接当场报错，而是按 Armv8-A 程序可见语义：
+  - 保持当前 EL 不变；
+  - 把 `PSTATE.IL` 置 1；
+  - 分支到 `ELR_EL1`；
+  - 由下一条指令尝试触发 `Illegal State` 异常，`ESR_EL1.EC = 0x0E`。
+- 同时补齐了“合法返回但 `SPSR_EL1.IL=1`”的路径，确保首次目标指令同样触发 `Illegal State`。
+- `PSTATE.IL` 现在参与：
+  - `PSTATE/SPSR_EL1` 编解码；
+  - 异常入口保存与清除；
+  - 快照保存与恢复。
+- 快照版本从 `14` 升到 `15`：
+  - [src/soc.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/soc.cpp)
+  - 仍兼容加载旧版本快照，旧快照恢复时 `IL` 默认按 `0` 处理。
+- 新增裸机单测，覆盖：
+  - 非法 `ERET`；
+  - 合法返回但 `SPSR.IL=1`；
+  - 异常前目标指令不得被执行；
+  - `ELR_EL1/SPSR_EL1/EC` 的可见值。
+  - [tests/arm64/illegal_state_return.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/illegal_state_return.S)
+- 回归脚本与构建脚本已纳入该测试：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+
+## 本轮测试
+
+- 定向构建：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 300s tests/arm64/build_tests.sh`
+- 新增语义定向验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/illegal_state_return.bin -load 0x0 -entry 0x0 -steps 600000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 2400s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮补上的是异常返回路径里一个此前确实缺失的 guest 可见行为，而不是单纯测试补网。
+- 目前对 `illegal ERET` 的实现仍是“面向当前模型的最小正确性闭环”：
+  - 只覆盖当前声明支持的 `AArch64 EL0/EL1`；
+  - 不扩展到 `AArch32/EL2/EL3`。
+
+# 修改日志 2026-03-20 15:36
+
+## 本轮修改
+
+- 修正 `ESR_EL1.IL` 的 guest 可见编码：
+  - [src/system_registers.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/system_registers.cpp)
+- 之前同步异常路径在写 `ESR_EL1` 时基本漏掉了 `IL` 位，导致 AArch64 guest 看到的大量 syndrome 都错误地报告为 `IL=0`。
+- 现在对当前模型中的 AArch64 同步异常统一报告 `IL=1`，覆盖：
+  - `SVC`
+  - system register / system instruction trap
+  - instruction abort / data abort
+  - illegal state
+  - 以及其它通过 `enter_sync_exception()` 进入的 AArch64 同步异常路径
+- 同时补了一处兼容性细节：
+  - 旧版本快照恢复时，若快照中不存在 `PSTATE.IL` 字段，明确按 `0` 恢复，而不是依赖对象当前内存状态。
+- 扩充裸机单测，把 `IL=1` 固定进回归：
+  - [tests/arm64/svc_sysreg_minimal.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/svc_sysreg_minimal.S)
+  - [tests/arm64/sync_exception_regs.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/sync_exception_regs.S)
+  - [tests/arm64/el0_sysreg_privilege.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_sysreg_privilege.S)
+  - [tests/arm64/illegal_state_return.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/illegal_state_return.S)
+
+## 本轮测试
+
+- 定向构建：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 300s tests/arm64/build_tests.sh`
+- 定向异常验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/svc_sysreg_minimal.bin -load 0x0 -entry 0x0 -steps 300000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/sync_exception_regs.bin -load 0x0 -entry 0x0 -steps 2000000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/el0_sysreg_privilege.bin -load 0x0 -entry 0x0 -steps 400000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/illegal_state_return.bin -load 0x0 -entry 0x0 -steps 600000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 2400s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮修的是异常 syndrome 编码本身，不是测试层面的补网。
+- 在当前 AArch64-only 模型下，把同步异常统一报告为 `IL=1` 是符合架构伪代码的程序可见最小实现。

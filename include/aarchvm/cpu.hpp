@@ -261,6 +261,8 @@ private:
     return true;
   }
   [[nodiscard]] std::uint32_t fault_status_code(const TranslationFault& fault) const;
+  [[nodiscard]] std::uint32_t data_abort_iss(const TranslationFault& fault,
+                                             bool cache_maintenance_or_translation) const;
   void set_par_el1_for_fault(const TranslationFault& fault);
   [[nodiscard]] WalkAttributes decode_walk_attributes(bool va_upper) const;
   [[nodiscard]] MemoryType decode_memory_type(std::uint8_t mair_attr) const;
@@ -287,7 +289,7 @@ private:
   void tlb_insert(std::uint64_t va_page, const TranslationResult& result);
   void tlb_insert_entry(std::uint64_t va_page, const TlbEntry& entry);
   void tlb_invalidate_page(std::uint64_t va_page, std::uint16_t asid, bool match_asid);
-  void data_abort(std::uint64_t va);
+  void data_abort(std::uint64_t va, bool cache_maintenance_or_translation = false);
   [[nodiscard]] static constexpr bool access_is_write(AccessType access) {
     return access == AccessType::Write || access == AccessType::UnprivilegedWrite;
   }

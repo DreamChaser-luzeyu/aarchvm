@@ -13,6 +13,7 @@ public:
     bool z = false;
     bool c = false;
     bool v = false;
+    bool il = false;
     bool d = false;
     bool a = false;
     bool i = false;
@@ -82,6 +83,7 @@ public:
   void set_cntvct(std::uint64_t value) { cntvct_el0_ = value; }
   [[nodiscard]] std::uint64_t vbar_el1() const { return vbar_el1_; }
   [[nodiscard]] bool irq_masked() const { return pstate_.i; }
+  [[nodiscard]] bool illegal_execution_state() const { return pstate_.il; }
   [[nodiscard]] std::uint8_t current_el() const { return static_cast<std::uint8_t>((pstate_.mode >> 2) & 0x3u); }
   [[nodiscard]] bool in_el0() const { return current_el() == 0u; }
   [[nodiscard]] bool current_uses_sp_el0() const { return pstate_.mode == 0x0u || pstate_.mode == 0x4u; }
@@ -94,12 +96,13 @@ public:
 
   void exception_enter_irq(std::uint64_t return_pc);
   void exception_enter_sync(std::uint64_t return_pc, std::uint32_t ec, std::uint32_t iss, bool far_valid, std::uint64_t far);
-  [[nodiscard]] std::uint64_t exception_return();
+  [[nodiscard]] bool illegal_exception_return() const;
+  [[nodiscard]] std::uint64_t exception_return(bool illegal_psr_state);
   void daif_set(std::uint8_t imm4);
   void daif_clr(std::uint8_t imm4);
 
   [[nodiscard]] bool save_state(std::ostream& out) const;
-  [[nodiscard]] bool load_state(std::istream& in);
+  [[nodiscard]] bool load_state(std::istream& in, std::uint32_t version = 15);
 
 private:
   static std::uint32_t make_key(std::uint32_t op0,

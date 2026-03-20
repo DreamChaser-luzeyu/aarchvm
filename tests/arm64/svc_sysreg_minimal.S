@@ -69,6 +69,7 @@ sync_spx:
 
 sync_handler:
     mrs  x2, esr_el1
+    tbz  x2, #25, fail_from_handler
     lsr  x3, x2, #26
     movz x4, #0x15
     subs xzr, x3, x4

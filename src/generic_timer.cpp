@@ -120,8 +120,9 @@ std::uint64_t GenericTimer::read_ctl(const TimerChannel& channel, std::uint64_t 
 }
 
 std::uint64_t GenericTimer::read_tval(const TimerChannel& channel, std::uint64_t current) {
-  const std::int64_t delta = static_cast<std::int64_t>(channel.cval - current);
-  return static_cast<std::uint32_t>(delta);
+  // CNT{P,V}_TVAL_EL0 expose the low 32 bits of (CVAL - Count), with the
+  // architectural 64-bit MRS result zero-extending that 32-bit view.
+  return static_cast<std::uint64_t>(static_cast<std::uint32_t>(channel.cval - current));
 }
 
 void GenericTimer::write_ctl(TimerChannel& channel, std::uint64_t value) {

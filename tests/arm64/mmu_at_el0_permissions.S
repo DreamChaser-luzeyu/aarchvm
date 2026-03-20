@@ -80,8 +80,17 @@ _start:
     // EL0 read on EL0-RW page succeeds.
     at   s1e0r, x30
     mrs  x4, par_el1
-    movz x5, #0x0050, lsl #16
-    subs xzr, x4, x5
+    tbnz x4, #0, fail
+    tbz  x4, #11, fail
+    ubfx x5, x4, #12, #44
+    movz x6, #0x0500
+    subs xzr, x5, x6
+    b.ne fail
+    lsr  x5, x4, #56
+    cbnz x5, fail
+    ubfx x5, x4, #7, #2
+    movz x6, #2
+    subs xzr, x5, x6
     b.ne fail
 
     // EL0 read on privileged-only page reports a permission fault in PAR_EL1.
@@ -95,8 +104,17 @@ _start:
     // EL0 write on EL0-RW page succeeds.
     at   s1e0w, x30
     mrs  x4, par_el1
-    movz x5, #0x0050, lsl #16
-    subs xzr, x4, x5
+    tbnz x4, #0, fail
+    tbz  x4, #11, fail
+    ubfx x5, x4, #12, #44
+    movz x6, #0x0500
+    subs xzr, x5, x6
+    b.ne fail
+    lsr  x5, x4, #56
+    cbnz x5, fail
+    ubfx x5, x4, #7, #2
+    movz x6, #2
+    subs xzr, x5, x6
     b.ne fail
 
     // EL0 write on EL0-RO page reports the same permission-fault FST in PAR_EL1.

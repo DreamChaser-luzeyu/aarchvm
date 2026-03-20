@@ -82,8 +82,19 @@ par_fault_ok:
 
     at   s1e1r, x30
     mrs  x13, par_el1
-    movz x14, #0x0001, lsl #32
-    subs xzr, x13, x14
+    tbnz x13, #0, fail
+    tbz  x13, #11, fail
+    ubfx x14, x13, #12, #44
+    movz x15, #0x0010, lsl #16
+    subs xzr, x14, x15
+    b.ne fail
+    lsr  x14, x13, #56
+    movz x15, #0x00ff
+    subs xzr, x14, x15
+    b.ne fail
+    ubfx x14, x13, #7, #2
+    movz x15, #3
+    subs xzr, x14, x15
     b.ne fail
 
     movz x2, #0

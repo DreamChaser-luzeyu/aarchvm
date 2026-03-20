@@ -232,6 +232,7 @@ std::uint64_t SystemRegisters::daif() const {
 
 std::uint64_t SystemRegisters::pstate_bits() const {
   return nzcv() |
+         (pstate_.il ? (1ull << 20) : 0ull) |
          daif() |
          (pstate_.pan ? (1ull << 22) : 0ull) |
          (static_cast<std::uint64_t>(pstate_.mode) & 0xFu);
@@ -239,6 +240,7 @@ std::uint64_t SystemRegisters::pstate_bits() const {
 
 void SystemRegisters::set_pstate_bits(std::uint64_t value) {
   set_nzcv(value);
+  pstate_.il = ((value >> 20) & 1u) != 0;
   set_daif(value);
   pstate_.pan = ((value >> 22) & 1u) != 0;
   pstate_.mode = static_cast<std::uint8_t>(value & 0xFu);
@@ -269,6 +271,7 @@ void SystemRegisters::exception_enter_irq(std::uint64_t return_pc) {
   esr_el1_ = 0;
   pstate_.mode = 0x5u;
   spsel_ = 1u;
+  pstate_.il = false;
   pstate_.d = true;
   pstate_.a = true;
   if ((sctlr_el1_ & kSctlrEl1Span) == 0u) {
@@ -285,10 +288,15 @@ void SystemRegisters::exception_enter_sync(std::uint64_t return_pc,
                                            std::uint64_t far) {
   elr_el1_ = return_pc;
   spsr_el1_ = pstate_bits();
-  esr_el1_ = (static_cast<std::uint64_t>(ec & 0x3Fu) << 26) | (iss & 0x1FFFFFFu);
+  // This model only supports AArch64 guest execution, so synchronous exceptions
+  // are always reported as arising from a 32-bit A64 instruction.
+  esr_el1_ = (static_cast<std::uint64_t>(ec & 0x3Fu) << 26) |
+             (1ull << 25) |
+             (iss & 0x1FFFFFFu);
   far_el1_ = far_valid ? far : 0;
   pstate_.mode = 0x5u;
   spsel_ = 1u;
+  pstate_.il = false;
   pstate_.d = true;
   pstate_.a = true;
   if ((sctlr_el1_ & kSctlrEl1Span) == 0u) {
@@ -298,7 +306,30 @@ void SystemRegisters::exception_enter_sync(std::uint64_t return_pc,
   pstate_.f = true;
 }
 
-std::uint64_t SystemRegisters::exception_return() {
+bool SystemRegisters::illegal_exception_return() const {
+  if ((spsr_el1_ & (1ull << 4)) != 0u) {
+    return true; // AArch32 return state is unsupported in this model.
+  }
+
+  switch (static_cast<std::uint8_t>(spsr_el1_ & 0xFu)) {
+    case 0x0u: // EL0t
+    case 0x4u: // EL1t
+    case 0x5u: // EL1h
+      return false;
+    default:
+      return true;
+  }
+}
+
+std::uint64_t SystemRegisters::exception_return(bool illegal_psr_state) {
+  if (illegal_psr_state) {
+    set_nzcv(spsr_el1_);
+    set_daif(spsr_el1_);
+    pstate_.pan = ((spsr_el1_ >> 22) & 1u) != 0;
+    pstate_.il = true;
+    return elr_el1_;
+  }
+
   set_pstate_bits(spsr_el1_);
   return elr_el1_;
 }
@@ -403,6 +434,7 @@ bool SystemRegisters::save_state(std::ostream& out) const {
          snapshot_io::write_bool(out, pstate_.z) &&
          snapshot_io::write_bool(out, pstate_.c) &&
          snapshot_io::write_bool(out, pstate_.v) &&
+         snapshot_io::write_bool(out, pstate_.il) &&
          snapshot_io::write_bool(out, pstate_.d) &&
          snapshot_io::write_bool(out, pstate_.a) &&
          snapshot_io::write_bool(out, pstate_.i) &&
@@ -411,7 +443,8 @@ bool SystemRegisters::save_state(std::ostream& out) const {
          snapshot_io::write(out, pstate_.mode);
 }
 
-bool SystemRegisters::load_state(std::istream& in) {
+bool SystemRegisters::load_state(std::istream& in, std::uint32_t version) {
+  pstate_.il = false;
   return snapshot_io::read(in, sctlr_el1_) &&
          snapshot_io::read(in, cpacr_el1_) &&
          snapshot_io::read(in, midr_el1_) &&
@@ -472,6 +505,7 @@ bool SystemRegisters::load_state(std::istream& in) {
          snapshot_io::read_bool(in, pstate_.z) &&
          snapshot_io::read_bool(in, pstate_.c) &&
          snapshot_io::read_bool(in, pstate_.v) &&
+         ((version < 15) || snapshot_io::read_bool(in, pstate_.il)) &&
          snapshot_io::read_bool(in, pstate_.d) &&
          snapshot_io::read_bool(in, pstate_.a) &&
          snapshot_io::read_bool(in, pstate_.i) &&

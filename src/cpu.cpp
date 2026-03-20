@@ -69,13 +69,13 @@ constexpr std::uint32_t sysreg_trap_iss(bool is_read,
                                         std::uint32_t crm,
                                         std::uint32_t op2,
                                         std::uint32_t rt) {
-  return (rt & 0x1Fu) |
-         ((op2 & 0x7u) << 5u) |
-         ((crm & 0xFu) << 8u) |
-         ((crn & 0xFu) << 12u) |
-         ((op1 & 0x7u) << 16u) |
-         ((op0 & 0x3u) << 19u) |
-         ((is_read ? 1u : 0u) << 21u);
+  return ((op0 & 0x3u) << 20u) |
+         ((op2 & 0x7u) << 17u) |
+         ((op1 & 0x7u) << 14u) |
+         ((crn & 0xFu) << 10u) |
+         ((rt & 0x1Fu) << 5u) |
+         ((crm & 0xFu) << 1u) |
+         (is_read ? 1u : 0u);
 }
 
 std::uint64_t ones(std::uint32_t bits) {
@@ -1885,8 +1885,10 @@ void Cpu::on_code_write(std::uint64_t va, std::uint64_t pa, std::size_t size) {
   invalidate_decode_pa(pa, size);
 }
 
-void Cpu::data_abort(std::uint64_t va) {
-  const std::uint32_t iss = last_translation_fault_.has_value() ? fault_status_code(*last_translation_fault_) : 0u;
+void Cpu::data_abort(std::uint64_t va, bool cache_maintenance_or_translation) {
+  const std::uint32_t iss =
+      last_translation_fault_.has_value() ? data_abort_iss(*last_translation_fault_, cache_maintenance_or_translation)
+                                          : 0u;
   const std::uint64_t far = last_data_fault_va_.value_or(va);
   enter_sync_exception(pc_ - 4, sysregs_.in_el0() ? 0x24u : 0x25u, iss, true, far);
   last_data_fault_va_.reset();
@@ -3290,6 +3292,11 @@ bool Cpu::step() {
     return true;
   }
 
+  if (sysregs_.illegal_execution_state()) {
+    enter_sync_exception(pc_, 0x0Eu, 0u, false, 0u);
+    return true;
+  }
+
   if (pc_watch_enabled_) {
     auto pc_watch = pc_watch_hits_.find(pc_);
     if (pc_watch != pc_watch_hits_.end() && !pc_watch->second) {
@@ -3415,7 +3422,8 @@ bool Cpu::step() {
     }
     save_current_sp_to_bank();
     clear_exclusive_monitor();
-    pc_ = sysregs_.exception_return();
+    const bool illegal_return = sysregs_.illegal_exception_return();
+    pc_ = sysregs_.exception_return(illegal_return);
     load_current_sp_from_bank();
     if (trace_eret_lower_count_ < trace_eret_lower_limit_ && sysregs_.in_el0()) {
       ++trace_eret_lower_count_;
@@ -3464,7 +3472,7 @@ bool Cpu::step() {
     if (callbacks_.smccc_call && callbacks_.smccc_call(*this, true, static_cast<std::uint16_t>((insn >> 5) & 0xFFFFu))) {
       return true;
     }
-    enter_sync_exception(this_pc, 0x16u, (insn >> 5) & 0xFFFFu, false, 0);
+    enter_sync_exception(this_pc, 0x00u, 0u, false, 0);
     return true;
   }
   if ((insn & 0xFFE0001Fu) == 0xD4000003u) { // SMC #imm16
@@ -3475,7 +3483,7 @@ bool Cpu::step() {
     if (callbacks_.smccc_call && callbacks_.smccc_call(*this, false, static_cast<std::uint16_t>((insn >> 5) & 0xFFFFu))) {
       return true;
     }
-    enter_sync_exception(this_pc, 0x17u, (insn >> 5) & 0xFFFFu, false, 0);
+    enter_sync_exception(this_pc, 0x00u, 0u, false, 0);
     return true;
   }
   if ((insn & 0xFFE0001Fu) == 0xD4000001u) { // SVC #imm16
@@ -4153,6 +4161,15 @@ std::uint32_t Cpu::fault_status_code(const TranslationFault& fault) const {
   return fsc | (fault.write ? (1u << 6) : 0u);
 }
 
+std::uint32_t Cpu::data_abort_iss(const TranslationFault& fault, bool cache_maintenance_or_translation) const {
+  std::uint32_t iss = fault_status_code(fault);
+  if (cache_maintenance_or_translation) {
+    iss |= (1u << 8); // CM
+    iss |= (1u << 6); // WnR is architecturally 1 for cache maintenance / AT system instructions.
+  }
+  return iss;
+}
+
 void Cpu::set_par_el1_for_fault(const TranslationFault& fault) {
   const std::uint64_t fst = static_cast<std::uint64_t>(fault_status_code(fault) & 0x3Fu);
   sysregs_.set_par_el1(1ull | (fst << 1) | (1ull << 11));
@@ -4467,11 +4484,6 @@ bool Cpu::exec_system(std::uint32_t insn) {
     return true;
   }
 
-  const auto trap_el0_system_access = [&]() {
-    enter_sync_exception(pc_ - 4u, 0x18u, 0u, false, 0u);
-    return true;
-  };
-
   const auto undefined_current_instruction = [&]() {
     enter_sync_exception(pc_ - 4u, 0x00u, 0u, false, 0u);
     return true;
@@ -4508,9 +4520,34 @@ bool Cpu::exec_system(std::uint32_t insn) {
     return !sysregs_.in_el0() || (sysregs_.sctlr_el1() & kSctlrEl1Uma) != 0u;
   };
 
+  const auto par_reported_shareability = [&](const TranslationResult& result) -> std::uint64_t {
+    if (result.memory_type == MemoryType::Device || result.mair_attr == 0x44u) {
+      return 0x2u; // Device and Normal Non-cacheable are reported as Outer Shareable.
+    }
+    switch (result.leaf_shareability) {
+      case Shareability::NonShareable:
+        return 0x0u;
+      case Shareability::OuterShareable:
+        return 0x2u;
+      case Shareability::InnerShareable:
+        return 0x3u;
+      case Shareability::Reserved:
+      default:
+        return 0x0u;
+    }
+  };
+
+  const auto par_success_value = [&](const TranslationResult& result) -> std::uint64_t {
+    std::uint64_t value = result.pa & 0x0000FFFFFFFFF000ull;
+    value |= 1ull << 11; // RES1 in 64-bit PAR format.
+    value |= par_reported_shareability(result) << 7;
+    value |= static_cast<std::uint64_t>(result.mair_attr) << 56;
+    return value;
+  };
+
   const auto update_par_from_translation = [&](bool ok, const TranslationResult& result) {
     if (ok) {
-      sysregs_.set_par_el1(result.pa & 0x0000FFFFFFFFF000ull);
+      sysregs_.set_par_el1(par_success_value(result));
     } else if (last_translation_fault_.has_value()) {
       set_par_el1_for_fault(*last_translation_fault_);
     } else {
@@ -4719,7 +4756,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
     const std::uint32_t rt = insn & 0x1Fu;
     TranslationResult result{};
     if (!translate_cache_maintenance_address(reg(rt), &result, false)) {
-      data_abort(reg(rt));
+      data_abort(reg(rt), true);
       return true;
     }
     invalidate_decode_va(reg(rt), 1u);
@@ -4741,7 +4778,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
     }
     TranslationResult result{};
     if (!translate_cache_maintenance_address(reg(insn & 0x1Fu), &result, true)) {
-      data_abort(reg(insn & 0x1Fu));
+      data_abort(reg(insn & 0x1Fu), true);
       return true;
     }
     return true;
@@ -4754,7 +4791,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
     }
     TranslationResult result{};
     if (!translate_cache_maintenance_address(reg(insn & 0x1Fu), &result, true)) {
-      data_abort(reg(insn & 0x1Fu));
+      data_abort(reg(insn & 0x1Fu), true);
       return true;
     }
     return true;
@@ -4781,7 +4818,8 @@ bool Cpu::exec_system(std::uint32_t insn) {
       const std::uint64_t va = base + off;
       TranslationResult result{};
       if (!translate_address(va, AccessType::Write, &result, true) || !bus_.write(result.pa, 0, 8)) {
-        const std::uint32_t iss = last_translation_fault_.has_value() ? fault_status_code(*last_translation_fault_) : 0u;
+        const std::uint32_t iss =
+            last_translation_fault_.has_value() ? data_abort_iss(*last_translation_fault_, true) : 0u;
         enter_sync_exception(pc_ - 4, sysregs_.in_el0() ? 0x24u : 0x25u, iss, true, va);
         return true;
       }
@@ -4801,7 +4839,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
     }
     TranslationResult result{};
     if (!translate_cache_maintenance_address(reg(insn & 0x1Fu), &result, true)) {
-      data_abort(reg(insn & 0x1Fu));
+      data_abort(reg(insn & 0x1Fu), true);
       return true;
     }
     return true;
@@ -4878,7 +4916,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
   // MSR DAIFSet, #imm4
   if ((insn & 0xFFFFF0FFu) == 0xD50340DFu) {
     if (!el0_uma_enabled()) {
-      return trap_el0_system_access();
+      return trap_current_system_instruction(insn);
     }
     sysregs_.daif_set(static_cast<std::uint8_t>((insn >> 8) & 0xFu));
     return true;
@@ -4887,7 +4925,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
   // MSR DAIFClr, #imm4
   if ((insn & 0xFFFFF0FFu) == 0xD50340FFu) {
     if (!el0_uma_enabled()) {
-      return trap_el0_system_access();
+      return trap_current_system_instruction(insn);
     }
     sysregs_.daif_clr(static_cast<std::uint8_t>((insn >> 8) & 0xFu));
     return true;
@@ -11699,7 +11737,7 @@ bool Cpu::load_state(std::istream& in, std::uint32_t version) {
   exception_intid_stack_.fill(0);
   exception_prev_prio_stack_.fill(0x100);
   exception_prio_dropped_stack_.fill(false);
-  if (!sysregs_.load_state(in) ||
+  if (!sysregs_.load_state(in, version) ||
       !snapshot_io::read(in, exception_depth_) ||
       exception_depth_ > exception_is_irq_stack_.size()) {
     return false;

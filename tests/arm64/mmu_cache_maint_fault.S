@@ -83,9 +83,13 @@ fault_ic_ivau:
     ic   ivau, x30
     b    fail
 after_ic_ivau:
+fault_zva:
+    dc   zva, x30
+    b    fail
+after_zva:
     adr  x11, handled
     ldr  x12, [x11]
-    cmp  x12, #15
+    cmp  x12, #31
     b.ne fail
 
     movz x2, #0
@@ -116,7 +120,8 @@ sync_handler:
     ubfx x3, x2, #26, #6          // EC
     cmp  x3, #0x25
     b.ne fail_from_handler
-    tbnz x2, #6, fail_from_handler // WnR must be 0
+    tbz  x2, #8, fail_from_handler // CM must be 1 for cache maintenance faults
+    tbz  x2, #6, fail_from_handler // WnR must be 1 for cache maintenance faults
     and  x4, x2, #0x3f            // FSC
     cmp  x4, #0x7                 // translation fault, level 3
     b.ne fail_from_handler
@@ -137,6 +142,9 @@ sync_handler:
     adr  x7, fault_ic_ivau
     cmp  x6, x7
     b.eq handle_ic_ivau
+    adr  x7, fault_zva
+    cmp  x6, x7
+    b.eq handle_zva
     b    fail_from_handler
 
 handle_cvac:
@@ -172,6 +180,15 @@ handle_ic_ivau:
     orr  x12, x12, #8
     str  x12, [x11]
     adr  x8, after_ic_ivau
+    msr  elr_el1, x8
+    eret
+
+handle_zva:
+    adr  x11, handled
+    ldr  x12, [x11]
+    orr  x12, x12, #16
+    str  x12, [x11]
+    adr  x8, after_zva
     msr  elr_el1, x8
     eret
 
