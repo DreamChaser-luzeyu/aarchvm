@@ -2955,3 +2955,198 @@
   - `FPCR.DN/FZ/AH` 在其余 arithmetic / convert / sqrt / estimate / round-int helper 中的系统性影响；
   - 其余 FP helper 的 `FPSR` 置位一致性；
   - 尚未系统差分过的 `qNaN/sNaN/default-NaN/subnormal/±0/Inf` 传播细节。
+
+# 修改日志 2026-03-20 10:49
+
+## 本轮修改
+
+- 修正 `FRECPS/FRSQRTS` 标量与向量路径在 `FPCR.FZ=1` 下的程序可见语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+- 修复方式：
+  - 在 `NaN` 处理后，对输入统一执行 `fp_flush_input_denormal_bits(...)`；
+  - 后续 `Inf/Zero` 特判与普通计算统一基于 flush 后的操作数；
+  - 普通路径补齐宿主浮点异常到 `FPSR` 的映射；
+  - 结果返回前统一执行 `fp_flush_output_denormal_bits(...)`，保证 `FZ` 输出语义一致。
+- 扩展裸机单测 [tests/arm64/fpsimd_fp_step.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fp_step.S)：
+  - 新增 `FRECPS` / `FRSQRTS` 的标量 `S/D` `FZ=1` case；
+  - 新增向量 `4S` `FZ=1` case；
+  - 校验 subnormal 输入在 `FZ=1` 下分别得到 `2.0` / `1.5`；
+  - 校验 `FPSR.IDC=1`。
+- 同时修正该测试文件中的访存偏移超范围问题，避免 `str q..., [xn,#imm]` 超编码范围导致的组装失败。
+
+## 本轮测试
+
+- 定向构建：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 300s tests/arm64/build_tests.sh`
+- 定向验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_fp_step.bin -load 0x0 -entry 0x0 -steps 600000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1800s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮补的是 `FRECPS/FRSQRTS` 在 `FPCR.FZ` 下的真实 ISA 语义，不是利用特定程序路径绕过。
+- 对 `FRECPS/FRSQRTS`，subnormal 输入现在会先按 `FZ` 规则视为零，再进入后续 special-case 与普通计算路径，因此标量和向量行为已经一致。
+- `qemu-aarch64` 在这轮只被当作局部 FP ISA 语义探针，不能替代 system 级结论；system 级正确性仍以本模拟器裸机单测和 Linux 回归为准。
+- “Armv8-A 程序可见正确性收尾计划”仍未结束；下一批仍值得优先审的点是：
+  - 其余 FP/AdvSIMD helper 中 `FPCR.FZ/FZ16/AH` 的系统性一致性；
+  - 其余 estimate / convert / misc 路径的 `FPSR` 置位完整性；
+  - 尚未系统覆盖的 `default-NaN`、`subnormal`、`±0`、`Inf` 组合传播细节。
+
+# 修改日志 2026-03-20 11:04
+
+## 本轮修改
+
+- 修正 `FCVTL/FCVTN/FCVTXN` 在 `FPCR.FZ=1` 下的程序可见语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+- 修复方式：
+  - `fp32_to_fp64_bits(...)` 在 NaN/Inf 处理后补上 `fp_flush_input_denormal_bits(...)`；
+  - `fp64_to_fp32_bits(...)` 与 `fp64_to_fp32_bits_round_to_odd(...)` 同时补上 input flush；
+  - narrowing 路径在生成结果后统一补上 `fp_flush_output_denormal_bits(...)`，使 `FZ` 下的 subnormal 输出按架构规则变成零并置 `UFC`。
+- 扩展裸机单测 [tests/arm64/fp_fz_misc.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_fz_misc.S)：
+  - 新增 `FCVTXN` subnormal input case，校验结果为零且 `FPSR.IDC=1`；
+  - 新增 `FCVTXN` tiny-normal-to-subnormal-output case，校验结果为零且 `FPSR.UFC=1`；
+  - 新增 `FCVTL` subnormal input case；
+  - 新增 `FCVTN` 的 input-flush 与 output-flush case。
+
+## 本轮测试
+
+- ISA 行为探针：
+  - 使用 `qemu-aarch64` 对临时 userspace 探针确认局部 FP ISA 语义：
+    - subnormal 输入被 `FZ` 吞掉时置 `FPSR.IDC`
+    - 正常输入但 narrowing 结果落入 subnormal、再被 `FZ` 吞掉时置 `FPSR.UFC`
+  - 注意：这里只把 `qemu-aarch64` 当局部 ISA 语义探针，不作为 system 级结论。
+- 定向构建：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 300s tests/arm64/build_tests.sh`
+- 定向验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_fz_misc.bin -load 0x0 -entry 0x0 -steps 500000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_fp_convert_long_narrow.bin -load 0x0 -entry 0x0 -steps 500000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_fcvtxn_roundodd.bin -load 0x0 -entry 0x0 -steps 500000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1800s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮补的是 conversion 家族在 `FPCR.FZ` 下的一组真实程序可见缺口，不是对某个具体测试点做特判。
+- 当前 `FCVTL/FCVTN/FCVTXN` 已能区分两类 `FZ` 语义：
+  - subnormal 输入先被 flush，结果为零并置 `IDC`
+  - 正常输入但结果会成为 subnormal 时，输出被 flush，结果为零并置 `UFC`
+- `TODO` 中“浮点 / AdvSIMD 语义收尾”这一大项仍未完成，因此本轮不勾选复选框；下一批仍值得优先审的点是：
+  - 其余 conversion / misc / compare helper 中 `FZ` 一致性；
+  - `FPSR` 各异常位在标量与向量路径中的对齐情况；
+  - `AH` 相关语义是否仍有程序可见缺口。
+
+# 修改日志 2026-03-20 11:28
+
+## 本轮修改
+
+- 修正 `FP -> Int` conversion 在 `FPCR.FZ=1` 下的程序可见语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+- 修复范围：
+  - 标量写回 GPR 的 `FCVTNS/NU/AS/AU/PS/PU/MS/MU/ZS/ZU`
+  - 标量写回 FP/SIMD 寄存器的 `FCVTZS`
+  - 向量 `FCVTNS/NU/AS/AU/PS/PU/MS/MU`
+- 修复方式：
+  - 为 `FP -> Int` 路径补上统一的 `FZ` 输入 flush 预处理；
+  - 在 flush 阶段保留 `FPSR.IDC`，再与后续 conversion 阶段的 `IOC/IXC` 合并，而不是被后续 helper 清掉。
+- 同时修正一处真实的向量解码缺口：
+  - 向量 `FCVTZS/FCVTZU` 之前没有被单独识别，且会因为掩码过宽误落入别的 `FCVT*` 路径；
+  - 现已为向量 `FCVTZS/FCVTZU`（`4S/2D`）补独立 decode/execute 路径。
+- 新增专用裸机单测：
+  - [tests/arm64/fp_fz_to_int.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_fz_to_int.S)
+  - 覆盖标量 GPR 结果、标量 FP-reg 结果、向量 `FCVTZS/FCVTZU` 的 `4S/2D` 路径；
+  - 校验 subnormal 输入在 `FZ=1` 下得到零结果，并置 `FPSR.IDC=1`。
+- 测试框架接线更新：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+
+## 本轮测试
+
+- ISA 行为探针：
+  - 使用 `qemu-aarch64` 对临时 userspace 探针确认局部 FP ISA 语义：
+    - `FCVTNS/ZS/ZU` 的 scalar subnormal 输入在 `FZ=1` 下返回零并置 `FPSR.IDC`
+    - 向量 `FCVTZS/FCVTZU` 的 `4S/2D` subnormal 输入在 `FZ=1` 下返回全零并置 `FPSR.IDC`
+  - 注意：这里只把 `qemu-aarch64` 当局部 ISA 语义探针，不作为 system 级结论。
+- 定向构建：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 300s tests/arm64/build_tests.sh`
+- 定向验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_fz_to_int.bin -load 0x0 -entry 0x0 -steps 500000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_fcvt_flags.bin -load 0x0 -entry 0x0 -steps 300000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_fcvt_rounding_scalar.bin -load 0x0 -entry 0x0 -steps 300000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_fcvt_rounding.bin -load 0x0 -entry 0x0 -steps 500000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1800s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮补的是 `FP -> Int` conversion 家族在 `FPCR.FZ` 下的一组真实程序可见缺口，不是测试特判。
+- 这轮还顺手补齐了一个真实 decode 洞：向量 `FCVTZS/FCVTZU` 现在不再误落进其它 `FCVT*` 路径。
+- `TODO` 中“浮点 / AdvSIMD 语义收尾”这一大项仍未完成，因此本轮仍不勾选复选框；下一批仍值得优先审的点是：
+  - 其余 compare / misc / estimate helper 中 `FZ` 的一致性；
+  - `FPSR` 各异常位在剩余标量/向量路径中的对齐情况；
+  - `AH` 与剩余 NaN/subnormal 传播细节。
+
+# 修改日志 2026-03-20 11:41
+
+## 本轮修改
+
+- 修正 `FMAX/FMIN/FMAXNM/FMINNM` 及其共享 helper 在 `FPCR.FZ=1` 下的程序可见语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+- 修复方式：
+  - `fp_minmax_result_bits(...)` 入口统一补上 `fp_flush_input_denormal_bits(...)`；
+  - 被 flush 的 denormal 输入现在会正确按架构语义变成带符号零，并置 `FPSR.IDC`；
+  - 对 `FMAXNM/FMINNM` 路径，返回结果统一走 `finalize(...)`，保留 numeric 变体的后处理闭环。
+- 新增专用裸机单测：
+  - [tests/arm64/fp_fz_minmax.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_fz_minmax.S)
+  - 覆盖标量 `S/D` 与向量 `4S` 路径；
+  - 覆盖 `FMAX/FMIN` 与 `FMAXNM/FMINNM`；
+  - 校验正负 subnormal 在 `FZ=1` 下被视为 `+0/-0`；
+  - 校验 `qNaN + subnormal` 的 numeric min/max 结果不再把原始 denormal 漏回结果；
+  - 校验 `FPSR.IDC=1`。
+- 测试框架接线更新：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+
+## 本轮测试
+
+- 定向构建：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 300s tests/arm64/build_tests.sh`
+- 定向验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_fz_minmax.bin -load 0x0 -entry 0x0 -steps 400000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_minmax_nan_flags.bin -load 0x0 -entry 0x0 -steps 400000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_minmax_dn.bin -load 0x0 -entry 0x0 -steps 500000`
+- 裸机完整回归：
+  - `timeout 2400s tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 1800s tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮补的是 `min/max` 家族在 `FPCR.FZ` 下的真实 ISA 语义，而不是对特定程序路径做绕过。
+- 之前 `fp_minmax_result_bits(...)` 完全没有处理 `FZ`，因此：
+  - denormal 输入会被错误地直接参与比较；
+  - numeric min/max 在 `qNaN + denormal` 组合下会把原始 denormal 直接漏回结果；
+  - `FPSR.IDC` 也不会正确置位。
+- 现在 `FMAX/FMIN/FMAXNM/FMINNM` 的共享 helper 已经把这条语义链补齐；这也同时覆盖了使用同一 helper 的向量、pairwise、reduce 变体的核心结果选择逻辑。
+- `TODO` 中“浮点 / AdvSIMD 语义收尾”这一大项仍未完成，因此本轮仍不勾选复选框；下一批仍值得优先审的点是：
+  - 其余 FP helper 中 `FZ`/`DN`/异常位映射是否还存在边角不一致；
+  - 尚未系统覆盖的 `FRINT*`、compare/misc 与 NaN payload/sign 传播细节；
+  - 如果未来宣告 `FEAT_AFP`，则需要单独补 `FPCR.AH` 的真实语义，而不是沿用当前“等价于 AH=0”的行为。

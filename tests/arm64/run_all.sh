@@ -135,7 +135,9 @@ run fp_scalar_fcsel.bin 200000
 run fp_scalar_fma.bin 200000
 run_expect fp_arith_fpcr_flags.bin 300000 A
 run_expect fp_fz_arith_compare.bin 300000 F
+run_expect fp_fz_minmax.bin 300000 W
 run_expect fp_fz_misc.bin 500000 Z
+run_expect fp_fz_to_int.bin 400000 T
 run fp_scalar_misc.bin 200000
 run_expect fp_sqrt_flags.bin 300000 Q
 run_expect fp_sqrt_rounding.bin 300000 R

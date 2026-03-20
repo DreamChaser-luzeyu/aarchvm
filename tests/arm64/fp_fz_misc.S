@@ -225,6 +225,71 @@ _start:
     cmp  x2, #0x82
     b.ne fail
 
+    movz x23, #'H'
+    msr  fpsr, xzr
+    ldr  x0, =0x0000000000000001
+    fmov d0, x0
+    fcvtxn s1, d0
+    str  s1, [x21, #160]
+    add  x0, x21, #160
+    adr  x1, exp_zero_s
+    bl   check4
+    mrs  x2, fpsr
+    cmp  x2, #0x80
+    b.ne fail
+
+    movz x23, #'I'
+    msr  fpsr, xzr
+    ldr  x0, =0x3800000000000000
+    fmov d0, x0
+    fcvtxn s1, d0
+    str  s1, [x21, #164]
+    add  x0, x21, #164
+    adr  x1, exp_zero_s
+    bl   check4
+    mrs  x2, fpsr
+    cmp  x2, #0x8
+    b.ne fail
+
+    movz x23, #'J'
+    msr  fpsr, xzr
+    adr  x22, vec_fcvtl_src
+    ldr  d0, [x22]
+    fcvtl v1.2d, v0.2s
+    str  q1, [x21, #176]
+    add  x0, x21, #176
+    adr  x1, exp_vec_fcvtl
+    bl   check16
+    mrs  x2, fpsr
+    cmp  x2, #0x80
+    b.ne fail
+
+    movz x23, #'K'
+    msr  fpsr, xzr
+    adr  x22, vec_fcvtn_in_src
+    ldr  q0, [x22]
+    fcvtn v1.2s, v0.2d
+    str  q1, [x21, #192]
+    add  x0, x21, #192
+    adr  x1, exp_vec_fcvtn
+    bl   check16
+    mrs  x2, fpsr
+    cmp  x2, #0x80
+    b.ne fail
+
+    movz x23, #'L'
+    msr  fpsr, xzr
+    adr  x22, vec_fcvtn_out_src
+    ldr  q0, [x22]
+    fcvtn v1.2s, v0.2d
+    str  q1, [x21, #208]
+    add  x0, x21, #208
+    adr  x1, exp_vec_fcvtn
+    bl   check16
+    mrs  x2, fpsr
+    cmp  x2, #0x8
+    b.ne fail
+
     movz x0, #'Z'
     str  x0, [x20]
     brk  #0
@@ -261,7 +326,7 @@ fail:
     .data
     .balign 16
 dst:
-    .space 160
+    .space 224
 
 exp_zero_s:
     .word 0x00000000
@@ -298,3 +363,16 @@ vec_frsqrte_src:
     .word 0x00000001, 0x3f800000, 0x40800000, 0x7f800000
 exp_vec_frsqrte:
     .word 0x7f800000, 0x3f7f8000, 0x3eff8000, 0x00000000
+
+vec_fcvtl_src:
+    .word 0x00000001, 0x3f800000
+exp_vec_fcvtl:
+    .quad 0x0000000000000000, 0x3ff0000000000000
+
+    .balign 16
+vec_fcvtn_in_src:
+    .quad 0x0000000000000001, 0x3ff0000000000000
+vec_fcvtn_out_src:
+    .quad 0x3800000000000000, 0x3ff0000000000000
+exp_vec_fcvtn:
+    .word 0x00000000, 0x3f800000, 0x00000000, 0x00000000

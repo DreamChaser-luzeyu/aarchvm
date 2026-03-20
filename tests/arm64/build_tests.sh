@@ -65,7 +65,9 @@ build_asm_prog fp_scalar_fcsel
 build_asm_prog fp_scalar_fma
 build_asm_prog fp_arith_fpcr_flags
 build_asm_prog fp_fz_arith_compare
+build_asm_prog fp_fz_minmax
 build_asm_prog fp_fz_misc
+build_asm_prog fp_fz_to_int
 build_asm_prog fp_scalar_misc
 build_asm_prog fp_sqrt_flags
 build_asm_prog fp_sqrt_rounding

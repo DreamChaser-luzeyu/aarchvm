@@ -346,6 +346,98 @@ _start:
     cmp  x2, #0x10
     b.ne failO
 
+    mov  x24, #(1 << 24)
+    msr  fpcr, x24
+    isb
+
+    msr  fpsr, xzr
+    adr  x22, src_frecps_fz_s
+    ldr  s1, [x22]
+    ldr  s2, [x22, #4]
+    frecps s0, s1, s2
+    str  s0, [x21, #224]
+    movz x23, #'P'
+    add  x0, x21, #224
+    adr  x1, exp_frecps_fz_s
+    bl   check4
+    mrs  x2, fpsr
+    cmp  x2, #0x80
+    b.ne failP
+
+    msr  fpsr, xzr
+    adr  x22, src_frsqrts_fz_s
+    ldr  s11, [x22]
+    ldr  s12, [x22, #4]
+    frsqrts s10, s11, s12
+    str  s10, [x21, #228]
+    movz x23, #'Q'
+    add  x0, x21, #228
+    adr  x1, exp_frsqrts_fz_s
+    bl   check4
+    mrs  x2, fpsr
+    cmp  x2, #0x80
+    b.ne failQ
+
+    msr  fpsr, xzr
+    adr  x22, src_frecps_fz_d
+    ldr  d3, [x22]
+    ldr  d4, [x22, #8]
+    frecps d2, d3, d4
+    str  d2, [x21, #232]
+    movz x23, #'R'
+    add  x0, x21, #232
+    adr  x1, exp_frecps_fz_d
+    bl   check8
+    mrs  x2, fpsr
+    cmp  x2, #0x80
+    b.ne failR
+
+    msr  fpsr, xzr
+    adr  x22, src_frsqrts_fz_d
+    ldr  d13, [x22]
+    ldr  d14, [x22, #8]
+    frsqrts d12, d13, d14
+    str  d12, [x21, #240]
+    movz x23, #'T'
+    add  x0, x21, #240
+    adr  x1, exp_frsqrts_fz_d
+    bl   check8
+    mrs  x2, fpsr
+    cmp  x2, #0x80
+    b.ne failT
+
+    msr  fpsr, xzr
+    adr  x22, src_vec_frecps_fz_s
+    ldr  q22, [x22]
+    adr  x22, src_vec_frecps_fz_s_rhs
+    ldr  q23, [x22]
+    frecps v21.4s, v22.4s, v23.4s
+    add  x24, x21, #248
+    str  q21, [x24]
+    movz x23, #'U'
+    add  x0, x21, #248
+    adr  x1, exp_vec_frecps_fz_s
+    bl   check16
+    mrs  x2, fpsr
+    cmp  x2, #0x80
+    b.ne failU
+
+    msr  fpsr, xzr
+    adr  x22, src_vec_frsqrts_fz_s
+    ldr  q28, [x22]
+    adr  x22, src_vec_frsqrts_fz_s_rhs
+    ldr  q29, [x22]
+    frsqrts v27.4s, v28.4s, v29.4s
+    add  x24, x21, #264
+    str  q27, [x24]
+    movz x23, #'V'
+    add  x0, x21, #264
+    adr  x1, exp_vec_frsqrts_fz_s
+    bl   check16
+    mrs  x2, fpsr
+    cmp  x2, #0x80
+    b.ne failV
+
     msr  fpcr, xzr
 
     movz x0, #'S'
@@ -427,6 +519,25 @@ failN:
     b done
 failO:
     movz x0, #'O'
+    b done
+failP:
+    movz x0, #'P'
+    b done
+failQ:
+    movz x0, #'Q'
+    b done
+failR:
+    movz x0, #'R'
+    b done
+failT:
+    movz x0, #'T'
+    b done
+failU:
+    movz x0, #'U'
+    b done
+failV:
+    movz x0, #'V'
+    b done
 done:
     str  x0, [x20]
     brk  #0
@@ -549,6 +660,41 @@ exp_vec_frsqrts_s_inexact_rne:
 exp_vec_frsqrts_s_inexact_rm:
     .word 0x3fa147ad, 0x3fa00000, 0x3f000000, 0x40200000
 
+src_frecps_fz_s:
+    .word 0x00000001, 0x3f800000
+exp_frecps_fz_s:
+    .word 0x40000000
+
+src_frsqrts_fz_s:
+    .word 0x00000001, 0x3f800000
+exp_frsqrts_fz_s:
+    .word 0x3fc00000
+
+src_frecps_fz_d:
+    .quad 0x0000000000000001, 0x3ff0000000000000
+exp_frecps_fz_d:
+    .quad 0x4000000000000000
+
+src_frsqrts_fz_d:
+    .quad 0x0000000000000001, 0x3ff0000000000000
+exp_frsqrts_fz_d:
+    .quad 0x3ff8000000000000
+
+    .balign 16
+src_vec_frecps_fz_s:
+    .word 0x00000001, 0x40000000, 0x7f800000, 0xbf800000
+src_vec_frecps_fz_s_rhs:
+    .word 0x3f800000, 0x3f800000, 0x00000000, 0x40000000
+exp_vec_frecps_fz_s:
+    .word 0x40000000, 0x00000000, 0x40000000, 0x40800000
+
+src_vec_frsqrts_fz_s:
+    .word 0x00000001, 0x40400000, 0x7f800000, 0xbf800000
+src_vec_frsqrts_fz_s_rhs:
+    .word 0x3f800000, 0x3f800000, 0x00000000, 0x40000000
+exp_vec_frsqrts_fz_s:
+    .word 0x3fc00000, 0x00000000, 0x3fc00000, 0x40200000
+
     .balign 16
 dst:
-    .space 224
+    .space 280
