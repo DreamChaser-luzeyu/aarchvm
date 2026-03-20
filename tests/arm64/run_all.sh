@@ -29,7 +29,7 @@ run_expect() {
   test "$(./build/aarchvm -bin "tests/arm64/out/${bin}" -load 0x0 -entry 0x0 -steps "$steps" | tr -d '\r\n')" = "$expected"
 }
 
-run instr_legacy_each.bin 3000000
+run_expect instr_legacy_each.bin 3000000 E
 run mmu_tlb_cache.bin 5000000
 run mmu_ttbr1_early.bin 3000000
 run mmu_tlb_vae1_scope.bin 4000000
@@ -42,6 +42,11 @@ run mmu_at_tlb_observe.bin 4000000
 run mmu_at_el0_permissions.bin 4000000
 run mmu_ttbr_asid_mask.bin 4000000
 run mmu_perm_ro_write_abort.bin 4000000
+run_expect mmu_dc_cva_el0_perm_fault.bin 4000000 C
+run_expect mmu_dc_ivac_perm_fault.bin 4000000 I
+run_expect mmu_dc_zva_fault.bin 4000000 Z
+run_expect mmu_dc_zva_el0_perm_fault.bin 4000000 Z
+run_expect mmu_ic_ivau_el0_perm_fault.bin 4000000 I
 run mmu_xn_fetch_abort.bin 4000000
 run mmu_cross_page_load.bin 4000000
 run mmu_cross_page_store.bin 4000000
@@ -69,6 +74,7 @@ run atomics_small.bin 400000
 run mul_high.bin 400000
 run pair_non_temporal.bin 400000
 run dc_zva.bin 400000
+run_expect dc_zva_device_align_fault.bin 400000 A
 run atomics_sp_base.bin 400000
 run ldrsw_regoffset.bin 400000
 run signed_regoffset.bin 400000
@@ -96,6 +102,7 @@ test "$(./build/aarchvm -bin tests/arm64/out/el0_eret_undef.bin -load 0x0 -entry
 test "$(./build/aarchvm -bin tests/arm64/out/el0_hvc_smc_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'H'
 test "$(./build/aarchvm -bin tests/arm64/out/el1_hvc_smc_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'J'
 test "$(./build/aarchvm -bin tests/arm64/out/illegal_state_return.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'I'
+test "$(./build/aarchvm -bin tests/arm64/out/special_pstate_regform.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'Y'
 test "$(./build/aarchvm -bin tests/arm64/out/el0_tlbi_cache_undef.bin -load 0x0 -entry 0x0 -steps 800000 | tr -d '\r\n')" = 'K'
 test "$(./build/aarchvm -bin tests/arm64/out/el0_dc_ivac_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'V'
 test "$(./build/aarchvm -bin tests/arm64/out/dc_cva_persist_absent.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'P'

@@ -247,8 +247,9 @@ movn_ok:
     wfe
     adr  x24, mem
     .inst 0xD50B7B38              // dc cvau, x24
-    .inst 0xD50B7C38              // dc cvap, x24
-    .inst 0xD50B7D38              // dc cvadp, x24
+    // FEAT_DPB / FEAT_DPB2 are intentionally absent in this model, so
+    // DC CVAP / CVADP are covered by dc_cva_persist_absent.S instead of
+    // this "basic legacy instructions" smoke test.
 
     // Minimal debug/OS-lock sysregs Linux probes and clears.
     movz x21, #0x55aa

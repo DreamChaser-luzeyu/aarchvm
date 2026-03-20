@@ -3686,6 +3686,7 @@ bool Cpu::translate_address(std::uint64_t va,
   last_translation_fault_.reset();
 
   if (!sysregs_.mmu_enabled()) {
+    const bool ram_backed = bus_.ram_ptr(va, 1u) != nullptr;
     out_result->pa = va;
     out_result->asid = current_translation_asid(false);
     out_result->level = 3;
@@ -3696,7 +3697,7 @@ bool Cpu::translate_address(std::uint64_t va,
     out_result->executable = true;
     out_result->pxn = false;
     out_result->uxn = false;
-    out_result->memory_type = MemoryType::Normal;
+    out_result->memory_type = ram_backed ? MemoryType::Normal : MemoryType::Device;
     out_result->leaf_shareability = Shareability::InnerShareable;
     out_result->walk_attrs = decode_walk_attributes(false);
     return true;
@@ -3765,6 +3766,7 @@ bool Cpu::translate_cache_maintenance_address(std::uint64_t va,
   last_translation_fault_.reset();
 
   if (!sysregs_.mmu_enabled()) {
+    const bool ram_backed = bus_.ram_ptr(va, 1u) != nullptr;
     out_result->pa = va;
     out_result->asid = current_translation_asid(false);
     out_result->level = 3;
@@ -3775,7 +3777,7 @@ bool Cpu::translate_cache_maintenance_address(std::uint64_t va,
     out_result->executable = true;
     out_result->pxn = false;
     out_result->uxn = false;
-    out_result->memory_type = MemoryType::Normal;
+    out_result->memory_type = ram_backed ? MemoryType::Normal : MemoryType::Device;
     out_result->leaf_shareability = Shareability::InnerShareable;
     out_result->walk_attrs = decode_walk_attributes(false);
     return true;
@@ -4755,7 +4757,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
     }
     const std::uint32_t rt = insn & 0x1Fu;
     TranslationResult result{};
-    if (!translate_cache_maintenance_address(reg(rt), &result, false)) {
+    if (!translate_cache_maintenance_address(reg(rt), &result, true)) {
       data_abort(reg(rt), true);
       return true;
     }
@@ -4767,6 +4769,12 @@ bool Cpu::exec_system(std::uint32_t insn) {
   if ((insn & 0xFFFFFFE0u) == 0xD5087620u) {
     if (sysregs_.in_el0()) {
       return undefined_current_instruction();
+    }
+    const std::uint32_t rt = insn & 0x1Fu;
+    TranslationResult result{};
+    if (!translate_address(reg(rt), AccessType::Write, &result, true)) {
+      data_abort(reg(rt), true);
+      return true;
     }
     return true;
   }
@@ -4817,9 +4825,19 @@ bool Cpu::exec_system(std::uint32_t insn) {
     for (std::uint64_t off = 0; off < 64u; off += 8u) {
       const std::uint64_t va = base + off;
       TranslationResult result{};
-      if (!translate_address(va, AccessType::Write, &result, true) || !bus_.write(result.pa, 0, 8)) {
-        const std::uint32_t iss =
-            last_translation_fault_.has_value() ? data_abort_iss(*last_translation_fault_, true) : 0u;
+      if (!translate_address(va, AccessType::Write, &result, true)) {
+        data_abort(va);
+        return true;
+      }
+      if (result.memory_type == MemoryType::Device) {
+        constexpr std::uint32_t kAlignmentFaultFsc = 0x21u;
+        const std::uint32_t iss = kAlignmentFaultFsc | (1u << 6); // WnR=1, CM=0.
+        enter_sync_exception(pc_ - 4, sysregs_.in_el0() ? 0x24u : 0x25u, iss, true, va);
+        return true;
+      }
+      if (!bus_.write(result.pa, 0, 8)) {
+        const std::uint32_t iss = last_translation_fault_.has_value() ? data_abort_iss(*last_translation_fault_, false)
+                                                                      : 0u;
         enter_sync_exception(pc_ - 4, sysregs_.in_el0() ? 0x24u : 0x25u, iss, true, va);
         return true;
       }

@@ -1,3 +1,144 @@
+# 修改日志 2026-03-20 18:29
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮收的是 EL0 cache maintenance by-VA 的权限 fault 语义与覆盖缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/mmu_ic_ivau_el0_perm_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_ic_ivau_el0_perm_fault.S)
+  - [tests/arm64/mmu_dc_cva_el0_perm_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_dc_cva_el0_perm_fault.S)
+  - [tests/arm64/mmu_dc_zva_el0_perm_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_dc_zva_el0_perm_fault.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 根据 ARM ARM 与当前模型的特性边界，这轮明确了三类行为：
+  - `IC IVAU` 在 `EL0 + SCTLR_EL1.UCI=1` 下，对 EL0 无读权限的 VA，当前模型选择报告 Permission fault；
+  - `DC CVAC/CVAU/CIVAC` 在 `EL0 + SCTLR_EL1.UCI=1` 下，对 EL0 无读权限的 VA，当前模型同样报告 Permission fault；
+  - `DC ZVA` 是 store-like 语义，权限 fault 仍走普通写 fault 语义，因此 `CM=0`、`WnR=1`。
+- 这轮唯一的模拟器行为修复是：
+  - `IC IVAU` 从原先不会对 EL0 无读权限地址 fault，改为走 `translate_cache_maintenance_address(..., true)`，从而在当前模型里向 guest 暴露一致的 Permission fault。
+- 同时补了两条新的裸机单测，把当前行为固定进回归：
+  - `mmu_dc_cva_el0_perm_fault`：覆盖 `DC CVAC/CVAU/CIVAC` 在 EL0 的 Permission fault，校验 `EC=0x24`、`CM=1`、`WnR=1`、`FSC=permission fault level 3`、`FAR_EL1/ELR_EL1`；
+  - `mmu_dc_zva_el0_perm_fault`：覆盖 `DC ZVA` 在 EL0 对只读页的 Permission fault，校验 `EC=0x24`、`CM=0`、`WnR=1`、`FSC=permission fault level 3`、`FAR_EL1/ELR_EL1`。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 120s bash -lc "test \"$(./build/aarchvm -bin tests/arm64/out/mmu_ic_ivau_el0_perm_fault.bin -load 0x0 -entry 0x0 -steps 4000000 | tr -d '\r\n')\" = I"`
+- `timeout 120s bash -lc "test \"$(./build/aarchvm -bin tests/arm64/out/mmu_dc_cva_el0_perm_fault.bin -load 0x0 -entry 0x0 -steps 4000000 | tr -d '\r\n')\" = C"`
+- `timeout 120s bash -lc "test \"$(./build/aarchvm -bin tests/arm64/out/mmu_dc_zva_el0_perm_fault.bin -load 0x0 -entry 0x0 -steps 4000000 | tr -d '\r\n')\" = Z"`
+- `timeout 3600s tests/arm64/run_all.sh`
+- `timeout 3600s tests/linux/run_functional_suite.sh`
+- `timeout 3600s tests/linux/run_functional_suite_smp.sh`
+- 结果：通过。
+
+# 修改日志 2026-03-20 18:04
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮修的是 `DC ZVA` 的两处程序可见语义偏差：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/mmu_cache_maint_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_cache_maint_fault.S)
+  - [tests/arm64/mmu_dc_zva_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_dc_zva_fault.S)
+  - [tests/arm64/dc_zva_device_align_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/dc_zva_device_align_fault.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 根据 ARM ARM，`DC ZVA` 虽然编码在 `DC` 指令组里，但程序可见行为并不是普通 cache maintenance fault：
+  - 它“按一组 stores 处理”；
+  - 发生同步 Data Abort / watchpoint 时，`ESR_ELx.ISS.CM` 必须为 `0`；
+  - 对 Device memory 必须产生 Alignment fault，而不是把目标地址当普通可写内存继续写下去。
+- 旧实现里有两处偏差：
+  - `DC ZVA` fault 路径错误复用了 cache-maintenance syndrome 组装，导致 `CM=1`；
+  - 在 `MMU off` 时，翻译结果把所有物理地址都默认为 `Normal` memory，导致 `DC ZVA` 会错误地对 MMIO/Device 区域执行实际写入。
+- 这轮修复内容：
+  - `DC ZVA` 的 translation/permission fault 现在走普通 store-like data abort 路径，保留 `WnR=1`，但不再错误置位 `CM`；
+  - `DC ZVA` 命中 Device memory 时，改为报告 Alignment fault；
+  - `MMU off` 时，翻译结果现在会基于总线是否为 RAM-backed 区域区分 `Normal` 和 `Device`，避免把 MMIO 当 RAM。
+- 对应测试调整：
+  - 从 `mmu_cache_maint_fault` 中移除了 `DC ZVA`，因为它不属于 `CM=1` 那一类 fault；
+  - 新增 `mmu_dc_zva_fault`，覆盖未映射地址上的 `DC ZVA`，并显式校验 `CM=0`、`WnR=1`、translation fault；
+  - 新增 `dc_zva_device_align_fault`，覆盖 `MMU off` 下对 UART Device memory 执行 `DC ZVA` 时必须抛出 Alignment fault。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 120s bash -lc "test \"$(./build/aarchvm -bin tests/arm64/out/mmu_dc_zva_fault.bin -load 0x0 -entry 0x0 -steps 4000000 | tr -d '\r\n')\" = Z"`
+- `timeout 120s bash -lc "test \"$(./build/aarchvm -bin tests/arm64/out/dc_zva_device_align_fault.bin -load 0x0 -entry 0x0 -steps 400000 | tr -d '\r\n')\" = A"`
+- `timeout 120s bash -lc "test \"$(./build/aarchvm -bin tests/arm64/out/mmu_cache_maint_fault.bin -load 0x0 -entry 0x0 -steps 4000000 | tr -d '\r\n')\" = M"`
+- `timeout 3600s tests/arm64/run_all.sh`
+- `timeout 3600s tests/linux/run_functional_suite.sh`
+- `timeout 3600s tests/linux/run_functional_suite_smp.sh`
+- 结果：通过。
+
+# 修改日志 2026-03-20 17:46
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮补的是 `DC IVAC` 的程序可见 fault 语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/mmu_cache_maint_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_cache_maint_fault.S)
+  - [tests/arm64/mmu_dc_ivac_perm_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_dc_ivac_perm_fault.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 审阅 ARM ARM 后确认，`DC IVAC` 与 `DC CVAC/CVAU/CIVAC` 不同：
+  - `DC IVAC` 对目标 VA 需要写权限；
+  - 执行时可能触发地址翻译 fault；
+  - fault 时必须按 cache maintenance fault 报告，即 `CM=1`，且 `WnR=1`。
+- 旧实现中，`DC IVAC` 在 `EL1+` 只是直接 `return true`，因此：
+  - 对未映射地址不会 fault；
+  - 对只读映射也不会给出 permission fault；
+  - 与当前模型已实现的其它 cache maintenance by-VA 路径不一致。
+- 这轮将 `DC IVAC` 接入真实的写权限翻译路径：
+  - 现在会走 `translate_address(..., AccessType::Write, ...)`；
+  - 失败时复用现有 cache maintenance data abort syndrome 组装；
+  - 从而对 guest 正确暴露 translation fault / permission fault。
+- 同时补了两层测试：
+  - 扩充 `mmu_cache_maint_fault`，把未映射地址上的 `DC IVAC` 纳入现有 `CM/WnR/FAR/ELR` 校验；
+  - 新增 `mmu_dc_ivac_perm_fault`，专门覆盖 `EL1` 只读页上的 `DC IVAC` permission fault。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 120s bash -lc "test \"$(./build/aarchvm -bin tests/arm64/out/mmu_cache_maint_fault.bin -load 0x0 -entry 0x0 -steps 4000000 | tr -d '\r\n')\" = M"`
+- `timeout 120s bash -lc "test \"$(./build/aarchvm -bin tests/arm64/out/mmu_dc_ivac_perm_fault.bin -load 0x0 -entry 0x0 -steps 4000000 | tr -d '\r\n')\" = I"`
+- `timeout 3600s tests/arm64/run_all.sh`
+- `timeout 3600s tests/linux/run_functional_suite.sh`
+- `timeout 3600s tests/linux/run_functional_suite_smp.sh`
+- 结果：通过。
+
+# 修改日志 2026-03-20 17:33
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮收的是 `trap / undef / no-op` 边界里一处被老测试静默掩盖的回归缺口：
+  - [tests/arm64/instr_legacy_each.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/instr_legacy_each.S)
+  - [tests/arm64/special_pstate_regform.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/special_pstate_regform.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 审阅过程中发现：
+  - `instr_legacy_each` 仍把 `DC CVAP/CVADP` 放在“基础 legacy 指令 smoke test”里当成普通可继续执行路径；
+  - 但当前模型明确宣告未实现 `FEAT_DPB / FEAT_DPB2`，而且已有专门用例 `dc_cva_persist_absent` 校验这两条在本模型里应为 `UNDEFINED`；
+  - 结果就是 `instr_legacy_each` 实际一直会失败，只是旧版 `run_all.sh` 对它没有做输出断言，导致该失败被静默漏报。
+- 这轮因此没有改模拟器行为，而是修正了测试体系本身：
+  - 从 `instr_legacy_each` 中移除了 `DC CVAP/CVADP` 这两条与当前特性声明矛盾的路径，只保留 `DC CVAU`；
+  - 将 `tests/arm64/run_all.sh` 对 `instr_legacy_each` 改为强制断言成功输出 `E`，避免再次静默漏报；
+  - 新增 `special_pstate_regform` 单测，显式覆盖：
+    - `MSR SPSel, Xt` 在 `EL1` 的正常读写；
+    - `MSR PAN, Xt` 在 `EL1` 的正常读写；
+    - `MSR SPSel, Xt` / `MSR PAN, Xt` 在 `EL0` 的 `UNDEFINED` 行为。
+
+## 本轮测试
+
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/instr_legacy_each.bin -load 0x0 -entry 0x0 -steps 3000000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/special_pstate_regform.bin -load 0x0 -entry 0x0 -steps 600000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/dc_cva_persist_absent.bin -load 0x0 -entry 0x0 -steps 600000`
+- `timeout 2400s tests/arm64/run_all.sh`
+- `timeout 2400s tests/linux/run_functional_suite.sh`
+- `timeout 2400s tests/linux/run_functional_suite_smp.sh`
+- 结果：通过。
+
 # 修改日志 2026-03-20 15:00
 
 ## 本轮修改

@@ -11,7 +11,6 @@ _start:
     str  xzr, [x11]
 
     movz x9, #3
-    movz x15, #0x0403
     movz x20, #0x1000              // L0
     movz x21, #0x2000              // L1
     movz x22, #0x3000              // L2 low
@@ -19,7 +18,6 @@ _start:
     movz x24, #0x7000              // L2 high
     movz x25, #0x8000              // L3 high
 
-    // Low VA identity map + high half page tables.
     orr  x2, x21, x9
     str  x2, [x20]
     orr  x2, x22, x9
@@ -30,6 +28,8 @@ _start:
     str  x2, [x22]
     orr  x2, x25, x9
     str  x2, [x24]
+
+    movz x15, #0x0403
 
     movz x3, #0x0000
     orr  x2, x3, x15
@@ -53,8 +53,11 @@ _start:
     orr  x2, x3, x15
     str  x2, [x23, #64]
 
-    // Leave VA 0x40000000 unmapped so all maintenance-by-VA ops fault.
-    str  xzr, [x25]
+    // VA 0x40000000 -> PA 0x500000, AF=1, AP[2]=1 => read-only at EL1.
+    movz x3, #0x0050, lsl #16
+    movz x2, #0x0483
+    orr  x26, x3, x2
+    str  x26, [x25]
 
     msr  ttbr0_el1, x20
     movz x2, #16
@@ -66,36 +69,19 @@ _start:
     isb
 
     movz x30, #0x4000, lsl #16
-
-fault_cvac:
-    dc   cvac, x30
-    b    fail
-after_cvac:
-fault_cvau:
-    dc   cvau, x30
-    b    fail
-after_cvau:
-fault_civac:
-    dc   civac, x30
-    b    fail
-after_civac:
 fault_ivac:
     dc   ivac, x30
     b    fail
-after_ivac:
-fault_ic_ivau:
-    ic   ivau, x30
-    b    fail
-after_ic_ivau:
+
+after_fault:
     adr  x11, handled
     ldr  x12, [x11]
-    cmp  x12, #31
-    b.ne fail
+    cbz  x12, fail
 
     movz x2, #0
     msr  sctlr_el1, x2
     isb
-    movz x0, #'M'
+    movz x0, #'I'
     str  x0, [x1]
     movz x0, #'\n'
     str  x0, [x1]
@@ -117,78 +103,27 @@ sync_spx:
 
 sync_handler:
     mrs  x2, esr_el1
-    ubfx x3, x2, #26, #6          // EC
+    ubfx x3, x2, #26, #6
     cmp  x3, #0x25
     b.ne fail_from_handler
-    tbz  x2, #8, fail_from_handler // CM must be 1 for cache maintenance faults
-    tbz  x2, #6, fail_from_handler // WnR must be 1 for cache maintenance faults
-    and  x4, x2, #0x3f            // FSC
-    cmp  x4, #0x7                 // translation fault, level 3
+    tbz  x2, #8, fail_from_handler // CM must be 1 for cache maintenance faults.
+    tbz  x2, #6, fail_from_handler // WnR must be 1 for cache maintenance faults.
+    and  x4, x2, #0x3f
+    cmp  x4, #0x0f                // permission fault, level 3
     b.ne fail_from_handler
+
     mrs  x5, far_el1
     subs xzr, x5, x30
     b.ne fail_from_handler
     mrs  x6, elr_el1
-
-    adr  x7, fault_cvac
-    cmp  x6, x7
-    b.eq handle_cvac
-    adr  x7, fault_cvau
-    cmp  x6, x7
-    b.eq handle_cvau
-    adr  x7, fault_civac
-    cmp  x6, x7
-    b.eq handle_civac
     adr  x7, fault_ivac
-    cmp  x6, x7
-    b.eq handle_ivac
-    adr  x7, fault_ic_ivau
-    cmp  x6, x7
-    b.eq handle_ic_ivau
-    b    fail_from_handler
+    subs xzr, x6, x7
+    b.ne fail_from_handler
 
-handle_cvac:
     adr  x11, handled
-    ldr  x12, [x11]
-    orr  x12, x12, #1
+    movz x12, #1
     str  x12, [x11]
-    adr  x8, after_cvac
-    msr  elr_el1, x8
-    eret
-
-handle_cvau:
-    adr  x11, handled
-    ldr  x12, [x11]
-    orr  x12, x12, #2
-    str  x12, [x11]
-    adr  x8, after_cvau
-    msr  elr_el1, x8
-    eret
-
-handle_civac:
-    adr  x11, handled
-    ldr  x12, [x11]
-    orr  x12, x12, #4
-    str  x12, [x11]
-    adr  x8, after_civac
-    msr  elr_el1, x8
-    eret
-
-handle_ivac:
-    adr  x11, handled
-    ldr  x12, [x11]
-    orr  x12, x12, #8
-    str  x12, [x11]
-    adr  x8, after_ivac
-    msr  elr_el1, x8
-    eret
-
-handle_ic_ivau:
-    adr  x11, handled
-    ldr  x12, [x11]
-    orr  x12, x12, #16
-    str  x12, [x11]
-    adr  x8, after_ic_ivau
+    adr  x8, after_fault
     msr  elr_el1, x8
     eret
 

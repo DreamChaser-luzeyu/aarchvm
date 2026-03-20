@@ -110,6 +110,7 @@ build_asm_prog el0_eret_undef
 build_asm_prog el0_hvc_smc_undef
 build_asm_prog el1_hvc_smc_undef
 build_asm_prog illegal_state_return
+build_asm_prog special_pstate_regform
 build_asm_prog el0_tlbi_cache_undef
 build_asm_prog el0_dc_ivac_undef
 build_asm_prog dc_cva_persist_absent
@@ -136,6 +137,11 @@ build_asm_prog mmu_pan_user_access
 build_asm_prog mmu_ldtr_sttr_pan
 build_asm_prog mmu_el0_ap_fault
 build_asm_prog mmu_perm_ro_write_abort
+build_asm_prog mmu_dc_cva_el0_perm_fault
+build_asm_prog mmu_dc_ivac_perm_fault
+build_asm_prog mmu_dc_zva_fault
+build_asm_prog mmu_dc_zva_el0_perm_fault
+build_asm_prog mmu_ic_ivau_el0_perm_fault
 build_asm_prog mmu_xn_fetch_abort
 build_asm_prog mmu_cross_page_load
 build_asm_prog mmu_cross_page_store
@@ -163,6 +169,7 @@ build_asm_prog atomics_small
 build_asm_prog mul_high
 build_asm_prog pair_non_temporal
 build_asm_prog dc_zva
+build_asm_prog dc_zva_device_align_fault
 build_asm_prog atomics_sp_base
 build_asm_prog ldrsw_regoffset
 build_asm_prog signed_regoffset
