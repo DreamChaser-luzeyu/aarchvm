@@ -4563,7 +4563,14 @@ bool Cpu::exec_system(std::uint32_t insn) {
       (insn & 0xFFFFFFE0u) == 0xD50B7380u ||        // CFP RCTX, Xt (FEAT_SPECRES)
       (insn & 0xFFFFFFE0u) == 0xD50B73A0u ||        // DVP RCTX, Xt (FEAT_SPECRES)
       (insn & 0xFFFFFFE0u) == 0xD50B73C0u ||        // COSP RCTX, Xt (FEAT_SPECRES2)
-      (insn & 0xFFFFFFE0u) == 0xD50B73E0u) {        // CPP RCTX, Xt (FEAT_SPECRES)
+      (insn & 0xFFFFFFE0u) == 0xD50B73E0u ||        // CPP RCTX, Xt (FEAT_SPECRES)
+      (insn & 0xFFFFFFE0u) == 0xD50B7700u ||        // GCSPUSHM Xt (FEAT_GCS)
+      (insn & 0xFFFFFFE0u) == 0xD50B7740u ||        // GCSSS1 Xt (FEAT_GCS)
+      (insn & 0xFFFFFFE0u) == 0xD52B7760u ||        // GCSSS2 Xt (FEAT_GCS)
+      (insn & 0xFFFFFFE0u) == 0xD52B7720u ||        // GCSPOPM Xt (FEAT_GCS)
+      insn == 0xD508779Fu ||                        // GCSPUSHX (FEAT_GCS)
+      insn == 0xD50877DFu ||                        // GCSPOPX (FEAT_GCS)
+      insn == 0xD50877BFu) {                        // GCSPOPCX (FEAT_GCS)
     return undefined_current_instruction();
   }
 
@@ -4674,6 +4681,40 @@ bool Cpu::exec_system(std::uint32_t insn) {
     switch (key) {
       case sysreg_key(3u, 3u, 13u, 0u, 5u):  // TPIDR2_EL0
       case sysreg_key(3u, 3u, 2u, 5u, 1u):   // GCSPR_EL0
+      case sysreg_key(3u, 3u, 2u, 4u, 0u):   // RNDR
+      case sysreg_key(3u, 3u, 2u, 4u, 1u):   // RNDRRS
+      case sysreg_key(3u, 3u, 14u, 15u, 7u): // PMCCFILTR_EL0
+      case sysreg_key(3u, 3u, 9u, 13u, 0u):  // PMCCNTR_EL0
+      case sysreg_key(3u, 3u, 9u, 12u, 6u):  // PMCEID0_EL0
+      case sysreg_key(3u, 3u, 9u, 12u, 7u):  // PMCEID1_EL0
+      case sysreg_key(3u, 3u, 9u, 12u, 2u):  // PMCNTENCLR_EL0
+      case sysreg_key(3u, 3u, 9u, 12u, 1u):  // PMCNTENSET_EL0
+      case sysreg_key(3u, 3u, 9u, 12u, 0u):  // PMCR_EL0
+      case sysreg_key(3u, 0u, 9u, 14u, 2u):  // PMINTENCLR_EL1
+      case sysreg_key(3u, 0u, 9u, 14u, 1u):  // PMINTENSET_EL1
+      case sysreg_key(3u, 0u, 9u, 14u, 6u):  // PMMIR_EL1
+      case sysreg_key(2u, 0u, 14u, 11u, 7u): // PMCCNTSVR_EL1
+      case sysreg_key(3u, 3u, 9u, 6u, 0u):   // PMICFILTR_EL0
+      case sysreg_key(3u, 3u, 9u, 4u, 0u):   // PMICNTR_EL0
+      case sysreg_key(2u, 0u, 14u, 12u, 0u): // PMICNTSVR_EL1
+      case sysreg_key(3u, 0u, 9u, 14u, 4u):  // PMUACR_EL1
+      case sysreg_key(3u, 3u, 9u, 12u, 3u):  // PMOVSCLR_EL0
+      case sysreg_key(3u, 3u, 9u, 14u, 3u):  // PMOVSSET_EL0
+      case sysreg_key(3u, 3u, 9u, 12u, 5u):  // PMSELR_EL0
+      case sysreg_key(3u, 3u, 9u, 12u, 4u):  // PMSWINC_EL0
+      case sysreg_key(3u, 3u, 9u, 13u, 4u):  // PMZR_EL0
+      case sysreg_key(3u, 3u, 13u, 0u, 7u):  // SCXTNUM_EL0
+      case sysreg_key(3u, 0u, 13u, 0u, 7u):  // SCXTNUM_EL1
+      case sysreg_key(3u, 0u, 13u, 0u, 6u):  // RCWMASK_EL1
+      case sysreg_key(3u, 0u, 13u, 0u, 3u):  // RCWSMASK_EL1
+      case sysreg_key(3u, 3u, 10u, 2u, 4u):  // POR_EL0
+      case sysreg_key(3u, 0u, 1u, 2u, 1u):   // TRFCR_EL1
+      case sysreg_key(3u, 3u, 4u, 2u, 2u):   // SVCR
+      case sysreg_key(3u, 0u, 1u, 2u, 6u):   // SMCR_EL1
+      case sysreg_key(3u, 4u, 1u, 2u, 6u):   // SMCR_EL2
+      case sysreg_key(3u, 6u, 1u, 2u, 6u):   // SMCR_EL3
+      case sysreg_key(3u, 3u, 9u, 13u, 2u):  // PMXEVCNTR_EL0
+      case sysreg_key(3u, 3u, 9u, 13u, 1u):  // PMXEVTYPER_EL0
       case sysreg_key(3u, 3u, 9u, 14u, 0u):  // PMUSERENR_EL0
       case sysreg_key(3u, 3u, 13u, 2u, 3u):  // AMUSERENR_EL0
       case sysreg_key(3u, 0u, 4u, 2u, 4u):   // UAO
@@ -4983,40 +5024,49 @@ bool Cpu::exec_system(std::uint32_t insn) {
     update_par_from_translation(translate_address(reg(rt), AccessType::UnprivilegedWrite, &result, false, false), result);
     return true;
   }
-  // MSR SPSel, #imm
-  if ((insn & 0xFFFFF0FFu) == 0xD50040BFu) {
-    if (sysregs_.in_el0()) {
-      return false;
+  // MSR (immediate) to PSTATE fields.
+  if ((insn & 0xFFF8E01Fu) == 0xD500401Fu) {
+    const std::uint32_t op1 = (insn >> 16) & 0x7u;
+    const std::uint32_t crm = (insn >> 8) & 0xFu;
+    const std::uint32_t op2 = (insn >> 5) & 0x7u;
+    switch ((op1 << 3) | op2) {
+      case (0u << 3) | 3u:  // UAO (FEAT_UAO, absent in this model)
+        return undefined_current_instruction();
+      case (0u << 3) | 4u:  // PAN
+        if (sysregs_.in_el0()) {
+          return false;
+        }
+        sysregs_.set_pan((crm & 0x1u) != 0);
+        return true;
+      case (0u << 3) | 5u:  // SPSel
+        if (sysregs_.in_el0()) {
+          return false;
+        }
+        sysregs_.set_spsel(crm & 0x1u);
+        return true;
+      case (1u << 3) | 0u:  // ALLINT / PM / reserved
+        return undefined_current_instruction();
+      case (3u << 3) | 1u:  // SSBS (FEAT_SSBS, absent in this model)
+      case (3u << 3) | 2u:  // DIT (FEAT_DIT, absent in this model)
+      case (3u << 3) | 4u:  // TCO (FEAT_MTE, absent in this model)
+        return undefined_current_instruction();
+      case (3u << 3) | 3u:  // SVCRSM / SVCRZA / SVCRSMZA / reserved
+        return undefined_current_instruction();
+      case (3u << 3) | 6u:  // DAIFSet
+        if (!el0_uma_enabled()) {
+          return trap_current_system_instruction(insn);
+        }
+        sysregs_.daif_set(static_cast<std::uint8_t>(crm));
+        return true;
+      case (3u << 3) | 7u:  // DAIFClr
+        if (!el0_uma_enabled()) {
+          return trap_current_system_instruction(insn);
+        }
+        sysregs_.daif_clr(static_cast<std::uint8_t>(crm));
+        return true;
+      default:
+        return undefined_current_instruction();
     }
-    sysregs_.set_spsel((insn >> 8) & 0x1u);
-    return true;
-  }
-
-  // MSR DAIFSet, #imm4
-  if ((insn & 0xFFFFF0FFu) == 0xD50340DFu) {
-    if (!el0_uma_enabled()) {
-      return trap_current_system_instruction(insn);
-    }
-    sysregs_.daif_set(static_cast<std::uint8_t>((insn >> 8) & 0xFu));
-    return true;
-  }
-
-  // MSR DAIFClr, #imm4
-  if ((insn & 0xFFFFF0FFu) == 0xD50340FFu) {
-    if (!el0_uma_enabled()) {
-      return trap_current_system_instruction(insn);
-    }
-    sysregs_.daif_clr(static_cast<std::uint8_t>((insn >> 8) & 0xFu));
-    return true;
-  }
-
-  // MSR PAN, #imm
-  if ((insn & 0xFFFFF0FFu) == 0xD500409Fu) {
-    if (sysregs_.in_el0()) {
-      return false;
-    }
-    sysregs_.set_pan(((insn >> 8) & 0x1u) != 0);
-    return true;
   }
 
   // MRS Xt, sysreg

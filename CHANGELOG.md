@@ -3882,3 +3882,395 @@
 
 - 这轮修的是异常 syndrome 编码本身，不是测试层面的补网。
 - 在当前 AArch64-only 模型下，把同步异常统一报告为 `IL=1` 是符合架构伪代码的程序可见最小实现。
+
+# 修改日志 2026-03-21 02:24
+
+## 本轮修改
+
+- 修正 `FEAT_GCS` 缺失时一组 system-encoding 指令的异常分类：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+- 当前模型未实现 `FEAT_GCS`，因此以下指令在所有异常级别都应直接 `UNDEFINED`，而不是在 EL0 误报成 `EC=0x18` 的 system access trap：
+  - `GCSPUSHM`
+  - `GCSSS1`
+  - `GCSSS2`
+  - `GCSPOPM`
+  - `GCSPUSHX`
+  - `GCSPOPX`
+  - `GCSPOPCX`
+- 在 `exec_system()` 中为上述编码增加了 absent-feature 的提前判定，避免它们落入通用 `MRS/MSR sysreg` 路径。
+- 新增裸机单测，覆盖这组 GCS system-encoding 指令在 EL1/EL0 下的 guest 可见行为：
+  - [tests/arm64/gcs_system_absent_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/gcs_system_absent_undef.S)
+- 单测校验点包括：
+  - `ESR_EL1.EC=0`
+  - `ESR_EL1.IL=1`
+  - `ESR_EL1.ISS=0`
+  - `FAR_EL1=0`
+  - `ELR_EL1` 指向 faulting instruction
+- 已把该测试接入构建与完整裸机回归：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+
+## 本轮测试
+
+- 定向构建：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 300s tests/arm64/build_tests.sh`
+- 新增语义定向验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/gcs_system_absent_undef.bin -load 0x0 -entry 0x0 -steps 1500000`
+- 裸机完整回归：
+  - `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_gcs_system_absent.log 2>&1'`
+- Linux 单核功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_gcs_system_absent_ump.log 2>&1'`
+- Linux SMP 功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_gcs_system_absent_smp.log 2>&1'`
+
+## 当前结论
+
+- 这轮修复和前一轮 `SB/WFxT/SPECRES` 是同类问题：absent extension 的 system-encoding 指令如果不提前建模为 `UNDEFINED`，就会在 EL0 被通用 system-register 路径错误分类。
+- 当前这组 `FEAT_GCS` 指令的 absent-feature guest 可见行为已经被单测和完整回归固定住。
+
+# 修改日志 2026-03-21 02:33
+
+## 本轮修改
+
+- 修正 `RNDR/RNDRRS` 在当前模型中的 present/absent 判定：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+- ARM ARM 规定：当 `FEAT_RNG` 和 `FEAT_RNG_TRAP` 都未实现时，`MRS RNDR` 与 `MRS RNDRRS` 的 direct access 必须 `UNDEFINED`。
+- 当前模型的 `ID_AA64ISAR0_EL1.RNDR` 已经报告 absent，但 `sysreg_present()` 之前没有把 `RNDR/RNDRRS` 标成 absent，导致它们在 EL0 会误走 system-register trap 路径。
+- 现在已将以下 sysreg key 归为 absent：
+  - `RNDR`
+  - `RNDRRS`
+- 新增裸机单测，覆盖 EL1/EL0 下 `RNDR/RNDRRS` 的 absent-feature guest 可见行为：
+  - [tests/arm64/rng_sysreg_absent.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/rng_sysreg_absent.S)
+- 单测校验点包括：
+  - 目的寄存器保持原值
+  - `ESR_EL1.EC=0`
+  - `ESR_EL1.IL=1`
+  - `ESR_EL1.ISS=0`
+  - `FAR_EL1=0`
+  - `ELR_EL1` 指向 faulting instruction
+- 已把该测试接入构建与完整裸机回归：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+
+## 本轮测试
+
+- 定向构建：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 300s tests/arm64/build_tests.sh`
+- 新增语义定向验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/rng_sysreg_absent.bin -load 0x0 -entry 0x0 -steps 400000`
+- 裸机完整回归：
+  - `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_rng_absent.log 2>&1'`
+- Linux 单核功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_rng_absent_ump.log 2>&1'`
+- Linux SMP 功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_rng_absent_smp.log 2>&1'`
+
+## 当前结论
+
+- 这也是同一类“ID 寄存器报告 absent，但解码层仍把访问当作 present”问题。
+- 对当前模型而言，把 `RNDR/RNDRRS` 标为 absent sysreg 是程序可见最小正确实现，因为模型既不声明也不实现 `FEAT_RNG` / `FEAT_RNG_TRAP`。
+
+# 修改日志 2026-03-21 02:46
+
+## 本轮修改
+
+- 修正另外 4 个当前模型未实现、但此前也没有被标成 absent 的 AArch64 sysreg：
+  - `SCXTNUM_EL0`
+  - `SCXTNUM_EL1`
+  - `POR_EL0`
+  - `TRFCR_EL1`
+- 修改位置：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+- 这些寄存器在 ARM ARM 中分别依赖：
+  - `SCXTNUM_EL0/EL1`: `FEAT_CSV2_1p2` 或 `FEAT_CSV2_2`
+  - `POR_EL0`: `FEAT_S1POE`
+  - `TRFCR_EL1`: `FEAT_TRF`
+- 当前模型没有实现这些特性，因此 direct access 应为 `UNDEFINED`。修复前它们会在 EL0 误走通用 `MRS/MSR sysreg` 路径，被错误分类成 `EC=0x18` system access trap。
+- 现在已把上述 4 个 key 纳入 `sysreg_present()==false` 的 absent 集合，令其在当前模型中表现为架构要求的 `UNDEFINED`。
+- 新增裸机单测，覆盖 EL1/EL0 下的 `MRS/MSR`：
+  - [tests/arm64/sysreg_optional_absent_more.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/sysreg_optional_absent_more.S)
+- 单测校验点包括：
+  - 目的寄存器保持原值
+  - `ESR_EL1.EC=0`
+  - `ESR_EL1.IL=1`
+  - `ESR_EL1.ISS=0`
+  - `FAR_EL1=0`
+  - `ELR_EL1` 指向 faulting instruction
+- 已把该测试接入构建与完整裸机回归：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+
+## 本轮测试
+
+- 定向构建：
+  - `timeout 300s tests/arm64/build_tests.sh`
+  - `timeout 1200s cmake --build build -j`
+- 新增语义定向验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/sysreg_optional_absent_more.bin -load 0x0 -entry 0x0 -steps 1200000`
+- 裸机完整回归：
+  - `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_sysreg_absent_more.log 2>&1'`
+- Linux 单核功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_sysreg_absent_more_ump.log 2>&1'`
+- Linux SMP 功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_sysreg_absent_more_smp.log 2>&1'`
+
+## 当前结论
+
+- 这一轮与前两轮本质相同，都是在收敛“optional/absent feature 的 sysreg 或 system instruction 在 EL0 被误当成 system-access trap”的缺口。
+- 目前这一类高概率漏网项里，`SCXTNUM_EL0/EL1`、`POR_EL0`、`TRFCR_EL1` 已经被补齐到当前模型的程序可见最小正确性。
+
+# 修改日志 2026-03-21 02:53
+
+## 本轮修改
+
+- 继续收敛 SME 相关 absent sysreg 的 guest 可见行为：
+  - `SVCR`
+  - `SMCR_EL1`
+- 修改位置：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+- ARM ARM 明确规定：
+  - `SVCR` 仅在 `FEAT_SME` 存在时 present
+  - `SMCR_EL1` 仅在 `FEAT_SME` 存在时 present
+  - 否则 direct access 为 `UNDEFINED`
+- 当前模型未实现 SME，之前这两个 sysreg 没被标成 absent，会在 EL0 下误走通用 system-register 路径。
+- 现在已把这两个 key 纳入 `sysreg_present()==false` 的 absent 集合。
+- 新增裸机单测，覆盖 EL1/EL0 下 `SVCR/SMCR_EL1` 的 `MRS/MSR`：
+  - [tests/arm64/sme_sysreg_absent.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/sme_sysreg_absent.S)
+- 单测校验点包括：
+  - 目的寄存器保持原值
+  - `ESR_EL1.EC=0`
+  - `ESR_EL1.IL=1`
+  - `ESR_EL1.ISS=0`
+  - `FAR_EL1=0`
+  - `ELR_EL1` 指向 faulting instruction
+- 已把该测试接入构建与完整裸机回归：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+
+## 本轮测试
+
+- 定向构建：
+  - `timeout 300s tests/arm64/build_tests.sh`
+  - `timeout 1200s cmake --build build -j`
+- 新增语义定向验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/sme_sysreg_absent.bin -load 0x0 -entry 0x0 -steps 800000`
+- 裸机完整回归：
+  - `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_sme_sysreg_absent.log 2>&1'`
+- Linux 单核功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_sme_sysreg_absent_ump.log 2>&1'`
+- Linux SMP 功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_sme_sysreg_absent_smp.log 2>&1'`
+
+## 当前结论
+
+- 到这一轮为止，我已经连续补齐了 3 批同类缺口：
+  - absent system-encoding instruction
+  - absent optional sysreg
+  - absent SME sysreg
+- 这条线下剩余的高概率候选，主要还包括：
+  - `SMCR_EL2/EL3`
+  - `SVCRSM/SVCRZA/SVCRSMZA`
+  - `RCWMASK_EL1`
+  - `CHKFEAT`
+
+# 修改日志 2026-03-21 03:23
+
+## 本轮修改
+
+- 继续收敛 absent sysreg 在 EL0 下被误分类为 system-access trap 的剩余缺口。
+- 修改位置：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+- 将下列当前模型 absent 的 system register 纳入 `sysreg_present()==false`：
+  - `RCWMASK_EL1`
+  - `RCWSMASK_EL1`
+  - `SMCR_EL2`
+  - `SMCR_EL3`
+- 根因是这几项虽然在 EL1 下会因为 `sysregs_.read/write` 不支持而落回 `UNDEFINED`，但在 EL0 下会先被通用权限路径误判成 `EC=0x18` system register trap。
+- 现在它们会和前几轮补过的 absent sysreg 一样，在 decode/dispatch 早期直接归类为 `UNDEFINED`。
+
+## 本轮测试
+
+- 先用最小裸机探针复现错误，确认修改前 EL0 下：
+  - `RCWMASK_EL1`
+  - `RCWSMASK_EL1`
+  - `SMCR_EL2`
+  - `SMCR_EL3`
+  都会失败。
+- 扩展已有单测，覆盖这些 EL0 `MRS/MSR` 路径：
+  - [tests/arm64/sysreg_optional_absent_more.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/sysreg_optional_absent_more.S)
+  - [tests/arm64/sme_sysreg_absent.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/sme_sysreg_absent.S)
+- 已完成：
+  - `timeout 300s tests/arm64/build_tests.sh`
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/sysreg_optional_absent_more.bin -load 0x0 -entry 0x0 -steps 1500000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/sme_sysreg_absent.bin -load 0x0 -entry 0x0 -steps 1000000`
+  - `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_rcwmask_smcr_fix.log 2>&1'`
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_rcwmask_smcr_fix_ump.log 2>&1'`
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_rcwmask_smcr_fix_smp.log 2>&1'`
+
+## 当前结论
+
+- 这轮补的是同一类问题的下一批漏网项：当前模型 absent 的 sysreg 在 EL1 下看似“没问题”，但 EL0 下会被更早的权限路径错误改写成 `system register trap`。
+- 修复后，`RCWMASK_EL1` / `RCWSMASK_EL1` / `SMCR_EL2` / `SMCR_EL3` 在 EL0 下都已回到架构要求的 `UNDEFINED`，并已被裸机单测与 Linux UMP/SMP 回归覆盖。
+
+# 修改日志 2026-03-21 03:49
+
+## 本轮修改
+
+- 继续收敛 `MSR (immediate)` 到 PSTATE 字段这一类的 absent-feature / reserved 边界。
+- 修改位置：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+- 新增了一个按 `op1/op2/CRm` 解码的 `MSR (immediate)` 分发，统一处理：
+  - `SPSel`
+  - `PAN`
+  - `DAIFSet`
+  - `DAIFClr`
+  - 以及当前模型 absent 的 `UAO / ALLINT / PM / SSBS / DIT / TCO / SVCRSM / SVCRZA / SVCRSMZA`
+- 修复前，这类 immediate-form 指令里未显式实现的编码会在 EL0 下误落到通用 `MSR sysreg` 路径，被错误报成 `EC=0x18` system register trap。
+- 修复后，这些当前模型 absent 的 immediate-form PSTATE 指令都会按 ARM ARM 要求直接表现为 `UNDEFINED`。
+- 新增裸机单测：
+  - [tests/arm64/msr_imm_absent_features_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/msr_imm_absent_features_undef.S)
+- 该测试覆盖 EL0 下的：
+  - `MSR UAO, #1`
+  - `MSR DIT, #1`
+  - `MSR SSBS, #1`
+  - `MSR TCO, #1`
+  - `MSR ALLINT, #1`
+  - `MSR PM, #1`
+  - `SMSTART SM`
+  - `SMSTART ZA`
+  - `SMSTART`
+- 已将该测试接入：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+
+## 本轮测试
+
+- 定向构建：
+  - `timeout 300s tests/arm64/build_tests.sh`
+  - `timeout 1200s cmake --build build -j`
+- 定向语义验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/msr_imm_absent_features_undef.bin -load 0x0 -entry 0x0 -steps 1200000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/sysreg_optional_absent_more.bin -load 0x0 -entry 0x0 -steps 1500000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/sme_sysreg_absent.bin -load 0x0 -entry 0x0 -steps 1000000`
+- 裸机完整回归：
+  - `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_msr_imm_absent_fix.log 2>&1'`
+- Linux 单核功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_msr_imm_absent_fix_ump.log 2>&1'`
+- Linux SMP 功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_msr_imm_absent_fix_smp.log 2>&1'`
+
+## 当前结论
+
+- `SVCRSM/SVCRZA/SVCRSMZA` 不是孤立问题，根因是整类 `MSR (immediate)` 编码此前缺少正确分发。
+- 这轮修复后，当前模型里 absent 的 immediate-form PSTATE 指令已经不会在 EL0 下被误分类成 `system register trap`。
+
+# 修改日志 2026-03-21 04:04
+
+## 本轮修改
+
+- 继续收敛 `absent sysreg` 在 EL0 下被误分类的问题，这一轮针对的是当前模型未实现 PMU 时的一整组 PMU System register。
+- 修改位置：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+- 在 `sysreg_present()` 中把当前模型 absent 的 PMU System register 明确标记为不存在，从而让 `MRS/MSR` 直接回到 `UNDEFINED`，而不是在 EL0 下先被通用权限检查误报为 `EC=0x18` system register trap。
+- 本轮补上的寄存器包括：
+  - `PMCCFILTR_EL0`
+  - `PMCCNTR_EL0`
+  - `PMCEID0_EL0`
+  - `PMCEID1_EL0`
+  - `PMCNTENCLR_EL0`
+  - `PMCNTENSET_EL0`
+  - `PMCR_EL0`
+  - `PMINTENCLR_EL1`
+  - `PMINTENSET_EL1`
+  - `PMMIR_EL1`
+  - `PMOVSCLR_EL0`
+  - `PMOVSSET_EL0`
+  - `PMSELR_EL0`
+  - `PMSWINC_EL0`
+  - `PMXEVCNTR_EL0`
+  - `PMXEVTYPER_EL0`
+- 新增裸机单测：
+  - [tests/arm64/pmu_sysreg_absent.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/pmu_sysreg_absent.S)
+- 该测试覆盖：
+  - EL1 下 `PMCR_EL0` 的 `MRS/MSR`
+  - EL0 下代表性的 PMU `MRS/MSR` 路径
+  - 并显式检查异常确实是 `EC=0` 的 `UNDEFINED`
+- 已将该测试接入：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+
+## 本轮测试
+
+- 定向构建：
+  - `timeout 300s tests/arm64/build_tests.sh`
+  - `timeout 1200s cmake --build build -j`
+- 定向语义验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/pmu_sysreg_absent.bin -load 0x0 -entry 0x0 -steps 1400000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/msr_imm_absent_features_undef.bin -load 0x0 -entry 0x0 -steps 1200000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/sysreg_optional_absent_more.bin -load 0x0 -entry 0x0 -steps 1500000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/sme_sysreg_absent.bin -load 0x0 -entry 0x0 -steps 1000000`
+- 裸机完整回归：
+  - `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_pmu_absent_fix.log 2>&1'`
+- Linux 单核功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_pmu_absent_fix_ump.log 2>&1'`
+- Linux SMP 功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_pmu_absent_fix_smp.log 2>&1'`
+
+## 当前结论
+
+- 这轮确认了前面一度混淆的点：对于 AArch64 System register 访问，当前模型 PMU absent 时，这批寄存器应表现为 `UNDEFINED`；`RES0` 是 external register 访问的语义，不适用于这里。
+- 修复后，这组 PMU sysreg 在 EL0 下不再被误分类成 `system register trap`，裸机与 Linux UMP/SMP 回归均已通过。
+
+# 修改日志 2026-03-21 04:14
+
+## 本轮修改
+
+- 继续沿 PMU `absent sysreg` 这条线补第二批漏网项，覆盖 `PMUv3_SS`、`PMUv3_ICNTR`、`PMUv3p9` 相关但当前模型未实现的寄存器。
+- 修改位置：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+- 在 `sysreg_present()` 中新增以下 absent PMU sysreg：
+  - `PMCCNTSVR_EL1`
+  - `PMICFILTR_EL0`
+  - `PMICNTR_EL0`
+  - `PMICNTSVR_EL1`
+  - `PMUACR_EL1`
+  - `PMZR_EL0`
+- 这些寄存器在当前模型里对应的特性均未实现：
+  - `PMCCNTSVR_EL1` 依赖 `FEAT_PMUv3_SS`
+  - `PMICFILTR_EL0` / `PMICNTR_EL0` 依赖 `FEAT_PMUv3_ICNTR`
+  - `PMICNTSVR_EL1` 依赖 `FEAT_PMUv3_ICNTR + FEAT_PMUv3_SS`
+  - `PMUACR_EL1` / `PMZR_EL0` 依赖 `FEAT_PMUv3p9`
+- 修复前，这些寄存器会在 EL0 下被错误落成 `EC=0x18` system register trap，或者依赖通用权限路径给出错误分类。
+- 修复后，它们会统一按架构要求表现为 `UNDEFINED`。
+- 新增裸机单测：
+  - [tests/arm64/pmu_sysreg_absent_more.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/pmu_sysreg_absent_more.S)
+- 该测试覆盖：
+  - EL1 下 `PMCCNTSVR_EL1`、`PMICFILTR_EL0`、`PMICNTR_EL0`、`PMICNTSVR_EL1`、`PMUACR_EL1`、`PMZR_EL0`
+  - EL0 下同组寄存器的代表性访问
+  - 并显式检查异常仍是 `EC=0` 的 `UNDEFINED`
+- 已将该测试接入：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+
+## 本轮测试
+
+- 定向构建：
+  - `timeout 300s tests/arm64/build_tests.sh`
+  - `timeout 1200s cmake --build build -j`
+- 定向语义验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/pmu_sysreg_absent_more.bin -load 0x0 -entry 0x0 -steps 1600000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/pmu_sysreg_absent.bin -load 0x0 -entry 0x0 -steps 1400000`
+- 裸机完整回归：
+  - `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_pmu_absent_more_fix.log 2>&1'`
+- Linux 单核功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_pmu_absent_more_fix_ump.log 2>&1'`
+- Linux SMP 功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_pmu_absent_more_fix_smp.log 2>&1'`
+
+## 当前结论
+
+- PMU 这组 `absent feature -> direct AArch64 system register access is UNDEFINED` 的漏项又补掉了一层。
+- 当前还值得继续追的同类缺口，优先级较高的会是更后面的 PMU/SPE 相关寄存器族，例如 `PMECR_EL1`、`PMIAR_EL1`、`PMS*` 采样寄存器等，它们大概率也需要同样的 absent-feature 分类收口。

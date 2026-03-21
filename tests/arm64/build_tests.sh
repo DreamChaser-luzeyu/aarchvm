@@ -106,6 +106,7 @@ build_asm_prog el0_sysreg_privilege
 build_asm_prog el0_idspace_undef
 build_asm_prog el0_special_regs_undef
 build_asm_prog el0_absent_pstate_features_undef
+build_asm_prog msr_imm_absent_features_undef
 build_asm_prog el0_eret_undef
 build_asm_prog el0_hvc_smc_undef
 build_asm_prog el1_hvc_smc_undef
@@ -114,6 +115,7 @@ build_asm_prog hlt_undef
 build_asm_prog pacm_undef
 build_asm_prog flagm_sys_undef
 build_asm_prog system_feature_absent_undef
+build_asm_prog gcs_system_absent_undef
 build_asm_prog dcps_drps_non_debug_undef
 build_asm_prog illegal_state_return
 build_asm_prog special_pstate_regform
@@ -122,6 +124,11 @@ build_asm_prog el0_dc_ivac_undef
 build_asm_prog dc_cva_persist_absent
 build_asm_prog el0_daif_uma
 build_asm_prog sysreg_optional_absent
+build_asm_prog pmu_sysreg_absent
+build_asm_prog pmu_sysreg_absent_more
+build_asm_prog rng_sysreg_absent
+build_asm_prog sysreg_optional_absent_more
+build_asm_prog sme_sysreg_absent
 build_asm_prog lse_atomics
 build_asm_prog casp_pair
 build_asm_prog lse_atomics_narrow
