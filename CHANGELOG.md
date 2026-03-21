@@ -4274,3 +4274,48 @@
 
 - PMU 这组 `absent feature -> direct AArch64 system register access is UNDEFINED` 的漏项又补掉了一层。
 - 当前还值得继续追的同类缺口，优先级较高的会是更后面的 PMU/SPE 相关寄存器族，例如 `PMECR_EL1`、`PMIAR_EL1`、`PMS*` 采样寄存器等，它们大概率也需要同样的 absent-feature 分类收口。
+
+# 修改日志 2026-03-21 17:49
+
+## 本轮修改
+
+- 继续沿 “absent optional feature 的 AArch64 system register direct access 应为 `UNDEFINED`” 这条线收口 SPE/PMU profiling 相关寄存器：
+  - `PMECR_EL1`
+  - `PMIAR_EL1`
+  - `PMSCR_EL1`
+  - `PMSCR_EL2`
+  - `PMSDSFR_EL1`
+  - `PMSEVFR_EL1`
+  - `PMSFCR_EL1`
+  - `PMSICR_EL1`
+  - `PMSIDR_EL1`
+  - `PMSIRR_EL1`
+  - `PMSLATFR_EL1`
+  - `PMSNEVFR_EL1`
+- 修改位置：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 新增裸机单测：
+  - [tests/arm64/spe_sysreg_absent.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/spe_sysreg_absent.S)
+- 修复前：这组 sysreg 访问会落到通用 system register trap/权限路径，导致软件观测到与架构不一致的异常分类。
+- 修复后：在当前模型未实现 SPE/相关 PMU profiling 特性时，上述寄存器在 EL0/EL1 下的 direct access 统一表现为 `UNDEFINED`。
+
+## 本轮测试
+
+- 定向构建：
+  - `timeout 300s tests/arm64/build_tests.sh`
+  - `timeout 1200s cmake --build build -j`
+- 定向语义验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/spe_sysreg_absent.bin -load 0x0 -entry 0x0 -steps 2200000`
+- 裸机完整回归：
+  - `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_spe_absent_fix.log 2>&1'`
+- Linux 单核功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_spe_absent_fix_ump.log 2>&1'`
+- Linux SMP 功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_spe_absent_fix_smp.log 2>&1'`
+
+## 当前结论
+
+- SPE/PMU profiling 这组寄存器的 absent-feature 语义已按架构要求收口为 `UNDEFINED`，并由裸机单测覆盖。
+- 这条线下一步若继续推进，优先级高的会是其它 “可选系统寄存器族” 的 absent 行为收口，避免在 EL0 下被误分类成 `EC=0x18` system register trap（尤其是 profiling/debug 相关寄存器）。

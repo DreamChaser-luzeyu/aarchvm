@@ -129,6 +129,7 @@ build_asm_prog pmu_sysreg_absent_more
 build_asm_prog rng_sysreg_absent
 build_asm_prog sysreg_optional_absent_more
 build_asm_prog sme_sysreg_absent
+build_asm_prog spe_sysreg_absent
 build_asm_prog lse_atomics
 build_asm_prog casp_pair
 build_asm_prog lse_atomics_narrow

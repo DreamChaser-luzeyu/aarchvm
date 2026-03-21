@@ -4693,6 +4693,8 @@ bool Cpu::exec_system(std::uint32_t insn) {
       case sysreg_key(3u, 0u, 9u, 14u, 2u):  // PMINTENCLR_EL1
       case sysreg_key(3u, 0u, 9u, 14u, 1u):  // PMINTENSET_EL1
       case sysreg_key(3u, 0u, 9u, 14u, 6u):  // PMMIR_EL1
+      case sysreg_key(3u, 0u, 9u, 14u, 5u):  // PMECR_EL1
+      case sysreg_key(3u, 0u, 9u, 14u, 7u):  // PMIAR_EL1
       case sysreg_key(2u, 0u, 14u, 11u, 7u): // PMCCNTSVR_EL1
       case sysreg_key(3u, 3u, 9u, 6u, 0u):   // PMICFILTR_EL0
       case sysreg_key(3u, 3u, 9u, 4u, 0u):   // PMICNTR_EL0
@@ -4703,6 +4705,16 @@ bool Cpu::exec_system(std::uint32_t insn) {
       case sysreg_key(3u, 3u, 9u, 12u, 5u):  // PMSELR_EL0
       case sysreg_key(3u, 3u, 9u, 12u, 4u):  // PMSWINC_EL0
       case sysreg_key(3u, 3u, 9u, 13u, 4u):  // PMZR_EL0
+      case sysreg_key(3u, 0u, 9u, 9u, 0u):   // PMSCR_EL1
+      case sysreg_key(3u, 4u, 9u, 9u, 0u):   // PMSCR_EL2
+      case sysreg_key(3u, 0u, 9u, 10u, 4u):  // PMSDSFR_EL1
+      case sysreg_key(3u, 0u, 9u, 9u, 5u):   // PMSEVFR_EL1
+      case sysreg_key(3u, 0u, 9u, 9u, 4u):   // PMSFCR_EL1
+      case sysreg_key(3u, 0u, 9u, 9u, 2u):   // PMSICR_EL1
+      case sysreg_key(3u, 0u, 9u, 9u, 7u):   // PMSIDR_EL1
+      case sysreg_key(3u, 0u, 9u, 9u, 3u):   // PMSIRR_EL1
+      case sysreg_key(3u, 0u, 9u, 9u, 6u):   // PMSLATFR_EL1
+      case sysreg_key(3u, 0u, 9u, 9u, 1u):   // PMSNEVFR_EL1
       case sysreg_key(3u, 3u, 13u, 0u, 7u):  // SCXTNUM_EL0
       case sysreg_key(3u, 0u, 13u, 0u, 7u):  // SCXTNUM_EL1
       case sysreg_key(3u, 0u, 13u, 0u, 6u):  // RCWMASK_EL1
