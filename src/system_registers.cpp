@@ -21,6 +21,18 @@ constexpr std::uint64_t kIdAa64Dfr0El1DebugMinimal =
     (0x1ull << 12) |  // BRPs: 2 breakpoints.
     0x6ull;           // DebugVer: Armv8.0 debug architecture.
 
+constexpr std::uint32_t decode_debug_resource_count(std::uint64_t dfr0,
+                                                    unsigned dfr0_shift,
+                                                    std::uint64_t dfr1,
+                                                    unsigned dfr1_shift) {
+  const std::uint32_t extended = static_cast<std::uint32_t>((dfr1 >> dfr1_shift) & 0xFFu);
+  if (extended != 0u) {
+    return extended + 1u;
+  }
+  const std::uint32_t legacy = static_cast<std::uint32_t>((dfr0 >> dfr0_shift) & 0xFu);
+  return legacy == 0xFu ? 16u : legacy + 1u;
+}
+
 } // namespace
 
 void SystemRegisters::reset() {
@@ -32,7 +44,7 @@ void SystemRegisters::reset() {
   clidr_el1_ = 0;
   ctr_el0_ = 0x8444C004ull;
   dczid_el0_ = 0x4ull;
-  id_aa64pfr0_el1_ = 0x0000000000000011ull;
+  id_aa64pfr0_el1_ = 0x0000000001000011ull;
   id_aa64pfr1_el1_ = 0;
   id_aa64dfr0_el1_ = kIdAa64Dfr0El1DebugMinimal;
   id_aa64dfr1_el1_ = 0;
@@ -91,6 +103,12 @@ bool SystemRegisters::read(std::uint32_t op0,
                            std::uint32_t op2,
                            std::uint64_t& value) const {
   if (op0 == 2u && op1 == 0u && crn == 0u && crm < 16u) {
+    const std::uint32_t limit =
+        (op2 == 4u || op2 == 5u) ? breakpoint_resource_count() :
+        (op2 == 6u || op2 == 7u) ? watchpoint_resource_count() : 0u;
+    if (limit != 0u && crm >= limit) {
+      return false;
+    }
     switch (op2) {
     case 4u: value = dbgbvr_el1_[crm]; return true;
     case 5u: value = dbgbcr_el1_[crm]; return true;
@@ -170,6 +188,12 @@ bool SystemRegisters::write(std::uint32_t op0,
                             std::uint32_t op2,
                             std::uint64_t value) {
   if (op0 == 2u && op1 == 0u && crn == 0u && crm < 16u) {
+    const std::uint32_t limit =
+        (op2 == 4u || op2 == 5u) ? breakpoint_resource_count() :
+        (op2 == 6u || op2 == 7u) ? watchpoint_resource_count() : 0u;
+    if (limit != 0u && crm >= limit) {
+      return false;
+    }
     switch (op2) {
     case 4u: dbgbvr_el1_[crm] = value; return true;
     case 5u: dbgbcr_el1_[crm] = value; return true;
@@ -212,6 +236,14 @@ bool SystemRegisters::write(std::uint32_t op0,
   default:
     return false;
   }
+}
+
+std::uint32_t SystemRegisters::breakpoint_resource_count() const {
+  return decode_debug_resource_count(id_aa64dfr0_el1_, 12u, id_aa64dfr1_el1_, 8u);
+}
+
+std::uint32_t SystemRegisters::watchpoint_resource_count() const {
+  return decode_debug_resource_count(id_aa64dfr0_el1_, 20u, id_aa64dfr1_el1_, 16u);
 }
 
 std::uint64_t SystemRegisters::nzcv() const {

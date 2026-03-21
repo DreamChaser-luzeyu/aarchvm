@@ -136,14 +136,14 @@ after_el1_pmsdsfr_msr:
     // EL1: PMSEVFR_EL1 (absent -> UNDEFINED)
     LOAD_EXPECT x0, 0x1B01, 0x1B02, 0x1B03, 0x1B04
 el1_pmsevfr_mrs_insn:
-    .inst 0xD5389920                  // mrs x0, pmsevfr_el1
+    .inst 0xD53899A0                  // mrs x0, pmsevfr_el1
     b    fail
 after_el1_pmsevfr_mrs:
     CHECK_HANDLED 11
 
     LOAD_EXPECT x0, 0x1C01, 0x1C02, 0x1C03, 0x1C04
 el1_pmsevfr_msr_insn:
-    .inst 0xD5189920                  // msr pmsevfr_el1, x0
+    .inst 0xD51899A0                  // msr pmsevfr_el1, x0
     b    fail
 after_el1_pmsevfr_msr:
     CHECK_HANDLED 12
@@ -443,4 +443,3 @@ handler_fail:
     .balign 8
 handled:
     .quad 0
-

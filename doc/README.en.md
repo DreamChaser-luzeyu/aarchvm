@@ -28,6 +28,12 @@ Note: `tests/linux/build_usertests_rootfs.sh` currently reuses an existing `out/
 ./tests/linux/build_linux_shell_snapshot.sh
 ```
 
+Optional for the 2-core SMP / GUI path:
+
+```bash
+./tests/linux/build_linux_smp_shell_snapshot.sh
+```
+
 4. Run the bare-metal regression suite
 
 ```bash
@@ -63,7 +69,7 @@ Note: `tests/linux/build_usertests_rootfs.sh` currently reuses an existing `out/
 The following paths are currently implemented and exercised by in-tree regression flows:
 - Single-core AArch64 EL1 interpreter execution.
 - Same-thread round-robin SMP execution, currently validated for `-smp 2`.
-- Minimal SoC device set: RAM, PL011 UART, Generic Timer, and minimal GICv3.
+- Current Linux-facing platform path: low boot RAM alias, 1 GiB SDRAM, PL011 UART, Generic Timer, minimal GICv3, SDL framebuffer, PL050 KMI keyboard, and perf mailbox.
 - Minimal synchronous exception loop with `ESR_EL1`, `FAR_EL1`, `ELR_EL1`, and `SPSR_EL1`.
 - Minimal MMU/TLB behavior required by early Linux page-table bring-up.
 - U-Boot serial boot and Linux hand-off via `booti`.
@@ -80,20 +86,22 @@ Current SMP scope and limits:
 - It covers `MPIDR_EL1`, PSCI `CPU_ON`, per-CPU GIC redistributor discovery, per-CPU generic timer delivery, cross-core `SEV/WFE`, and cross-core exclusive-monitor invalidation / `LDAXR`/`STLXR` locking.
 - The current implementation still uses same-thread round-robin scheduling and remains a minimal program-visible model rather than a cycle-accurate SMP machine.
 - Automatic Linux regression now covers both the default single-core serial path and the 2-core SMP shell path.
+- The SoC outer scheduler now defaults to `AARCHVM_SCHED_MODE=event`; `legacy` is still available for debugging and A/B measurement.
 
 Automatic Linux regression runs intentionally use the serial-only path and explicitly disable SDL output for reproducibility and speed. GUI and PS/2 keyboard validation are kept as a separate manual path.
 
 ## Current Device Model
 
 The current repository includes and uses the following device / platform pieces:
-- RAM
+- low boot RAM alias plus 1 GiB SDRAM
 - PL011 UART
 - ARM Generic Timer system-register path
 - Minimal GICv3 distributor / redistributor / CPU-interface path
+- perf mailbox MMIO block used by the Linux perf / benchmark helpers
 - framebuffer RAM region described as `simple-framebuffer`
 - SDL window backend for presenting framebuffer contents
 - PL050 KMI keyboard controller
-- basic block-device path and related state save/restore
+- snapshot-aware MMIO block device (`aarchvm,mmio-blk`), attachable with `-drive` and currently more experimental than the serial / GUI paths
 - full-machine snapshot support
 
 The Linux-facing DTs already contain the relevant nodes in:
@@ -103,6 +111,7 @@ The Linux-facing DTs already contain the relevant nodes in:
 That includes:
 - `simple-framebuffer`
 - `arm,pl050` / `arm,primecell`
+- `aarchvm,mmio-blk`
 
 ## Toolchain Version
 
@@ -135,6 +144,9 @@ aarch64-linux-gnu-as --version | head -n 1
 - Unified user-test initramfs: `out/initramfs-usertests.cpio`
 - Linux shell snapshot: `out/linux-usertests-shell-v1.snap`
 - Linux SMP shell snapshot: `out/linux-smp-shell-v1.snap`
+- SMP shell snapshot build wrapper: `tests/linux/build_linux_smp_shell_snapshot.sh`
+- Fast serial restore helper: `tests/linux/run_interactive.sh`
+- GUI snapshot restore helper: `tests/linux/run_gui_tty1_from_snapshot.sh`
 - Linux SMP functional suite: `tests/linux/run_functional_suite_smp.sh`
 
 ## Build
@@ -298,12 +310,17 @@ Common options:
 - `-segment <file@addr>`: load an extra image segment
 - `-snapshot-save <file>`: save a full-machine snapshot at the end of the run
 - `-snapshot-load <file>`: resume from a snapshot
+- `-drive <image.bin>`: attach a raw image to the MMIO block device
 - `-stop-on-uart <text>`: stop immediately when UART output matches a string
 - `-decode <fast|slow>`: switch decode execution path, default is the fast path
 - `-fb-sdl <on|off>`: explicitly enable or disable the SDL framebuffer window
 
 Behavior-control environment variables:
 - `AARCHVM_BRK_MODE=trap|halt`: control how the emulator handles A64 `BRK`. The default is `trap`, which follows the architected Breakpoint Instruction exception model. `halt` keeps the historical bare-metal test behavior where `BRK` immediately stops the emulator; `tests/arm64/run_all.sh` exports this mode for legacy stop semantics.
+- `AARCHVM_STOP_ON_UART=<text>`: environment-variable form of `-stop-on-uart`.
+- `AARCHVM_DTB_PATH=<file>` / `AARCHVM_DTB_ADDR=<addr>`: environment-variable DTB injection path, used when the DTB is not passed explicitly on the command line.
+- `AARCHVM_UART_TX_MATCH=<text>` + `AARCHVM_UART_TX_REPLY=<text>`: one-shot host-side UART prompt matcher / auto-reply pair. This is useful for scripted U-Boot hand-off without permanently replacing interactive stdin.
+- `AARCHVM_FB_SDL=0|1`: default SDL framebuffer enable switch when `-fb-sdl` is not specified.
 
 Interactive serial shortcut:
 - when stdin is a TTY, press `Ctrl+A`, then `x` to stop the emulator immediately
@@ -335,6 +352,14 @@ This script will:
 - save the snapshot to `out/linux-usertests-shell-v1.snap`
 - immediately run a snapshot-restore sanity check
 
+For the 2-core SMP shell snapshot, use:
+
+```bash
+./tests/linux/build_linux_smp_shell_snapshot.sh
+```
+
+This wrapper reuses the same flow but adds `-smp 2 -smp-mode psci` and `dts/aarchvm-linux-smp.dtb`.
+
 Automatic regression uses:
 - `-fb-sdl off`
 - `console=ttyAMA0,115200 earlycon=pl011,0x09000000 rdinit=/init initramfs_async=0`
@@ -350,6 +375,12 @@ This is the recommended reproducible path for regression and performance runs.
 This restores `out/linux-usertests-shell-v1.snap` and is the fastest way to get back into the BusyBox serial shell once the snapshot has already been created.
 
 When running interactively on the host terminal, you can exit with the QEMU-style serial escape `Ctrl+A`, then `x`.
+
+If you already saved a GUI snapshot through `run_gui_tty1.sh`, you can restore it with:
+
+```bash
+./tests/linux/run_gui_tty1_from_snapshot.sh
+```
 
 ### 6. Linux functional regression
 
@@ -393,6 +424,8 @@ Meaning:
 - boot the GUI path with the 2-core SMP DTB, matching the script
 - deliver SDL window keyboard input through the PL050 PS/2 keyboard device
 
+`run_gui_tty1.sh` is the cold-boot GUI path and saves a snapshot at the end by default. `run_gui_tty1_from_snapshot.sh` is the matching fast-restore helper once that snapshot already exists.
+
 ## Test Entry Points
 
 ### Bare-metal regression
@@ -409,14 +442,18 @@ This suite covers and validates multiple integer, sysreg, interrupt, and newly a
 The current recommended Linux-side scripts are:
 - `tests/linux/build_usertests_rootfs.sh`
 - `tests/linux/build_linux_shell_snapshot.sh`
+- `tests/linux/build_linux_smp_shell_snapshot.sh`
+- `tests/linux/run_interactive.sh`
 - `tests/linux/run_functional_suite.sh`
 - `tests/linux/run_algorithm_perf.sh`
 - `tests/linux/run_functional_suite_smp.sh`
 - `tests/linux/run_gui_tty1.sh`
+- `tests/linux/run_gui_tty1_from_snapshot.sh`
 
 Where:
-- the first five are automation-oriented and intentionally serial-only
-- `run_gui_tty1.sh` is the manual GUI validation path
+- `build_linux_shell_snapshot.sh`, `build_linux_smp_shell_snapshot.sh`, `run_functional_suite.sh`, `run_algorithm_perf.sh`, and `run_functional_suite_smp.sh` are automation-oriented and intentionally serial-only
+- `run_interactive.sh` is the quickest manual serial-shell restore path
+- `run_gui_tty1.sh` and `run_gui_tty1_from_snapshot.sh` are the manual GUI validation / restore paths
 
 ## Injection and Debugging Notes
 
@@ -426,9 +463,10 @@ The current implementation supports these commonly used mechanisms:
 - `AARCHVM_BUS_FASTPATH=1`: enable the bus fast path.
 - `AARCHVM_TIMER_SCALE=<n>`: scale virtual timer progression to accelerate Linux boot and regression runs.
 - `AARCHVM_SCHED_MODE=event|legacy`: choose the SoC outer scheduler. `event` is the default and is the semantically correct mode for the current SMP/Linux timer paths. `legacy` keeps the older fixed-step fallback and is useful for debugging or A/B measurement, but it can delay near-term SMP timer delivery and should not be treated as behavior-equivalent.
-- For the current instruction-count time model, 2-core Linux runs that keep the shell on `console=ttyAMA0,115200` should use `AARCHVM_TIMER_SCALE=1`. A higher value such as `10` is still fine for the `tty1` / framebuffer GUI path, but it can push SMP serial boot far enough in guest virtual time to trip Linux RCU / `stop_machine` watchdog paths before the shell is reached.
+- The current mainline scripts use `AARCHVM_TIMER_SCALE=1` for both single-core and SMP regression flows. Larger values can still be useful for local experiments, but on SMP they have historically made guest virtual time advance aggressively enough to trigger Linux watchdog / RCU sensitivity, so they should be treated as tuning knobs rather than default regression settings.
 - `AARCHVM_STDIN_RX_GAP=<steps>`: pace bytes from non-interactive stdin before they reach UART, useful for scripted serial sessions and bulk command injection.
 - `AARCHVM_DEBUG_SLOW=1`: force a conservative debug execution mode. This disables instruction predecode, disables the SoC bus fast path, and disables the CPU RAM direct read/write fast path so regressions can be checked without those host-side shortcuts.
+- `AARCHVM_PRINT_SUMMARY=1`: print the final global step count and, in SMP mode, a per-CPU summary. The snapshot build / verify scripts use this to derive prompt-step checkpoints.
 - `AARCHVM_TRACE_WRITE_VA=<va>` / `AARCHVM_TRACE_WRITE_PA=<pa>`: log guest writes that touch a selected virtual or physical address. Useful for chasing memory corruption, aliasing, or unexpected page-crossing stores.
 - `AARCHVM_TRACE_BRANCH_ZERO=1`: when `BR` / `BLR` / `RET` would branch to address zero, print the branch source, register state, and the current contents of the PLT/GOT target slot.
 

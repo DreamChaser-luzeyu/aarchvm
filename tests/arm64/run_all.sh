@@ -67,10 +67,14 @@ run mmu_table_ap_inherit.bin 4000000
 run mmu_table_pxn_inherit.bin 4000000
 run mmu_tcr_ips_mair_decode.bin 4000000
 run mmu_af_fault.bin 4000000
+run_expect mmu_at_pan_ignore.bin 400000 N
+run_expect at_pan2_absent_undef.bin 600000 R
 run sync_exception_regs.bin 2000000
 run_expect exception_daif_entry.bin 300000 D
 run_expect eret_clears_exclusive.bin 300000 E
 ./build/aarchvm -bin tests/arm64/out/nested_sync_depth.bin -load 0x0 -entry 0x0 -steps 400000 | grep -qx 'P'
+run_expect gic_sysreg_id_consistency.bin 300000 J
+run_expect debug_sysreg_resource_bounds.bin 800000 K
 run gic_timer_sysreg.bin 2000000
 run gic_timer_rearm_no_spurious.bin 2000000
 run gic_timer_phys_sysreg.bin 2000000
@@ -129,7 +133,9 @@ test "$(./build/aarchvm -bin tests/arm64/out/pmu_sysreg_absent_more.bin -load 0x
 test "$(./build/aarchvm -bin tests/arm64/out/rng_sysreg_absent.bin -load 0x0 -entry 0x0 -steps 400000 | tr -d '\r\n')" = 'N'
 test "$(./build/aarchvm -bin tests/arm64/out/sysreg_optional_absent_more.bin -load 0x0 -entry 0x0 -steps 1200000 | tr -d '\r\n')" = 'O'
 test "$(./build/aarchvm -bin tests/arm64/out/sme_sysreg_absent.bin -load 0x0 -entry 0x0 -steps 800000 | tr -d '\r\n')" = 'Z'
+test "$(./build/aarchvm -bin tests/arm64/out/amu_sysreg_absent.bin -load 0x0 -entry 0x0 -steps 2200000 | tr -d '\r\n')" = 'A'
 test "$(./build/aarchvm -bin tests/arm64/out/spe_sysreg_absent.bin -load 0x0 -entry 0x0 -steps 2200000 | tr -d '\r\n')" = 'S'
+test "$(./build/aarchvm -bin tests/arm64/out/spe_pmb_sysreg_absent.bin -load 0x0 -entry 0x0 -steps 1800000 | tr -d '\r\n')" = 'B'
 test "$(./build/aarchvm -bin tests/arm64/out/el0_cache_ops_privilege.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'C'
 test "$(./build/aarchvm -bin tests/arm64/out/el0_wfx_trap.bin -load 0x0 -entry 0x0 -steps 800000 | tr -d '\r\n')" = 'T'
 run ldtr_sttr_usercopy.bin 400000

@@ -218,7 +218,8 @@ private:
                                      AccessType access,
                                      TranslationResult* out_result,
                                      bool allow_tlb_fill,
-                                     bool use_tlb = true);
+                                     bool use_tlb = true,
+                                     bool apply_pan = true);
   [[nodiscard]] bool translate_cache_maintenance_address(std::uint64_t va,
                                                          TranslationResult* out_result,
                                                          bool fault_on_el0_no_read_permission,
@@ -228,11 +229,13 @@ private:
                                   AccessType access,
                                   TranslationResult* out_result,
                                   TranslationFault* fault,
-                                  bool check_permissions = true);
+                                  bool check_permissions = true,
+                                  bool apply_pan = true);
   [[nodiscard]] bool access_permitted(const TranslationResult& result,
                                       AccessType access,
                                       std::uint8_t level,
-                                      TranslationFault* fault) const {
+                                      TranslationFault* fault,
+                                      bool apply_pan = true) const {
     const auto permission_fault = [&](bool write) {
       if (fault != nullptr) {
         *fault = TranslationFault{.kind = TranslationFault::Kind::Permission, .level = level, .write = write};
@@ -246,7 +249,7 @@ private:
     if (use_el0_permissions && !result.user_accessible) {
       return permission_fault(write);
     }
-    if (!use_el0_permissions && access != AccessType::Fetch && sysregs_.pan() && result.user_accessible) {
+    if (apply_pan && !use_el0_permissions && access != AccessType::Fetch && sysregs_.pan() && result.user_accessible) {
       return permission_fault(write);
     }
     if (write && !result.writable) {

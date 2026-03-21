@@ -5,7 +5,8 @@ _start:
     movk x1, #0x0900, lsl #16      // UART
 
     mrs  x2, id_aa64pfr0_el1
-    movz x3, #0x11
+    movz x3, #0x0011
+    movk x3, #0x0100, lsl #16
     subs xzr, x2, x3
     b.ne fail1
 

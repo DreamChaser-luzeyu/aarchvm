@@ -3711,7 +3711,8 @@ bool Cpu::translate_address(std::uint64_t va,
                             AccessType access,
                             TranslationResult* out_result,
                             bool allow_tlb_fill,
-                            bool use_tlb) {
+                            bool use_tlb,
+                            bool apply_pan) {
   ++perf_counters_.translate_calls;
   last_translation_fault_.reset();
 
@@ -3766,7 +3767,7 @@ bool Cpu::translate_address(std::uint64_t va,
       out_result->leaf_shareability = hit->leaf_shareability;
       out_result->walk_attrs = hit->walk_attrs;
       TranslationFault fault{};
-      if (!access_permitted(*out_result, access, out_result->level, &fault)) {
+      if (!access_permitted(*out_result, access, out_result->level, &fault, apply_pan)) {
         last_translation_fault_ = fault;
         return false;
       }
@@ -3776,7 +3777,7 @@ bool Cpu::translate_address(std::uint64_t va,
   }
 
   TranslationFault fault{};
-  if (!walk_page_tables(va, access, out_result, &fault, true)) {
+  if (!walk_page_tables(va, access, out_result, &fault, true, apply_pan)) {
     last_translation_fault_ = fault;
     return false;
   }
@@ -3883,7 +3884,8 @@ bool Cpu::walk_page_tables(std::uint64_t va,
                            AccessType access,
                            TranslationResult* out_result,
                            TranslationFault* fault,
-                           bool check_permissions) {
+                           bool check_permissions,
+                           bool apply_pan) {
   ++perf_counters_.page_walks;
   const bool write = access_is_write(access);
   const bool trace_va = trace_va_.has_value() && *trace_va_ == va && !trace_va_hit_;
@@ -4079,7 +4081,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
         return false;
       }
       if (check_permissions &&
-          !access_permitted(*out_result, access, static_cast<std::uint8_t>(level), fault)) {
+          !access_permitted(*out_result, access, static_cast<std::uint8_t>(level), fault, apply_pan)) {
         return false;
       }
       return true;
@@ -4155,7 +4157,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
       return false;
     }
     if (check_permissions &&
-        !access_permitted(*out_result, access, static_cast<std::uint8_t>(level), fault)) {
+        !access_permitted(*out_result, access, static_cast<std::uint8_t>(level), fault, apply_pan)) {
       if (trace_va) {
         trace_va_hit_ = true;
       }
@@ -4558,6 +4560,8 @@ bool Cpu::exec_system(std::uint32_t insn) {
   // them fall through to the generic MSR/sysreg path then EL0 execution is
   // misreported as EC=0x18 system-access trap instead of EC=0 undefined.
   if (insn == 0xD50330FFu ||                        // SB (FEAT_SB)
+      (insn & 0xFFFFFFE0u) == 0xD5087900u ||        // AT S1E1RP, Xt (FEAT_PAN2)
+      (insn & 0xFFFFFFE0u) == 0xD5087920u ||        // AT S1E1WP, Xt (FEAT_PAN2)
       (insn & 0xFFFFFFE0u) == 0xD5031000u ||        // WFET Xt (FEAT_WFxT)
       (insn & 0xFFFFFFE0u) == 0xD5031020u ||        // WFIT Xt (FEAT_WFxT)
       (insn & 0xFFFFFFE0u) == 0xD50B7380u ||        // CFP RCTX, Xt (FEAT_SPECRES)
@@ -4677,7 +4681,86 @@ bool Cpu::exec_system(std::uint32_t insn) {
     }
   };
 
+  const auto amu_feature_level =
+      static_cast<std::uint32_t>((sysregs_.id_aa64pfr0_el1() >> 44) & 0xFu);
+  const bool have_amuv1 = amu_feature_level >= 1u;
+  const bool have_amuv1p1 = amu_feature_level >= 2u;
+
+  const auto is_amu_v1_sysreg = [&](std::uint32_t key) -> bool {
+    const std::uint32_t op0 = (key >> 14) & 0x3u;
+    const std::uint32_t op1 = (key >> 11) & 0x7u;
+    const std::uint32_t crn = (key >> 7) & 0xFu;
+    const std::uint32_t crm = (key >> 3) & 0xFu;
+    const std::uint32_t op2 = key & 0x7u;
+    if (op0 != 3u || op1 != 3u || crn != 13u) {
+      return false;
+    }
+    if (crm == 2u) {
+      return op2 <= 5u; // AMCR/AMCFGR/AMCGCR/AMUSERENR/AMCNTENCLR0/AMCNTENSET0
+    }
+    if (crm == 3u) {
+      return op2 <= 1u; // AMCNTENCLR1/AMCNTENSET1
+    }
+    switch (crm) {
+      case 4u:  // AMEVCNTR0<m>_EL0, m[3]=0
+      case 5u:  // AMEVCNTR0<m>_EL0, m[3]=1
+      case 6u:  // AMEVTYPER0<m>_EL0, m[3]=0
+      case 7u:  // AMEVTYPER0<m>_EL0, m[3]=1
+      case 12u: // AMEVCNTR1<m>_EL0, m[3]=0
+      case 13u: // AMEVCNTR1<m>_EL0, m[3]=1
+      case 14u: // AMEVTYPER1<m>_EL0, m[3]=0
+      case 15u: // AMEVTYPER1<m>_EL0, m[3]=1
+        return true;
+      default:
+        return false;
+    }
+  };
+
+  const auto is_amu_v1p1_sysreg = [&](std::uint32_t key) -> bool {
+    const std::uint32_t op0 = (key >> 14) & 0x3u;
+    const std::uint32_t op1 = (key >> 11) & 0x7u;
+    const std::uint32_t crn = (key >> 7) & 0xFu;
+    const std::uint32_t crm = (key >> 3) & 0xFu;
+    const std::uint32_t op2 = key & 0x7u;
+    if (op0 == 3u && op1 == 3u && crn == 13u && crm == 2u && op2 == 6u) {
+      return true; // AMCG1IDR_EL0
+    }
+    if (op0 != 3u || op1 != 4u || crn != 13u) {
+      return false;
+    }
+    switch (crm) {
+      case 8u:  // AMEVCNTVOFF0<m>_EL2, m[3]=0
+      case 9u:  // AMEVCNTVOFF0<m>_EL2, m[3]=1
+      case 10u: // AMEVCNTVOFF1<m>_EL2, m[3]=0
+      case 11u: // AMEVCNTVOFF1<m>_EL2, m[3]=1
+        return true;
+      default:
+        return false;
+    }
+  };
+
   const auto sysreg_present = [&](std::uint32_t key) -> bool {
+    if (!have_amuv1 && is_amu_v1_sysreg(key)) {
+      return false;
+    }
+    if (!have_amuv1p1 && is_amu_v1p1_sysreg(key)) {
+      return false;
+    }
+    {
+      const std::uint32_t op0 = (key >> 14) & 0x3u;
+      const std::uint32_t op1 = (key >> 11) & 0x7u;
+      const std::uint32_t crn = (key >> 7) & 0xFu;
+      const std::uint32_t crm = (key >> 3) & 0xFu;
+      const std::uint32_t op2 = key & 0x7u;
+      if (op0 == 2u && op1 == 0u && crn == 0u && crm < 16u) {
+        if (op2 == 4u || op2 == 5u) {
+          return crm < sysregs_.breakpoint_resource_count();
+        }
+        if (op2 == 6u || op2 == 7u) {
+          return crm < sysregs_.watchpoint_resource_count();
+        }
+      }
+    }
     switch (key) {
       case sysreg_key(3u, 3u, 13u, 0u, 5u):  // TPIDR2_EL0
       case sysreg_key(3u, 3u, 2u, 5u, 1u):   // GCSPR_EL0
@@ -4715,6 +4798,13 @@ bool Cpu::exec_system(std::uint32_t insn) {
       case sysreg_key(3u, 0u, 9u, 9u, 3u):   // PMSIRR_EL1
       case sysreg_key(3u, 0u, 9u, 9u, 6u):   // PMSLATFR_EL1
       case sysreg_key(3u, 0u, 9u, 9u, 1u):   // PMSNEVFR_EL1
+      case sysreg_key(3u, 0u, 9u, 10u, 7u):  // PMBIDR_EL1
+      case sysreg_key(3u, 0u, 9u, 10u, 0u):  // PMBLIMITR_EL1
+      case sysreg_key(3u, 0u, 9u, 10u, 5u):  // PMBMAR_EL1
+      case sysreg_key(3u, 0u, 9u, 10u, 1u):  // PMBPTR_EL1
+      case sysreg_key(3u, 0u, 9u, 10u, 3u):  // PMBSR_EL1
+      case sysreg_key(3u, 4u, 9u, 10u, 3u):  // PMBSR_EL2
+      case sysreg_key(3u, 6u, 9u, 10u, 3u):  // PMBSR_EL3
       case sysreg_key(3u, 3u, 13u, 0u, 7u):  // SCXTNUM_EL0
       case sysreg_key(3u, 0u, 13u, 0u, 7u):  // SCXTNUM_EL1
       case sysreg_key(3u, 0u, 13u, 0u, 6u):  // RCWMASK_EL1
@@ -4728,7 +4818,6 @@ bool Cpu::exec_system(std::uint32_t insn) {
       case sysreg_key(3u, 3u, 9u, 13u, 2u):  // PMXEVCNTR_EL0
       case sysreg_key(3u, 3u, 9u, 13u, 1u):  // PMXEVTYPER_EL0
       case sysreg_key(3u, 3u, 9u, 14u, 0u):  // PMUSERENR_EL0
-      case sysreg_key(3u, 3u, 13u, 2u, 3u):  // AMUSERENR_EL0
       case sysreg_key(3u, 0u, 4u, 2u, 4u):   // UAO
       case sysreg_key(3u, 3u, 4u, 2u, 5u):   // DIT
       case sysreg_key(3u, 3u, 4u, 2u, 6u):   // SSBS
@@ -5000,7 +5089,8 @@ bool Cpu::exec_system(std::uint32_t insn) {
     }
     const std::uint32_t rt = insn & 0x1Fu;
     TranslationResult result{};
-    update_par_from_translation(translate_address(reg(rt), AccessType::Read, &result, false, false), result);
+    // FEAT_PAN2 is absent in this model, so plain AT S1E1R ignores PSTATE.PAN.
+    update_par_from_translation(translate_address(reg(rt), AccessType::Read, &result, false, false, false), result);
     return true;
   }
 
@@ -5011,7 +5101,8 @@ bool Cpu::exec_system(std::uint32_t insn) {
     }
     const std::uint32_t rt = insn & 0x1Fu;
     TranslationResult result{};
-    update_par_from_translation(translate_address(reg(rt), AccessType::Write, &result, false, false), result);
+    // FEAT_PAN2 is absent in this model, so plain AT S1E1W ignores PSTATE.PAN.
+    update_par_from_translation(translate_address(reg(rt), AccessType::Write, &result, false, false, false), result);
     return true;
   }
 

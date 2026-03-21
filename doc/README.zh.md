@@ -28,6 +28,12 @@ cmake --build build -j
 ./tests/linux/build_linux_shell_snapshot.sh
 ```
 
+如果你要直接准备 2 核 SMP / GUI 路径，也可额外执行：
+
+```bash
+./tests/linux/build_linux_smp_shell_snapshot.sh
+```
+
 4. 运行裸机回归
 
 ```bash
@@ -63,7 +69,7 @@ cmake --build build -j
 当前仓库已经实际跑通并回归过的路径包括：
 - 单核 AArch64 EL1 解释执行。
 - 同线程 round-robin 的 SMP 执行路径，当前已验证 `-smp 2`。
-- 最小 SoC 设备集合：RAM、PL011 UART、Generic Timer、最小 GICv3。
+- 当前 Linux 启动平台路径：低地址 boot RAM 映射、1 GiB SDRAM、PL011 UART、Generic Timer、最小 GICv3、SDL framebuffer、PL050 KMI 键盘，以及 perf mailbox。
 - 最小同步异常闭环：`ESR_EL1`、`FAR_EL1`、`ELR_EL1`、`SPSR_EL1`。
 - Linux 早期页表所需的最小 MMU/TLB 路径。
 - U-Boot 串口启动与 `booti` 引导 Linux。
@@ -80,20 +86,22 @@ cmake --build build -j
 - 已覆盖的程序可见行为包括 `MPIDR_EL1`、PSCI `CPU_ON`、每核 GIC redistributor 发现、每核 Generic Timer 中断递送、跨核 `SEV/WFE`，以及跨核 exclusive monitor 失效与 `LDAXR`/`STLXR` 自旋锁。
 - 当前实现仍采用同线程 round-robin 调度，目标是程序可感知正确性，而不是周期精确的 SMP 机器模型。
 - 自动化 Linux 回归已经覆盖默认的单核串口路径，以及 2 核 SMP shell 路径。
+- SoC 外层调度器当前默认使用 `AARCHVM_SCHED_MODE=event`；`legacy` 仍保留用于调试和 A/B 对比。
 
 当前自动回归默认走串口路径，并显式关闭 SDL 窗口，以保证可重复性与速度。图形界面和 PS/2 键盘路径使用单独的手工脚本验证。
 
 ## 当前外设模型
 
 当前已经实现并在实际启动路径中使用的外设 / 机制包括：
-- RAM
+- 低地址 boot RAM 映射与 1 GiB SDRAM
 - PL011 UART
 - ARM Generic Timer 系统寄存器路径
 - 最小 GICv3 分发器 / redistributor / CPU 接口路径
+- Linux perf / benchmark helper 使用的 perf mailbox MMIO
 - `simple-framebuffer` 对应的 framebuffer RAM 区域
 - SDL 窗口后端，用于把 framebuffer 内容显示到宿主机窗口
 - PL050 KMI 键盘控制器
-- 基础块设备路径与相关状态保存
+- 可通过 `-drive` 挂载、并支持快照保存/恢复的 MMIO 块设备（`aarchvm,mmio-blk`），当前仍比串口/GUI 主路径更偏实验性
 - 整机 snapshot
 
 与 Linux GUI 路径相关的设备树节点已经在以下文件中提供：
@@ -103,6 +111,7 @@ cmake --build build -j
 其中包括：
 - `simple-framebuffer`
 - `arm,pl050` / `arm,primecell`
+- `aarchvm,mmio-blk`
 
 ## 工具链版本
 
@@ -135,6 +144,9 @@ aarch64-linux-gnu-as --version | head -n 1
 - 用户态测试 initramfs：`out/initramfs-usertests.cpio`
 - Linux shell 快照：`out/linux-usertests-shell-v1.snap`
 - Linux SMP shell 快照：`out/linux-smp-shell-v1.snap`
+- SMP shell 快照构建包装脚本：`tests/linux/build_linux_smp_shell_snapshot.sh`
+- 串口快照交互恢复脚本：`tests/linux/run_interactive.sh`
+- GUI 快照恢复脚本：`tests/linux/run_gui_tty1_from_snapshot.sh`
 - Linux SMP 功能回归脚本：`tests/linux/run_functional_suite_smp.sh`
 
 ## 构建
@@ -298,12 +310,17 @@ mkdir -p out/initramfs-full-root/{dev,proc,sys,tmp,run,root,mnt,etc}
 - `-segment <file@addr>`：装载额外镜像段
 - `-snapshot-save <file>`：运行结束保存整机快照
 - `-snapshot-load <file>`：从整机快照恢复
+- `-drive <image.bin>`：把原始镜像挂到 MMIO 块设备上
 - `-stop-on-uart <text>`：UART 输出命中特定字符串时立即停止
 - `-decode <fast|slow>`：切换解码执行路径，默认使用快路径
 - `-fb-sdl <on|off>`：显式打开或关闭 SDL framebuffer 窗口
 
 行为控制环境变量：
 - `AARCHVM_BRK_MODE=trap|halt`：控制 A64 `BRK` 的处理方式。默认值是 `trap`，即按架构要求产生 Breakpoint Instruction exception。`halt` 保留历史上的裸机测试停机语义，使 `BRK` 立即终止模拟器；`tests/arm64/run_all.sh` 会导出这个模式，以兼容现有裸机回归。
+- `AARCHVM_STOP_ON_UART=<text>`：`-stop-on-uart` 的环境变量形式。
+- `AARCHVM_DTB_PATH=<file>` / `AARCHVM_DTB_ADDR=<addr>`：不经命令行显式传参时，使用环境变量方式注入 DTB。
+- `AARCHVM_UART_TX_MATCH=<text>` + `AARCHVM_UART_TX_REPLY=<text>`：宿主机侧的一次性 UART 提示符匹配/自动回复组合，可用于脚本化 U-Boot 引导，同时保留交互式 stdin 路径。
+- `AARCHVM_FB_SDL=0|1`：当未显式传 `-fb-sdl` 时，用环境变量控制 SDL framebuffer 默认开关。
 
 交互式串口快捷键：
 - 当 stdin 是终端时，可按 `Ctrl+A`，再按 `x`，立即终止模拟器
@@ -335,6 +352,14 @@ mkdir -p out/initramfs-full-root/{dev,proc,sys,tmp,run,root,mnt,etc}
 - 保存快照到 `out/linux-usertests-shell-v1.snap`
 - 立即做一次快照恢复 sanity check
 
+如果你要构建 2 核 SMP shell 快照，可直接执行：
+
+```bash
+./tests/linux/build_linux_smp_shell_snapshot.sh
+```
+
+该包装脚本复用了同一套逻辑，但会额外设置 `-smp 2 -smp-mode psci` 和 `dts/aarchvm-linux-smp.dtb`。
+
 自动回归默认会加：
 - `-fb-sdl off`
 - `console=ttyAMA0,115200 earlycon=pl011,0x09000000 rdinit=/init initramfs_async=0`
@@ -350,6 +375,12 @@ mkdir -p out/initramfs-full-root/{dev,proc,sys,tmp,run,root,mnt,etc}
 该脚本会从 `out/linux-usertests-shell-v1.snap` 恢复，适合在已经生成快照后快速进入 BusyBox 串口 shell。
 
 如果是在宿主机终端上直接交互，可使用 QEMU 风格的串口退出序列 `Ctrl+A`，再按 `x` 来退出。
+
+如果你已经通过 `run_gui_tty1.sh` 保存过 GUI 快照，也可以用下面的脚本直接恢复：
+
+```bash
+./tests/linux/run_gui_tty1_from_snapshot.sh
+```
 
 ### 6. Linux 功能回归
 
@@ -393,6 +424,8 @@ console=ttyAMA0,115200 console=tty1 earlycon=pl011,0x09000000 rdinit=/init initr
 - GUI 路径使用与脚本一致的 2 核 SMP 设备树
 - SDL 窗口中的键盘输入通过 PL050 PS/2 键盘送入 Linux
 
+`run_gui_tty1.sh` 负责完整冷启动 GUI 路径，并默认在结束时保存一个快照；`run_gui_tty1_from_snapshot.sh` 则是在该快照已经存在时的快速恢复入口。
+
 ## 测试入口
 
 ### 裸机回归
@@ -409,14 +442,18 @@ console=ttyAMA0,115200 console=tty1 earlycon=pl011,0x09000000 rdinit=/init initr
 当前建议保留并使用这几类脚本：
 - `tests/linux/build_usertests_rootfs.sh`
 - `tests/linux/build_linux_shell_snapshot.sh`
+- `tests/linux/build_linux_smp_shell_snapshot.sh`
+- `tests/linux/run_interactive.sh`
 - `tests/linux/run_functional_suite.sh`
 - `tests/linux/run_algorithm_perf.sh`
 - `tests/linux/run_functional_suite_smp.sh`
 - `tests/linux/run_gui_tty1.sh`
+- `tests/linux/run_gui_tty1_from_snapshot.sh`
 
 其中：
-- 前五者面向自动化、默认串口路径
-- `run_gui_tty1.sh` 面向手工图形验证
+- `build_linux_shell_snapshot.sh`、`build_linux_smp_shell_snapshot.sh`、`run_functional_suite.sh`、`run_algorithm_perf.sh`、`run_functional_suite_smp.sh` 面向自动化，默认串口路径
+- `run_interactive.sh` 是最快的手工串口 shell 恢复入口
+- `run_gui_tty1.sh` 和 `run_gui_tty1_from_snapshot.sh` 面向手工 GUI 验证 / 恢复
 
 ## 调试与注入说明
 
@@ -426,9 +463,10 @@ console=ttyAMA0,115200 console=tty1 earlycon=pl011,0x09000000 rdinit=/init initr
 - `AARCHVM_BUS_FASTPATH=1`：启用总线快路径。
 - `AARCHVM_TIMER_SCALE=<n>`：调整虚拟计时推进比例，加速 Linux 启动与测试。
 - `AARCHVM_SCHED_MODE=event|legacy`：选择 SoC 外层调度器。当前默认是 `event`，也是现有 SMP/Linux timer 路径下语义正确的模式。`legacy` 保留旧的固定步数 fallback，适合调试或做 A/B 对比，但它会明显推迟 SMP 近期限时器递送，不应视作行为等价模式。
-- 在当前“按指令数推进虚拟时间”的模型下，2 核 Linux 串口 shell 路径如果保持 `console=ttyAMA0,115200`，应使用 `AARCHVM_TIMER_SCALE=1`。像 `10` 这样的更大倍率仍适合 `tty1` / framebuffer GUI 路径，但会让 SMP 串口启动在 guest 视角中过快前进，可能在到达 shell 前就触发 Linux 的 RCU / `stop_machine` 看门狗路径。
+- 当前主线脚本在单核和 SMP 回归上都统一使用 `AARCHVM_TIMER_SCALE=1`。更大的倍率仍可用于本地实验，但在 SMP 下它们曾多次把 guest 虚拟时间推得过快，从而放大 Linux 看门狗 / RCU 敏感性，因此应视作调参项，而不是默认回归配置。
 - `AARCHVM_STDIN_RX_GAP=<steps>`：对来自非交互式 stdin 的 UART 输入做步数节流，适合脚本化串口会话与批量命令注入。
 - `AARCHVM_DEBUG_SLOW=1`：强制启用保守的调试慢路径，关闭指令预解码、SoC 总线 fast path，以及 CPU 对 RAM 的直读直写快路径，便于在不依赖这些宿主机侧优化捷径的情况下复查回归。
+- `AARCHVM_PRINT_SUMMARY=1`：打印最终全局步数，并在 SMP 下额外打印每个 CPU 的摘要；当前快照构建/验证脚本会用它来提取提示符所在步数。
 - `AARCHVM_TRACE_WRITE_VA=<va>` / `AARCHVM_TRACE_WRITE_PA=<pa>`：记录所有命中指定虚拟地址或物理地址的 guest 写操作，适合定位内存破坏、地址别名或跨页写入问题。
 - `AARCHVM_TRACE_BRANCH_ZERO=1`：当 `BR` / `BLR` / `RET` 即将跳到零地址时，打印分支来源、关键寄存器，以及当前 PLT/GOT 目标槽位的内容。
 

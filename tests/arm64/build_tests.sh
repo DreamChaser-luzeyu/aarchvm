@@ -129,7 +129,9 @@ build_asm_prog pmu_sysreg_absent_more
 build_asm_prog rng_sysreg_absent
 build_asm_prog sysreg_optional_absent_more
 build_asm_prog sme_sysreg_absent
+build_asm_prog amu_sysreg_absent
 build_asm_prog spe_sysreg_absent
+build_asm_prog spe_pmb_sysreg_absent
 build_asm_prog lse_atomics
 build_asm_prog casp_pair
 build_asm_prog lse_atomics_narrow
@@ -167,10 +169,14 @@ build_asm_prog mmu_table_ap_inherit
 build_asm_prog mmu_table_pxn_inherit
 build_asm_prog mmu_tcr_ips_mair_decode
 build_asm_prog mmu_af_fault
+build_asm_prog mmu_at_pan_ignore
+build_asm_prog at_pan2_absent_undef
 build_asm_prog sync_exception_regs
 build_asm_prog exception_daif_entry
 build_asm_prog eret_clears_exclusive
 build_asm_prog nested_sync_depth
+build_asm_prog gic_sysreg_id_consistency
+build_asm_prog debug_sysreg_resource_bounds
 build_asm_prog gic_timer_sysreg
 build_asm_prog gic_timer_rearm_no_spurious
 build_asm_prog gic_timer_phys_sysreg

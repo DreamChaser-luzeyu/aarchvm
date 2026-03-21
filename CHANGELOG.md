@@ -1,3 +1,113 @@
+# 修改日志 2026-03-22 03:07
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮收的是 `AT S1E1R/W` 与 `PSTATE.PAN` 的程序可见行为缺口：
+  - [include/aarchvm/cpu.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/cpu.hpp)
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [include/aarchvm/system_registers.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/system_registers.hpp)
+  - [tests/arm64/mmu_at_pan_ignore.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_at_pan_ignore.S)
+  - [tests/arm64/at_pan2_absent_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/at_pan2_absent_undef.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 审阅 ARM ARM 后确认：
+  - 当前模型通过 `ID_AA64MMFR1_EL1.PAN = 0b0001` 声明实现了 `FEAT_PAN`，但没有声明 `FEAT_PAN2`；
+  - 在这种配置下，普通的 `AT S1E1R` / `AT S1E1W` 不应受 `PSTATE.PAN` 影响；
+  - 只有实现了 `FEAT_PAN2` 时，`AT S1E1RP` / `AT S1E1WP` 这类 PAN-sensitive 变体才存在并把 `PSTATE.PAN` 纳入权限判断。
+- 旧实现里，`AT S1E1R/W` 直接复用了普通 privileged data access 的权限检查路径，因此在 `PAN=1` 且目标页 `EL0-accessible` 时会错误地产生 permission fault，并把错误结果写进 `PAR_EL1`。
+- 这轮修改做了两件事：
+  - 给 `translate_address()` / `walk_page_tables()` / `access_permitted()` 显式增加 `apply_pan` 开关，让地址翻译类指令可以按架构要求选择是否参与 PAN 权限裁决；
+  - 把 `AT S1E1R` / `AT S1E1W` 改为在当前模型下使用 `apply_pan=false`，从而与“`FEAT_PAN2` absent”这一对外声明保持一致。
+- 另外，继续顺着这条线检查后又发现另一个边界缺口：
+  - `AT S1E1RP` / `AT S1E1WP` 在 `FEAT_PAN2` absent 时本身就应该是 `UNDEFINED`；
+  - 旧实现里它们在 EL1 下会落入通用未实现指令异常，但在 EL0 下会先被 generic system-access 控制逻辑误分类成 `EC=0x18` system access trap。
+- 因此这轮又把 `AT S1E1RP/WP` 的编码显式收口为 `UNDEFINED`，避免 EL0/EL1 行为分叉。
+- 同时补了两组裸机单测：
+  - `mmu_at_pan_ignore`，覆盖：
+  - `PAN=1` 时 `AT S1E1R` 对 EL0 RW 页仍成功；
+  - `PAN=1` 时 `AT S1E1W` 对 EL0 RW 页仍成功；
+  - 返回的 `PAR_EL1` PA 字段与页表映射一致。
+  - `at_pan2_absent_undef`，覆盖：
+  - EL1 执行 `AT S1E1RP` / `AT S1E1WP` 得到 `UNDEFINED`；
+  - EL0 执行 `AT S1E1RP` / `AT S1E1WP` 同样得到 `UNDEFINED`，而不是 system access trap；
+  - 统一校验 `ESR_EL1.EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`，并校验 `ELR_EL1` 指向 faulting instruction。
+- 另外顺手把 [include/aarchvm/system_registers.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/system_registers.hpp) 里的 `ID_AA64MMFR0_EL1` / `ID_AA64MMFR1_EL1` 头文件默认值对齐到 reset 后的真实值，避免“头文件初值”和运行时 reset 值不一致。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j > out/build_20260322_1.log 2>&1`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 120s bash -lc 'AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/mmu_at_pan_ignore.bin -load 0x0 -entry 0x0 -steps 400000 | tr -d "\\r\\n"'`
+- `timeout 120s bash -lc 'AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/at_pan2_absent_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d "\\r\\n"'`
+- `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_20260322_2.log 2>&1'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_20260322_ump_2.log 2>&1'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_20260322_smp_2.log 2>&1'`
+- 结果：通过。
+
+# 修改日志 2026-03-22 02:44
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮收的是 AArch64 self-hosted debug 资源数量与 debug sysreg 可见性不一致的问题：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [src/system_registers.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/system_registers.cpp)
+  - [include/aarchvm/system_registers.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/system_registers.hpp)
+  - [tests/arm64/debug_sysreg_resource_bounds.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/debug_sysreg_resource_bounds.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 审阅 ARM ARM 与现有实现后确认：
+  - 当前模型通过 `ID_AA64DFR0_EL1` 声明仅实现 2 个 breakpoint 与 2 个 watchpoint 资源；
+  - 但旧实现对 `DBGBVR<n>_EL1` / `DBGBCR<n>_EL1` / `DBGWVR<n>_EL1` / `DBGWCR<n>_EL1` 的 system register 访问在 `n < 16` 时一律放行；
+  - 这会让 guest 观察到“ID 只宣称 2 个资源，但第 3~16 个资源 sysreg 依然存在且可访问”的矛盾状态。
+- 这轮修改做了两件事：
+  - 在 `SystemRegisters` 中按 `ID_AA64DFR0_EL1` / `ID_AA64DFR1_EL1` 计算实际实现的 breakpoint/watchpoint 资源数量，并据此限制 debug value/control sysreg 的读写范围；
+  - 在 `Cpu::exec_system()` 的 `sysreg_present()` 路径里同步收紧 debug sysreg 的“存在性”，确保未实现的 `DBGB*2+` / `DBGW*2+` 在 EL1 与 EL0 下都作为“不存在的系统寄存器”处理，而不是先走成“存在但无权限”的 EL0 system access trap。
+- 同时新增裸机单测 `debug_sysreg_resource_bounds`，覆盖：
+  - EL1 对已实现的 `DBGBVR1_EL1` / `DBGBCR1_EL1` / `DBGWVR1_EL1` / `DBGWCR1_EL1` 读写仍可见；
+  - EL1 访问未实现的 `DBGBVR2_EL1` / `DBGWCR2_EL1` 时得到 `UNDEFINED`；
+  - EL0 访问已实现但特权的 `DBGBVR1_EL1` 时仍得到 `EC=0x18` system access trap；
+  - EL0 访问未实现的 `DBGBVR2_EL1` / `DBGWCR2_EL1` 时得到 `UNDEFINED`，而不是被误当成特权 trap。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 120s ./build/aarchvm -bin tests/arm64/out/debug_sysreg_resource_bounds.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_20260322_debug_bounds.log 2>&1'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_20260322_debug_bounds_ump.log 2>&1'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_20260322_debug_bounds_smp.log 2>&1'`
+- 结果：通过。
+
+# 修改日志 2026-03-22 00:32
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮收的是 `ID_AA64PFR0_EL1` 的 GIC 声明与当前 GICv3 system register 接口实现不一致的问题：
+  - [src/system_registers.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/system_registers.cpp)
+  - [include/aarchvm/system_registers.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/system_registers.hpp)
+  - [tests/arm64/id_aa64_feature_regs.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/id_aa64_feature_regs.S)
+  - [tests/arm64/gic_sysreg_id_consistency.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/gic_sysreg_id_consistency.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 审阅 ARM ARM 和现有实现后确认：
+  - 当前模型已经实现并暴露了 `ICC_PMR_EL1`、`ICC_SRE_EL1`、`ICC_IAR1_EL1`、`ICC_EOIR1_EL1`、`ICC_DIR_EL1` 等 GIC CPU interface system registers；
+  - 但 `ID_AA64PFR0_EL1.GIC` 之前仍返回 `0b0000`，这会让 guest 观察到“GIC system register interface absent，但 ICC_* sysreg 却可直接访问”的矛盾状态。
+- 这轮将 `ID_AA64PFR0_EL1` 调整为与当前实现一致的值 `0x0000000001000011`，即在保留现有 `EL0/EL1`、`FP/AdvSIMD` 声明不变的基础上，把 `GIC` 字段改为 `0b0001`。
+- 同时：
+  - 更新了现有 `id_aa64_feature_regs` 裸机测试，固定新的 `ID_AA64PFR0_EL1` 声明值；
+  - 新增 `gic_sysreg_id_consistency` 裸机测试，直接校验 `ID_AA64PFR0_EL1.GIC == 1`，并验证 `ICC_PMR_EL1` / `ICC_SRE_EL1` 的最小读写可见性与该声明一致。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 120s bash -lc 'v=$(AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/id_aa64_feature_regs.bin -load 0x0 -entry 0x0 -steps 200000 | tr -d "\\r\\n"); printf "[%s]\\n" "$v"; test "$v" = I'`
+- `timeout 120s bash -lc 'v=$(AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/gic_sysreg_id_consistency.bin -load 0x0 -entry 0x0 -steps 300000 | tr -d "\\r\\n"); printf "[%s]\\n" "$v"; test "$v" = J'`
+- `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_20260322_gic_id.log 2>&1'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_20260322_gic_id_ump.log 2>&1'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_20260322_gic_id_smp.log 2>&1'`
+- 结果：通过。
+
 # 修改日志 2026-03-20 20:55
 
 ## 本轮修改
@@ -4319,3 +4429,99 @@
 
 - SPE/PMU profiling 这组寄存器的 absent-feature 语义已按架构要求收口为 `UNDEFINED`，并由裸机单测覆盖。
 - 这条线下一步若继续推进，优先级高的会是其它 “可选系统寄存器族” 的 absent 行为收口，避免在 EL0 下被误分类成 `EC=0x18` system register trap（尤其是 profiling/debug 相关寄存器）。
+
+# 修改日志 2026-03-21 23:58
+
+## 本轮修改
+
+- 修正了上一轮新加测试中的一个覆盖错误：
+  - [tests/arm64/spe_sysreg_absent.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/spe_sysreg_absent.S) 原先把 `PMSEVFR_EL1` 和 `PMSNEVFR_EL1` 的编码写混，导致测试通过但没有真正覆盖 `PMSEVFR_EL1`。
+  - 现已更正 `PMSEVFR_EL1` 的 `MRS/MSR` 编码为 `0xD53899A0 / 0xD51899A0`。
+- 继续沿 SPE absent sysreg 这条线补 Profiling Buffer 管理寄存器族：
+  - `PMBIDR_EL1`
+  - `PMBLIMITR_EL1`
+  - `PMBMAR_EL1`
+  - `PMBPTR_EL1`
+  - `PMBSR_EL1`
+  - `PMBSR_EL2`
+  - `PMBSR_EL3`
+- 修改位置：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 新增裸机单测：
+  - [tests/arm64/spe_pmb_sysreg_absent.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/spe_pmb_sysreg_absent.S)
+- 修复后，在当前模型未实现 `FEAT_SPE / FEAT_SPE_nVM / FEAT_SPE_EXC` 时，这组 PMB sysreg 的 direct access 会稳定表现为 `UNDEFINED`，不再误走通用 trap 路径。
+
+## 本轮测试
+
+- 定向构建：
+  - `timeout 300s tests/arm64/build_tests.sh`
+  - `timeout 1200s cmake --build build -j`
+- 定向语义验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/spe_sysreg_absent.bin -load 0x0 -entry 0x0 -steps 2200000`
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/spe_pmb_sysreg_absent.bin -load 0x0 -entry 0x0 -steps 1800000`
+- 裸机完整回归：
+  - `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_spe_pmb_absent_fix.log 2>&1'`
+- Linux 单核功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_spe_pmb_absent_fix_ump.log 2>&1'`
+- Linux SMP 功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_spe_pmb_absent_fix_smp.log 2>&1'`
+
+## 当前结论
+
+- 这轮继续收紧了 “profile / buffer / profiling exception” 这条 sysreg 缺口，减少了 EL0/EL1 下将 absent feature 误判成 `EC=0x18` trap 的空间。
+- 同类高优先级剩余项，仍主要是：
+  - AMU 相关寄存器族
+  - 其它 trace / debug / profiling 相关的可选 sysreg
+  - 与 ID 寄存器报告 absent feature 对应的系统指令/系统寄存器边界
+
+# 修改日志 2026-03-22 00:13
+
+## 本轮修改
+
+- 补齐了 AMU / AMUv1p1 缺失时应直接表现为 `UNDEFINED` 的 AArch64 system register 族判定，避免误走通用 `EC=0x18` system register trap 路径。
+- 本轮纳入 absent-feature 收口的寄存器族包括：
+  - `AMCFGR_EL0`
+  - `AMCGCR_EL0`
+  - `AMCR_EL0`
+  - `AMCNTENCLR0_EL0`
+  - `AMCNTENSET0_EL0`
+  - `AMCNTENCLR1_EL0`
+  - `AMCNTENSET1_EL0`
+  - `AMEVCNTR0<m>_EL0`
+  - `AMEVTYPER0<m>_EL0`
+  - `AMEVCNTR1<m>_EL0`
+  - `AMEVTYPER1<m>_EL0`
+  - `AMCG1IDR_EL0`
+  - `AMEVCNTVOFF0<m>_EL2`
+  - `AMEVCNTVOFF1<m>_EL2`
+- 修改位置：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 新增裸机单测：
+  - [tests/arm64/amu_sysreg_absent.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/amu_sysreg_absent.S)
+- 修复前：在当前模型 `ID_AA64PFR0_EL1.AMU=0` 的配置下，部分 AMU 相关 direct access 仍可能被解释为普通 system register 访问，再落入 trap/权限路径，软件看到的异常分类不符合架构要求。
+- 修复后：这组 AMU / AMUv1p1 寄存器在 EL0/EL1 下的 direct access 会统一表现为 `UNDEFINED`，与当前 feature ID 报告一致。
+
+## 本轮测试
+
+- 定向构建：
+  - `timeout 300s tests/arm64/build_tests.sh`
+  - `timeout 1200s cmake --build build -j`
+- 定向语义验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/amu_sysreg_absent.bin -load 0x0 -entry 0x0 -steps 2200000`
+- 裸机完整回归：
+  - `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_amu_absent.log 2>&1'`
+- Linux 单核功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_amu_absent_ump.log 2>&1'`
+- Linux SMP 功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_amu_absent_smp.log 2>&1'`
+
+## 当前结论
+
+- 这轮把 AMU 缺失特性的主要 AArch64 system register 空间收口到了当前 ID 配置一致的行为。
+- 继续沿这条线往下审时，优先级更高的剩余项会偏向：
+  - 其它由 ID 寄存器明确报告 absent、但还未系统化归类的 debug / trace / profiling sysreg
+  - trap / undef / no-op 边界里仍未细分的 debug/system 指令族

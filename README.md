@@ -3,18 +3,20 @@
 # aarchvm
 
 Compact AArch64 full-system emulator written in C++ with CMake.
-It currently boots U-Boot, hands off to Linux, reaches an interactive BusyBox shell, supports snapshots, and provides both serial and simple framebuffer bring-up paths.
+It currently boots U-Boot, hands off to Linux, reaches interactive BusyBox shells in both UMP and validated 2-core SMP paths, supports full-machine snapshots, and provides both serial and framebuffer/PS2 GUI bring-up flows.
 
 ## Features
 - Interpreter-based AArch64 full-system emulation, with validated single-core Linux bring-up and a validated 2-core Linux SMP shell / functional regression path
 - Linux boot path validated through U-Boot -> Linux `Image` -> BusyBox shell
-- Minimal MMU/TLB, Generic Timer, synchronous exception, and GICv3 paths sufficient for the current Linux bring-up
+- Minimal MMU/TLB, Generic Timer, synchronous exception, PSCI, and GICv3 paths sufficient for the current Linux bring-up
 - PL011 UART console
 - Host-side UART prompt matching with one-shot auto-reply, so U-Boot boot scripts can be automated without replacing interactive stdin
 - QEMU-style interactive serial escape `Ctrl+A, x` to stop the emulator, still honoring end-of-run snapshot save
 - SDL-backed simple framebuffer path usable by U-Boot and Linux `simpledrm` / `fbcon`
 - PL050 PS/2 keyboard path usable by Linux `ambakmi` + `atkbd`
+- Event-driven outer scheduling by default, with legacy fixed-step mode kept for debugging and A/B comparison
 - Full-machine snapshot save / restore
+- Snapshot-aware MMIO block device path (`-drive`, `aarchvm,mmio-blk`) for experiments beyond the current serial / GUI regression core
 - In-tree bare-metal, Linux functional, and Linux algorithm/perf regression suites
 - Optional faster execution paths for bus/decode hot paths
 - Explicit halt / unexpected-stop diagnostics so guest halt states are reported instead of looking like a silent hang

@@ -62,6 +62,8 @@ public:
   [[nodiscard]] std::uint64_t id_aa64pfr0_el1() const { return id_aa64pfr0_el1_; }
   [[nodiscard]] std::uint64_t id_aa64isar0_el1() const { return id_aa64isar0_el1_; }
   [[nodiscard]] std::uint64_t id_aa64mmfr0_el1() const { return id_aa64mmfr0_el1_; }
+  [[nodiscard]] std::uint32_t breakpoint_resource_count() const;
+  [[nodiscard]] std::uint32_t watchpoint_resource_count() const;
   void set_par_el1(std::uint64_t value) { par_el1_ = value; }
   [[nodiscard]] std::uint64_t elr_el1() const { return elr_el1_; }
   void set_elr_el1(std::uint64_t value) { elr_el1_ = value; }
@@ -119,7 +121,7 @@ private:
   std::uint64_t clidr_el1_ = 0;
   std::uint64_t ctr_el0_ = 0x8444C004ull;
   std::uint64_t dczid_el0_ = 0x4ull;
-  std::uint64_t id_aa64pfr0_el1_ = 0x0000000000000011ull;
+  std::uint64_t id_aa64pfr0_el1_ = 0x0000000001000011ull;
   std::uint64_t id_aa64pfr1_el1_ = 0;
   std::uint64_t id_aa64dfr0_el1_ = 0x0000000000101006ull;
   std::uint64_t id_aa64dfr1_el1_ = 0;
@@ -128,8 +130,8 @@ private:
   std::uint64_t id_aa64isar2_el1_ = 0;
   std::uint64_t id_aa64isar3_el1_ = 0;
   std::uint64_t id_aa64zfr0_el1_ = 0;
-  std::uint64_t id_aa64mmfr0_el1_ = 0x000001110F000005ull;
-  std::uint64_t id_aa64mmfr1_el1_ = 0;
+  std::uint64_t id_aa64mmfr0_el1_ = 0x000000000F000005ull;
+  std::uint64_t id_aa64mmfr1_el1_ = 0x0000000000100000ull;
   std::uint64_t id_aa64mmfr2_el1_ = 0;
   std::uint64_t id_aa64mmfr3_el1_ = 0;
   std::uint64_t csselr_el1_ = 0;
