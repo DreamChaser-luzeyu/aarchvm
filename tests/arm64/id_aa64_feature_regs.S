@@ -17,10 +17,22 @@ _start:
     b.ne fail2
 
     mrs  x2, id_aa64mmfr0_el1
-    movz x3, #0x0005
-    movk x3, #0x0f00, lsl #16
-    subs xzr, x2, x3
+    and  x3, x2, #0xf
+    movz x4, #5                    // PARange=48-bit PA
+    subs xzr, x3, x4
     b.ne fail3
+    ubfx x3, x2, #4, #4
+    cbnz x3, fail3                 // ASIDBits=0 -> 8-bit ASID
+    ubfx x3, x2, #20, #4
+    movz x4, #0xf
+    subs xzr, x3, x4
+    b.ne fail3                     // TGran16 absent
+    ubfx x3, x2, #24, #4
+    movz x4, #0xf
+    subs xzr, x3, x4
+    b.ne fail3                     // TGran64 absent
+    ubfx x3, x2, #28, #4
+    cbnz x3, fail3                 // TGran4 supported
 
     mrs  x2, id_aa64mmfr1_el1
     movz x3, #0x0010, lsl #16

@@ -130,7 +130,7 @@ private:
   std::uint64_t id_aa64isar2_el1_ = 0;
   std::uint64_t id_aa64isar3_el1_ = 0;
   std::uint64_t id_aa64zfr0_el1_ = 0;
-  std::uint64_t id_aa64mmfr0_el1_ = 0x000000000F000005ull;
+  std::uint64_t id_aa64mmfr0_el1_ = 0x000000000FF00005ull;
   std::uint64_t id_aa64mmfr1_el1_ = 0x0000000000100000ull;
   std::uint64_t id_aa64mmfr2_el1_ = 0;
   std::uint64_t id_aa64mmfr3_el1_ = 0;

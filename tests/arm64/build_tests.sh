@@ -100,6 +100,8 @@ build_asm_prog cpacr_fp_mem_trap
 build_asm_prog cpacr_fp_structured_trap
 build_asm_prog pstate_pan
 build_asm_prog pan_span_exception
+build_asm_prog spsr_el1_res0_bits
+build_asm_prog sctlr_endian_fixed_bits
 build_asm_prog id_aa64_feature_regs
 build_asm_prog svc_sysreg_minimal
 build_asm_prog el0_sysreg_privilege
@@ -183,6 +185,7 @@ build_asm_prog gic_timer_phys_sysreg
 build_asm_prog bitfield_basic
 build_asm_prog p1_core
 build_asm_prog atomics_minimal
+build_asm_prog crc32_family
 build_asm_prog signext_loads
 build_asm_prog signext_postindex
 build_asm_prog atomics_small

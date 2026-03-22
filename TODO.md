@@ -42,6 +42,15 @@
 预期收益：
 - 减少用户态 `illegal instruction`、内核异常路径错判、信号恢复异常、JIT/运行时探测失败等问题。
 
+当前进展：
+- [x] 已收口一组“应为 `UNDEFINED` 却被误分类成 EL0 system access trap”的 system-encoding / sysreg 边界，包括若干 absent feature 指令族。
+- [x] 已对齐 `ID_AA64PFR0_EL1.GIC` 与当前 `ICC_*` system register 可见性，避免对外声明与实现矛盾。
+- [x] 已收口 debug sysreg 资源数量边界，使 `ID_AA64DFR0_EL1` 的资源声明与 `DBGBVR<n>/DBGWVR<n>` 等可见性一致。
+- [x] 已收口 `AT S1E1R/W` 与 `PSTATE.PAN` / `FEAT_PAN2` 的边界，避免 plain `AT` 错误受 PAN 影响，并确保 `AT S1E1RP/WP` 在 `FEAT_PAN2` absent 时表现为 `UNDEFINED`。
+- [x] 已对齐 `ID_AA64MMFR0_EL1` 的 granule 声明与当前 `4KB`-only 页表实现，避免把未实现的 `16KB granule` 错误宣称为存在。
+- [x] 已收口 `ID_AA64MMFR0_EL1.BigEnd/BigEndEL0` 与 `SCTLR_EL1.EE/E0E` 的固定值语义，避免在 mixed-endian absent 时仍把 `EE/E0E` 读回为可配置位。
+- [x] 已收口 `SPSR_EL1` 在“AArch64-only + 当前 absent feature 集”下的 `RES0` / 固定位语义，避免 guest 通过 `MSR SPSR_EL1` 把 `UAO/DIT/TCO/SSBS/BTYPE/ALLINT/PM/PPEND/EXLOCK/PACM/UINJ` 等当前未实现位读回成 1。
+
 ### 3. SMP 内存模型与同步原语收尾
 
 目标：
@@ -81,6 +90,7 @@
 - [ ] 持续补 Linux 用户态测试，优先覆盖：浮点/向量、线程同步、`mprotect`/`execve`/信号、长时间刷屏与内存压力。
 - [ ] 对最容易拿不准的语义建立差分验证路径：当前模拟器 vs QEMU vs 工具链生成结果。
 - [ ] 为“当前模型声明 absent 的特性”补负向测试，确保它们确实表现为 absent，而不是半实现状态。
+- [x] 为当前 `ID_AA64ISAR0_EL1` 已声明存在的 `FEAT_CRC32` 补独立裸机单测，覆盖 `CRC32*` / `CRC32C*` 的 `b/h/w/x` 变体。
 
 预期收益：
 - 后续再做性能优化、预解码、事件驱动、JIT 时，不会轻易把程序可见语义重新弄坏。
@@ -225,7 +235,7 @@
 - 避免当前 SMP 路径的“一核一步、每轮时间只加一次”的低效和失真。
 
 任务：
-- [ ] 当只有一个 CPU runnable 时，复用单核长 chunk 逻辑。
+- [x] 当只有一个 CPU runnable 时，复用单核长 chunk 逻辑。
 - [ ] 多个 CPU runnable 时，引入可配置小量子，例如每核 32/64/128 条。
 - [ ] 一个调度轮次结束后，再按该轮的 guest 时间窗口推进时间。
 - [ ] 给调度器加入必要的公平性约束，避免某核长期饥饿。

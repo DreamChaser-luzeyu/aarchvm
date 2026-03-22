@@ -81,6 +81,7 @@ run gic_timer_phys_sysreg.bin 2000000
 run bitfield_basic.bin 400000
 run p1_core.bin 600000
 run atomics_minimal.bin 400000
+run_expect crc32_family.bin 400000 R
 run signext_loads.bin 400000
 run signext_postindex.bin 400000
 run atomics_small.bin 400000
@@ -208,6 +209,8 @@ run cpacr_fp_mem_trap.bin 300000
 run cpacr_fp_structured_trap.bin 400000
 run pstate_pan.bin 200000
 run_expect pan_span_exception.bin 300000 S
+run_expect spsr_el1_res0_bits.bin 200000 P
+run_expect sctlr_endian_fixed_bits.bin 200000 E
 run_expect id_aa64_feature_regs.bin 200000 I
 run mmu_el0_ap_fault.bin 4000000
 run mmu_pan_user_access.bin 4000000

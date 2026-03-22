@@ -15,6 +15,15 @@ constexpr std::uint32_t SysReg(std::uint32_t op0,
 }
 
 constexpr std::uint64_t kSctlrEl1Span = 1ull << 23;
+constexpr std::uint64_t kSctlrEl1Ee = 1ull << 25;
+constexpr std::uint64_t kSctlrEl1E0e = 1ull << 24;
+constexpr std::uint64_t kSpsrEl1SupportedMask =
+    (0xFull << 28) | // NZCV
+    (1ull << 22) |   // PAN (FEAT_PAN is implemented)
+    (1ull << 21) |   // SS
+    (1ull << 20) |   // IL
+    (0xFull << 6) |  // DAIF
+    0x1Full;         // M[4:0]
 constexpr std::uint64_t kIdAa64Dfr0El1DebugMinimal =
     (0x0ull << 28) |  // CTX_CMPs: 1 context-aware breakpoint.
     (0x1ull << 20) |  // WRPs: 2 watchpoints.
@@ -31,6 +40,25 @@ constexpr std::uint32_t decode_debug_resource_count(std::uint64_t dfr0,
   }
   const std::uint32_t legacy = static_cast<std::uint32_t>((dfr0 >> dfr0_shift) & 0xFu);
   return legacy == 0xFu ? 16u : legacy + 1u;
+}
+
+std::uint64_t sanitize_sctlr_el1(std::uint64_t value, std::uint64_t mmfr0) {
+  const std::uint32_t big_end = static_cast<std::uint32_t>((mmfr0 >> 8) & 0xFu);
+  const std::uint32_t big_end_el0 = static_cast<std::uint32_t>((mmfr0 >> 16) & 0xFu);
+  if (big_end == 0u) {
+    value &= ~kSctlrEl1Ee;
+    if (big_end_el0 == 0u) {
+      value &= ~kSctlrEl1E0e;
+    }
+  }
+  return value;
+}
+
+std::uint64_t sanitize_spsr_el1(std::uint64_t value) {
+  // This model only supports AArch64 guest execution and currently keeps the
+  // optional PSTATE extensions behind UAO/DIT/SSBS/BTI/MTE/NMI/EBEP/SEBEP/GCS/
+  // PACM/UINJ absent, so the corresponding SPSR_EL1 bits are RES0.
+  return value & kSpsrEl1SupportedMask;
 }
 
 } // namespace
@@ -53,7 +81,7 @@ void SystemRegisters::reset() {
   id_aa64isar2_el1_ = 0;
   id_aa64isar3_el1_ = 0;
   id_aa64zfr0_el1_ = 0;
-  id_aa64mmfr0_el1_ = 0x000000000F000005ull;
+  id_aa64mmfr0_el1_ = 0x000000000FF00005ull;
   id_aa64mmfr1_el1_ = 0x0000000000100000ull;
   id_aa64mmfr2_el1_ = 0;
   id_aa64mmfr3_el1_ = 0;
@@ -203,7 +231,7 @@ bool SystemRegisters::write(std::uint32_t op0,
     }
   }
   switch (make_key(op0, op1, crn, crm, op2)) {
-  case SysReg(3, 0, 1, 0, 0): sctlr_el1_ = value; return true;
+  case SysReg(3, 0, 1, 0, 0): sctlr_el1_ = sanitize_sctlr_el1(value, id_aa64mmfr0_el1_); return true;
   case SysReg(3, 0, 1, 0, 2): cpacr_el1_ = value; return true;
   case SysReg(3, 2, 0, 0, 0): csselr_el1_ = value; return true;
   case SysReg(3, 0, 2, 0, 0): ttbr0_el1_ = value; return true;
@@ -215,7 +243,7 @@ bool SystemRegisters::write(std::uint32_t op0,
   case SysReg(2, 0, 1, 0, 4): oslar_el1_ = value & 1ull; return true;
   case SysReg(3, 0, 12, 0, 0): vbar_el1_ = value; return true;
   case SysReg(3, 0, 4, 0, 1): elr_el1_ = value; return true;
-  case SysReg(3, 0, 4, 0, 0): spsr_el1_ = value; return true;
+  case SysReg(3, 0, 4, 0, 0): spsr_el1_ = sanitize_spsr_el1(value); return true;
   case SysReg(3, 0, 5, 2, 0): esr_el1_ = value; return true;
   case SysReg(3, 0, 6, 0, 0): far_el1_ = value; return true;
   case SysReg(2, 0, 0, 2, 2): mdscr_el1_ = value; return true;
@@ -548,7 +576,9 @@ bool SystemRegisters::load_state(std::istream& in, std::uint32_t version) {
          snapshot_io::read_bool(in, pstate_.i) &&
          snapshot_io::read_bool(in, pstate_.f) &&
          snapshot_io::read_bool(in, pstate_.pan) &&
-         snapshot_io::read(in, pstate_.mode);
+         snapshot_io::read(in, pstate_.mode) &&
+         ((sctlr_el1_ = sanitize_sctlr_el1(sctlr_el1_, id_aa64mmfr0_el1_)), true) &&
+         ((spsr_el1_ = sanitize_spsr_el1(spsr_el1_)), true);
 }
 
 

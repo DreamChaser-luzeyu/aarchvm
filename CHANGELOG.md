@@ -1,3 +1,108 @@
+# 修改日志 2026-03-22 21:25
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮在上一处 `SCTLR_EL1` 固定位收口通过后，继续收口同类的 `SPSR_EL1` 程序可见状态位一致性问题：
+  - [src/system_registers.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/system_registers.cpp)
+  - [tests/arm64/spsr_el1_res0_bits.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/spsr_el1_res0_bits.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 审阅 [src/system_registers.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/system_registers.cpp) 后确认，旧实现会把 guest 写入 `SPSR_EL1` 的值原样保存。
+- 但当前模型只支持 AArch64 guest，并且当前 ID/feature 声明下 `UAO/DIT/TCO/SSBS/BTI/NMI/EBEP/SEBEP/GCS/PAuth_LR/UINJ` 都 absent，因此对应的 `SPSR_EL1` 位在当前模型下应表现为 `RES0`，而不是可写可读的影子状态。
+- 这轮给 `SPSR_EL1` 增加了 sanitize：
+  - 保留当前模型真正支持或允许保留的 AArch64 位：`NZCV`、`PAN`、`SS`、`IL`、`DAIF`、`M[4:0]`；
+  - 清掉当前模型下 architecturally `RES0` 或 feature-absent 的位，包括 `UAO/DIT/TCO/SSBS/BTYPE/ALLINT/PM/PPEND/EXLOCK/PACM/UINJ` 以及 AArch64 视图中的保留位；
+  - 该规则同时覆盖普通 `MSR SPSR_EL1, Xt` 写路径和快照恢复路径。
+- 同时新增裸机单测 [tests/arm64/spsr_el1_res0_bits.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/spsr_el1_res0_bits.S)，覆盖：
+  - guest 向 `SPSR_EL1` 写入一组当前模型应为 `RES0`/absent 的位后，再次读回时这些位保持为 0；
+  - `NZCV/PAN/SS/IL/DAIF/M[4:0]` 这组当前模型允许保留的 AArch64 位仍可正常写回。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 120s bash -lc 'AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/spsr_el1_res0_bits.bin -load 0x0 -entry 0x0 -steps 200000 2>/dev/null | tr -d "\\r\\n"'`
+- `timeout 5400s tests/arm64/run_all.sh`
+- `timeout 5400s tests/linux/run_functional_suite.sh`
+- `timeout 5400s tests/linux/run_functional_suite_smp.sh`
+
+# 修改日志 2026-03-22 18:05
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮收的是 `ID_AA64MMFR0_EL1` 与当前 MMU granule 实现不一致的问题：
+  - [include/aarchvm/system_registers.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/system_registers.hpp)
+  - [src/system_registers.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/system_registers.cpp)
+  - [tests/arm64/id_aa64_feature_regs.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/id_aa64_feature_regs.S)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 审阅 `walk_page_tables()` 后确认当前模型只支持 `4KB granule`，`TG0==00` / `TG1==10` 之外都会被当作 fault 处理。
+- 旧的 `ID_AA64MMFR0_EL1=0x000000000F000005` 却把 `TGran16=0b0000` 对外宣称为“16KB granule supported”，这会让 guest 能力探测看到错误的内存系统能力声明。
+- 这轮把 `ID_AA64MMFR0_EL1` 改为 `0x000000000FF00005`，使其程序可见语义与当前实现一致：
+  - `TGran4=0b0000`，支持 4KB granule；
+  - `TGran16=0b1111`，不支持 16KB granule；
+  - `TGran64=0b1111`，不支持 64KB granule；
+  - 其他当前字段保持不变。
+- 同时把裸机测试 [tests/arm64/id_aa64_feature_regs.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/id_aa64_feature_regs.S) 从“比较整寄存器原始常量”改成“按字段断言 `PARange/ASIDBits/TGran4/TGran16/TGran64`”，让它直接覆盖这次修复的程序可见行为。
+- 继续顺着 `ID_AA64MMFR0_EL1` 审阅后，又发现另一处程序可见矛盾：
+  - 当前模型通过 `BigEnd=0` / `BigEndEL0=0` 声明 mixed-endian absent；
+  - 但旧实现会把 guest 写入的 `SCTLR_EL1.EE/E0E` 原样保存在寄存器里，导致 guest 仍能把这两个本应 fixed 的位读回成 1。
+- 这轮进一步在 [src/system_registers.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/system_registers.cpp) 对 `SCTLR_EL1` 做了基于 `ID_AA64MMFR0_EL1` 的 sanitize：
+  - `BigEnd=0` 时，`SCTLR_EL1.EE` 固定清零；
+  - `BigEnd=0` 且 `BigEndEL0=0` 时，`SCTLR_EL1.E0E` 也固定清零；
+  - 该规则同时覆盖普通 `MSR SCTLR_EL1, Xt` 路径和快照恢复路径，避免旧快照带回不可能的 endianness 状态。
+- 同时新增裸机单测 [tests/arm64/sctlr_endian_fixed_bits.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/sctlr_endian_fixed_bits.S)，覆盖：
+  - `ID_AA64MMFR0_EL1.BigEnd/BigEndEL0` 都为 0；
+  - guest 尝试把 `SCTLR_EL1.EE/E0E` 写成 1 后再次读回时，这两个位仍保持 0；
+  - 其他非 fixed 位，例如 `SCTLR_EL1.UCI`，在 sanitize 后仍可正常写回。
+- 另外在 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md) 的当前进展里补记了这一项 ID/实现一致性收口。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 120s bash -lc 'AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/id_aa64_feature_regs.bin -load 0x0 -entry 0x0 -steps 200000 2>/dev/null | tr -d "\\r\\n"'`
+- `timeout 5400s tests/arm64/run_all.sh`
+- `timeout 5400s tests/linux/run_functional_suite.sh`
+- `timeout 5400s tests/linux/run_functional_suite_smp.sh`
+
+# 修改日志 2026-03-22 01:42
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复/补强 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮没有改模拟器执行语义，重点是把 TODO 与当前代码状态重新对齐，并把一个“已声明存在但此前没有独立裸机覆盖”的指令族补进回归：
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+  - [tests/arm64/crc32_family.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/crc32_family.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 对照当前代码状态更新了 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)：
+  - 在“异常 / 系统寄存器 / trap 语义收尾”下补记了近期已经收口的小项，包括：
+  - `ID_AA64PFR0_EL1.GIC` 与 `ICC_*` system register 一致性；
+  - debug sysreg 资源数量与 `ID_AA64DFR0_EL1` 声明一致性；
+  - `AT S1E1R/W` 与 `PSTATE.PAN` / `FEAT_PAN2` 的边界；
+  - 一组 absent feature system-encoding / sysreg 在 EL0 下应为 `UNDEFINED` 的边界。
+- 结合当前 `ID_AA64ISAR0_EL1=0x0000000000210000` 的对外声明，确认当前模型明确宣称支持：
+  - `FEAT_LSE` / `Atomic`
+  - `FEAT_CRC32`
+- 其中 `Atomic` 相关路径之前已经有较多裸机覆盖，而 `CRC32` 族此前缺少独立回归，因此这轮新增了 `crc32_family` 裸机单测，覆盖：
+  - `CRC32B/H/W/X`
+  - `CRC32CB/CH/CW/CX`
+  - 结果寄存器按 `Wd` 语义写回后的零扩展可见行为
+- 在补这个测试时，先用新用例复核了一次实现与期望值：
+  - 模拟器里的 `CRC32*` / `CRC32C*` 实现本身是正确的；
+  - 最初写入测试的 `CRC32*` 期望值误用了宿主侧 `zlib.crc32` 风格结果，和 Arm 指令的逐字节 reflected 更新算法不同；
+  - 因此这轮修正的是测试期望值，而不是模拟器执行逻辑。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 120s bash -lc 'AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/crc32_family.bin -load 0x0 -entry 0x0 -steps 400000 2>/dev/null | tr -d "\\r\\n"'`
+- `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_20260322_crc32.log 2>&1'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_20260322_crc32_ump.log 2>&1'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_20260322_crc32_smp.log 2>&1'`
+- 结果：通过。
+
 # 修改日志 2026-03-22 03:07
 
 ## 本轮修改
