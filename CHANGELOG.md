@@ -1,3 +1,42 @@
+# 修改日志 2026-03-22 17:38
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮收的是 `FP/AdvSIMD` memory 指令在 `Rn==SP` 时缺失 `CheckSPAlignment()` 的程序可见行为：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fpsimd_sp_alignment_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_sp_alignment_fault.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 审阅 ARM ARM 与现有 `src/cpu.cpp` 后确认，当前 `SIMD&FP` / `AdvSIMD` memory subset 的多个执行分支会直接读取 `sp_or_reg(rn)` 并继续访存，但手册要求在 `Rn==SP` 时先执行 `CheckSPAlignment()`。
+- 旧实现因此会让以下路径绕过本应优先发生的 `SP alignment fault`：
+  - 普通 `SIMD&FP` 整寄存器 `LDR/STR`
+  - AdvSIMD single-structure lane / replicate
+  - whole-register structured `LD1/ST1/LD2/LD3/LD4` / `ST1/ST2/ST3/ST4`
+- 这轮在对应的实际访存入口前统一补上了 `maybe_take_sp_alignment_fault(rn)`，从根上修正 fault 优先级，确保：
+  - `SP` misaligned 时先产生 `EC=0x26` 的同步异常；
+  - fault 发生后不会继续访问内存；
+  - post-index 形式也不会错误执行写回。
+- 同时新增裸机单测 [tests/arm64/fpsimd_sp_alignment_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_sp_alignment_fault.S)，覆盖三条不同子路径：
+  - `ldr q0, [sp]`
+  - `ld1 {v1.b}[0], [sp]`
+  - `st1 {v2.16b}, [sp], #16`
+- 该测试显式校验：
+  - `ESR_EL1.EC == 0x26`
+  - `ISS == 0`
+  - `FAR_EL1 == 0`
+  - `ELR_EL1` 指向 faulting instruction
+  - post-index store fault 后 `SP` 不写回、目标内存不被修改
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 120s bash -lc 'AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_sp_alignment_fault.bin -load 0x0 -entry 0x0 -steps 200000 2>/dev/null | tr -d "\\r\\n"'`
+- `timeout 5400s tests/arm64/run_all.sh`
+- `timeout 5400s tests/linux/run_functional_suite.sh`
+- `timeout 5400s tests/linux/run_functional_suite_smp.sh`
+
 # 修改日志 2026-03-22 21:25
 
 ## 本轮修改
@@ -684,6 +723,49 @@
   - 覆盖 `FRECPE(0.0)` 与 `FRSQRTE(0.0)` 的 `FPSR.DZC`；
   - 覆盖 vector `FSQRT v4s`、`FRINTN v4s`、`FRECPE v4s`、`FRSQRTE v4s`；
   - 同时校验结果 bit pattern 与 `FPSR.IDC/DZC`。
+
+# 修改日志 2026-03-22 17:28
+
+## 本轮修改
+
+- 继续收口了 AdvSIMD structured load/store 与 pair-Q 对齐语义里剩余的“内部子访问稀释掉架构对齐规则”的边界：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+- 修正了 `LDP/STP Qt1,Qt2` pair transfer 的对齐判定：
+  - 修复前：pair-Q 仍按 4 次 8-byte 子访问执行，`SCTLR_EL1.A=1` 时会把“8-byte 对齐但 16-byte 不对齐”的地址错误放行。
+  - 修复后：pair-Q 现在按每个 Q 元素的 16-byte access size 检查对齐，fault 的 `FAR/WnR/ELR` 行为已被单测锁定。
+- 修正了 structured `LD1/ST1` multiple-structures whole-register `.8B/.16B` 的 element-size 对齐语义：
+  - 修复前：`LD1/ST1 {Vt.16B}`、`{Vt.16B,Vt2.16B}` 等路径复用了整寄存器 `load_vec()/store_vec()`，对 `.16B` 形式会隐含 8-byte 对齐检查；在 `SCTLR_EL1.A=1` 下，misaligned base 会被错误 fault。
+  - 修复后：这些路径改为逐 byte element 访问，保持 structured load/store 应有的 byte-element 对齐语义；misaligned `.16B` multiple-structures 在 `A=1` 下仍可正常完成。
+- 新增/接入的裸机单测：
+  - [tests/arm64/fpsimd_q_pair_alignment_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_q_pair_alignment_fault.S)
+  - [tests/arm64/fpsimd_ld1_multi_alignment.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_ld1_multi_alignment.S)
+- 更新了测试接线：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+
+## 本轮测试
+
+- 定向构建：
+  - `timeout 300s tests/arm64/build_tests.sh`
+  - `timeout 1200s cmake --build build -j`
+- 定向语义验证：
+  - `timeout 120s bash -lc 'AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_q_pair_alignment_fault.bin -load 0x0 -entry 0x0 -steps 700000 2>/dev/null | tr -d "\r\n"'`
+  - `timeout 120s bash -lc 'AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_ld1_multi_alignment.bin -load 0x0 -entry 0x0 -steps 700000 2>/dev/null | tr -d "\r\n"'`
+- 裸机完整回归：
+  - `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_struct_ld1_align.log 2>&1'`
+- Linux 单核功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_struct_ld1_align_ump.log 2>&1'`
+- Linux SMP 功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_struct_ld1_align_smp.log 2>&1'`
+
+## 当前结论
+
+- 这轮继续把 AdvSIMD memory access 的程序可见对齐语义往前收了一步，尤其修掉了两类容易被“内部拆成多个子访问”掩盖的问题：
+  - `LDP/STP Q,Q` 应按每个 Q 元素 16-byte 对齐，而不是按 8-byte 子访问。
+  - structured `LD1/ST1` whole-register `.8B/.16B` 应按 byte element 对齐，而不是因为内部实现细节平白变成 8-byte 对齐。
+- 沿着这条线继续审，当前最像剩余缺口的点是：
+  - AdvSIMD structured load/store 显式 `<align>` 编码位尚未系统化校验；
+  - 其它 structured lane / multiple-structures 变体的“显式对齐编码”和 fault 语义仍值得继续单测化。
 
 ## 本轮测试
 
@@ -4630,3 +4712,50 @@
 - 继续沿这条线往下审时，优先级更高的剩余项会偏向：
   - 其它由 ID 寄存器明确报告 absent、但还未系统化归类的 debug / trace / profiling sysreg
   - trap / undef / no-op 边界里仍未细分的 debug/system 指令族
+
+# 修改日志 2026-03-22 17:02
+
+## 本轮修改
+
+- 修正了普通 load/store 路径中一个会污染异常语义的边界问题：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 的 `exec_load_store()` 现在会在对齐检查 helper 已经取同步异常后停止同一条指令的后续 sub-access，避免继续访存或再补一次 `data_abort()` 覆盖掉原异常。
+- 修正了 `MSR SPSel` 的程序可见切换语义：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 现在在切换 `PSTATE.SP` 前后显式保存/恢复当前 `SP` bank，不再只改 `PSTATE` 而不切换实际 `SP_EL0/SP_EL1`。
+- 修正了普通 `SIMD&FP` 整寄存器 `LDR/STR` 的对齐 fault 语义：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 将普通 `LDR/STR <Q>` 与 structured load/store 分开处理。
+  - 修复前：`LDR/STR Qt` 被内部拆成两个 8-byte 子访问，`SCTLR_EL1.A=1` 时地址若是“8-byte 对齐但 16-byte 不对齐”，会被错误放行。
+  - 修复后：普通 `LDR/STR Qt` 会按 16-byte access size 进行对齐判定；structured load/store 继续按 element-size 语义处理，不被误伤。
+- 新增/接入的裸机单测：
+  - [tests/arm64/sp_alignment_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/sp_alignment_fault.S)
+  - [tests/arm64/data_alignment_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/data_alignment_fault.S)
+  - [tests/arm64/atomic_alignment_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/atomic_alignment_fault.S)
+  - [tests/arm64/fpsimd_q_alignment_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_q_alignment_fault.S)
+- 更新了测试接线：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+
+## 本轮测试
+
+- 定向构建：
+  - `timeout 300s tests/arm64/build_tests.sh`
+  - `timeout 1200s cmake --build build -j`
+- 定向语义验证：
+  - `timeout 120s bash -lc 'AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/sp_alignment_fault.bin -load 0x0 -entry 0x0 -steps 500000 2>/dev/null | tr -d "\r\n"'`
+  - `timeout 120s bash -lc 'AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/data_alignment_fault.bin -load 0x0 -entry 0x0 -steps 500000 2>/dev/null | tr -d "\r\n"'`
+  - `timeout 120s bash -lc 'AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/atomic_alignment_fault.bin -load 0x0 -entry 0x0 -steps 500000 2>/dev/null | tr -d "\r\n"'`
+  - `timeout 120s bash -lc 'AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_q_alignment_fault.bin -load 0x0 -entry 0x0 -steps 600000 2>/dev/null | tr -d "\r\n"'`
+- 裸机完整回归：
+  - `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_fpsimd_q_align.log 2>&1'`
+- Linux 单核功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_fpsimd_q_align_ump.log 2>&1'`
+- Linux SMP 功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_fpsimd_q_align_smp.log 2>&1'`
+
+## 当前结论
+
+- 这轮把对齐 fault 这条高优先级程序可见语义继续往前收了一步，尤其是此前容易被内部“拆成多个子访问”掩盖掉的 `LDR/STR Qt` 情况。
+- 目前已被单测直接覆盖的对齐 fault 高优先级路径包括：
+  - `SP` alignment fault。
+  - 标量 misaligned load / pair load fault。
+  - `LDAR/STLR/LDXR/LSE atomic` misaligned fault。
+  - 普通 `SIMD&FP` `LDR/STR Q` misaligned fault。

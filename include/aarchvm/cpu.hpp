@@ -293,6 +293,13 @@ private:
   void tlb_insert_entry(std::uint64_t va_page, const TlbEntry& entry);
   void tlb_invalidate_page(std::uint64_t va_page, std::uint16_t asid, bool match_asid);
   void data_abort(std::uint64_t va, bool cache_maintenance_or_translation = false);
+  [[nodiscard]] bool alignment_check_enabled() const;
+  [[nodiscard]] bool sp_alignment_check_enabled() const;
+  [[nodiscard]] bool maybe_take_sp_alignment_fault(std::uint32_t base_reg);
+  [[nodiscard]] bool maybe_take_data_alignment_fault(std::uint64_t addr,
+                                                     std::size_t align,
+                                                     AccessType access,
+                                                     bool force_check = false);
   [[nodiscard]] static constexpr bool access_is_write(AccessType access) {
     return access == AccessType::Write || access == AccessType::UnprivilegedWrite;
   }

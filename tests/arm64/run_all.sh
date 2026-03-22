@@ -211,6 +211,13 @@ run pstate_pan.bin 200000
 run_expect pan_span_exception.bin 300000 S
 run_expect spsr_el1_res0_bits.bin 200000 P
 run_expect sctlr_endian_fixed_bits.bin 200000 E
+run_expect sp_alignment_fault.bin 300000 S
+run_expect data_alignment_fault.bin 300000 A
+run_expect atomic_alignment_fault.bin 400000 O
+run_expect fpsimd_q_alignment_fault.bin 400000 Q
+run_expect fpsimd_q_pair_alignment_fault.bin 500000 Y
+run_expect fpsimd_ld1_multi_alignment.bin 500000 J
+run_expect fpsimd_sp_alignment_fault.bin 500000 Z
 run_expect id_aa64_feature_regs.bin 200000 I
 run mmu_el0_ap_fault.bin 4000000
 run mmu_pan_user_access.bin 4000000

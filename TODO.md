@@ -27,6 +27,13 @@
 预期收益：
 - 降低 glibc、libm、编译器生成代码、数值程序和多媒体代码中“看似能跑、结果却悄悄错”的风险。
 
+当前进展：
+- [x] 已收口普通 `SIMD&FP` 整寄存器 `LDR/STR Q` 在 `SCTLR_EL1.A=1` 下的 16-byte 对齐 fault 语义，并与 structured load/store 的 element-size 对齐语义显式分离。
+- [x] 已补裸机单测覆盖 misaligned `LDR/STR Q` 的 `A=0` 正常访问与 `A=1` fault、`WnR`、`FAR_EL1`、`ELR_EL1` 行为。
+- [x] 已收口 `LDP/STP Q,Q` pair transfer 在 `SCTLR_EL1.A=1` 下按“每个 Q 元素 16-byte”而不是内部 8-byte 子访问做对齐检查的语义。
+- [x] 已收口 structured `LD1/ST1 {Vt.8B/16B}` / `{Vt.8B/16B,Vt2.8B/16B}` 的 element-size 对齐语义，避免 `.16B` multiple-structures 形式被错误按 8-byte 对齐要求触发 alignment fault。
+- [x] 已收口 `FP/AdvSIMD` memory 路径在 `Rn==SP` 时的 `CheckSPAlignment()` 语义，覆盖 `LDR/STR Q`、single-structure lane/replicate 与 whole-register structured load/store，并补裸机单测验证 fault 优先于访问与写回。
+
 ### 2. 异常 / 系统寄存器 / trap 语义收尾
 
 目标：
@@ -50,6 +57,8 @@
 - [x] 已对齐 `ID_AA64MMFR0_EL1` 的 granule 声明与当前 `4KB`-only 页表实现，避免把未实现的 `16KB granule` 错误宣称为存在。
 - [x] 已收口 `ID_AA64MMFR0_EL1.BigEnd/BigEndEL0` 与 `SCTLR_EL1.EE/E0E` 的固定值语义，避免在 mixed-endian absent 时仍把 `EE/E0E` 读回为可配置位。
 - [x] 已收口 `SPSR_EL1` 在“AArch64-only + 当前 absent feature 集”下的 `RES0` / 固定位语义，避免 guest 通过 `MSR SPSR_EL1` 把 `UAO/DIT/TCO/SSBS/BTYPE/ALLINT/PM/PPEND/EXLOCK/PACM/UINJ` 等当前未实现位读回成 1。
+- [x] 已修正 `MSR SPSel` 的程序可见切换语义，确保切换 `PSTATE.SP` 时同步保存当前 `SP` bank 并装载目标 `SP_EL0/SP_EL1`。
+- [x] 已修正“同一条 load/store 指令在 helper 已经取同步异常后仍继续发起后续访存或再次 `data_abort()`”的问题，避免双重异常和错误的异常覆盖。
 
 ### 3. SMP 内存模型与同步原语收尾
 
@@ -79,6 +88,10 @@
 
 预期收益：
 - 减少 Linux 启动、`execve`、动态链接、页权限切换、用户态 fault 测试中的边界错误。
+
+当前进展：
+- [x] 已补齐并回归验证一组高优先级对齐/fault 边界：`SP` alignment、标量 misaligned load/pair、`LDAR/STLR/LDXR/LSE atomic` misaligned fault、普通 `SIMD&FP` `LDR/STR Q` misaligned fault、`LDP/STP Q,Q` misaligned fault。
+- [x] 已补裸机单测确认 structured `LD1/ST1` `.16B` multiple-structures 在 `SCTLR_EL1.A=1` 下仍按 byte element 对齐工作，不应错误 fault。
 
 ### 5. 正确性验证基础设施补强
 
