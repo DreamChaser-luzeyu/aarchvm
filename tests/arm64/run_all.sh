@@ -61,6 +61,9 @@ run mmu_cross_page_load.bin 4000000
 run mmu_cross_page_store.bin 4000000
 run mmu_cross_page_fault_far_load.bin 4000000
 run mmu_cross_page_fault_far_store.bin 4000000
+run_expect mmu_fpsimd_whole_fault_far.bin 4000000 W
+run_expect mmu_fpsimd_structured_fault_far.bin 4000000 V
+run_expect mmu_fpsimd_lane_fault_far.bin 4000000 L
 run mmu_cross_page_various.bin 4000000
 run mmu_cross_page_pair_fault_far.bin 4000000
 run mmu_table_ap_inherit.bin 4000000
@@ -202,11 +205,13 @@ run fpsimd_fp_vector.bin 400000
 run fpsimd_more_perm_fp.bin 400000
 run fpsimd_structured_ls.bin 400000
 run_expect fpsimd_structured_ls_more.bin 600000 Y
+run_expect fpsimd_structured_ls_regpost.bin 900000 T
 run_expect fpsimd_structured_lane_ls.bin 800000 Y
 run fpsimd_widen_sat.bin 400000
 run cpacr_fp_trap.bin 300000
 run cpacr_fp_mem_trap.bin 300000
 run cpacr_fp_structured_trap.bin 400000
+run cpacr_fp_structured_regpost_trap.bin 400000
 run pstate_pan.bin 200000
 run_expect pan_span_exception.bin 300000 S
 run_expect spsr_el1_res0_bits.bin 200000 P

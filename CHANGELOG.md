@@ -1,3 +1,104 @@
+# 修改日志 2026-03-23 11:18
+
+## 本轮修改
+
+- 继续收口了 `SIMD&FP whole-register memory` 的跨页 fault 语义：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中 `load_vec_whole()` / `store_vec_whole()` 在子访问失败时会显式沿用 `last_data_fault_va_`，把 faulting byte 一直带到最终 `data_abort()`。
+  - 这样普通 `LDR/STR D/Q` 以及复用这两个 helper 的相关整寄存器 FP/SIMD 访存路径，在跨页、尤其是未对齐跨页场景下，都能稳定把 `FAR_EL1` 指向真实 fault byte。
+- 新增了针对上述边界的裸机单测：
+  - [tests/arm64/mmu_fpsimd_whole_fault_far.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_fpsimd_whole_fault_far.S)
+  - 覆盖 `LDR D` / `STR D` / `LDR Q` / `STR Q` 在跨页 translation fault 下的 `FAR_EL1` 与 `WnR`。
+- 更新了测试接线：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+
+## 本轮测试
+
+- 定向构建：
+  - `timeout 300s tests/arm64/build_tests.sh`
+  - `timeout 1200s cmake --build build -j`
+- 定向语义验证：
+  - `timeout 120s bash -lc 'AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/mmu_fpsimd_whole_fault_far.bin -load 0x0 -entry 0x0 -steps 4000000 2>/dev/null | tr -d "\r\n"'`
+  - `timeout 120s bash -lc 'AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/mmu_fpsimd_structured_fault_far.bin -load 0x0 -entry 0x0 -steps 4000000 2>/dev/null | tr -d "\r\n"'`
+  - `timeout 120s bash -lc 'AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/mmu_fpsimd_lane_fault_far.bin -load 0x0 -entry 0x0 -steps 4000000 2>/dev/null | tr -d "\r\n"'`
+  - `timeout 120s bash -lc 'AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_structured_ls_regpost.bin -load 0x0 -entry 0x0 -steps 900000 2>/dev/null | tr -d "\r\n"'`
+- 裸机完整回归：
+  - `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_20260323_fpsimd_whole_far.log 2>&1'`
+- Linux 单核功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_20260323_fpsimd_whole_far_ump.log 2>&1'`
+- Linux SMP 功能回归：
+  - `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_20260323_fpsimd_whole_far_smp.log 2>&1'`
+
+## 当前结论
+
+- 目前已经有裸机单测分别覆盖：
+  - 普通标量 load/store 的 faulting byte / FAR。
+  - 普通 FP/SIMD whole-register `LDR/STR` 的 faulting byte / FAR。
+  - AdvSIMD structured whole-register load/store 的 faulting byte / FAR。
+  - AdvSIMD single-structure lane/replicate load/store 的 faulting byte / FAR。
+- 这一组 MMU/fault 边界收口之后，下一步仍值得优先继续审的方向是：
+  - 其它 trap / undef / no-op 边界里尚未单独锁死的 debug/system 指令族。
+  - 浮点 / AdvSIMD 其它已实现路径在 `NaN / FPCR / FPSR` 传播上的一致性。
+
+# 修改日志 2026-03-22 18:08
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮收的是 whole-register structured `AdvSIMD` load/store 缺失 register post-index 形式的问题：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fpsimd_structured_ls_regpost.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_structured_ls_regpost.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 审阅现有 structured load/store 实现并结合工具链编码确认后，旧实现只覆盖了：
+  - no-offset 形式 `[Xn|SP]`
+  - `Rm == 31` 的 immediate post-index 形式
+- 但 whole-register structured `LD1/ST1/LD2/ST2/LD3/ST3/LD4/ST4` 还缺 `Rm != 31` 的 register post-index 形式 `[Xn|SP], Xm`，这属于当前已声明 `FEAT_AdvSIMD` 下应支持的 A64 基本编码。
+- 这轮在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 做了两件事：
+  - 新增两个小 helper，分别统一处理 sequential whole-register post-index 与 interleaved whole-register post-index；
+  - 把原来只识别 immediate post-index 的分支扩展成同时支持 `#imm` 和 `Xm`，其中：
+    - `Rm == 31` 仍按架构隐含立即数写回；
+    - `Rm != 31` 时写回偏移取 `X[m]`，不做额外缩放。
+- 在继续复查 `CPACR/CPTR` trap 语义时，又发现 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 的 `insn_uses_fp_asimd()` 仍只按旧的 immediate post-index 掩码识别 whole-register structured `AdvSIMD` load/store，导致新补的 `[Xn|SP], Xm` 形式在禁用 `FP/AdvSIMD` 时会漏掉 `EC=0x07` trap 判定。
+- 为此，这轮进一步把 `insn_uses_fp_asimd()` 中相关 post-index 判定掩码同步更新为与执行路径一致的 `#imm|Xm` 识别方式，保证 `CPACR/CPTR` trap 与真实执行解码覆盖同一批编码。
+- 同时新增裸机单测 [tests/arm64/fpsimd_structured_ls_regpost.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_structured_ls_regpost.S)，覆盖：
+  - `LD1/ST1` 1/2/3/4 寄存器 whole-register register post-index
+  - `LD2/ST2` whole-register register post-index
+  - `LD3/ST3` whole-register register post-index
+  - `LD4/ST4` whole-register register post-index
+  - 并显式校验 load/store 数据结果与 `Xm` 写回。
+- 另外新增 [tests/arm64/cpacr_fp_structured_regpost_trap.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/cpacr_fp_structured_regpost_trap.S)，专门验证：
+  - `whole-register structured LD1 ... [Xn], Xm` 在 EL1 与 EL0 被 `CPACR_EL1` 禁用时会先触发 `FP/AdvSIMD access trap`；
+  - trap 不会错误执行写回；
+  - 在重新启用后，指令与 register post-index 写回都能正常完成。
+- 继续复查 MMU / fault 边界时，又发现 whole-register structured `AdvSIMD` load/store 的 byte-wise helper 只返回成功/失败，不回传实际 faulting byte，因此 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 在 `LD1/ST1/LD2/ST2/LD3/ST3/LD4/ST4` 发生跨页 translation/data abort 时，会把 `FAR_EL1` 错报成起始地址。
+- 这轮把 sequential/interleaved whole-register helper 统一改成显式回传 `fault_addr`，并同步修正 no-offset 与 post-index 两条执行路径，让 `data_abort()` 使用真实 faulting byte 地址。
+- 同时新增 [tests/arm64/mmu_fpsimd_structured_fault_far.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_fpsimd_structured_fault_far.S)，覆盖：
+  - sequential `LD1` 跨页 fault 的 `FAR_EL1`
+  - sequential `ST1 [Xn], Xm` 跨页 fault 的 `FAR_EL1` 与 fault 时禁止写回
+  - interleaved `LD2` 跨页 fault 的 `FAR_EL1`
+  - interleaved `ST2 [Xn], Xm` 跨页 fault 的 `FAR_EL1` 与 fault 时禁止写回
+- 在同一片路径继续往下审时，又确认 single-structure lane/replicate `AdvSIMD` load/store 仍然按整元素宽度直接调用 `mmu_read/mmu_write`，因此对 `H/S/D` 多字节元素跨页 fault 只会把 `FAR_EL1` 报成元素起始地址。
+- 这轮进一步把 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中 `access_vec_single_struct()` 改成：
+  - 先按元素宽度保留原有 alignment fault 检查；
+  - 真正访问时改为按字节走 `raw_mmu_read/raw_mmu_write`，从而把 `fault_addr` 精确推进到 faulting byte。
+- 另外新增 [tests/arm64/mmu_fpsimd_lane_fault_far.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_fpsimd_lane_fault_far.S)，覆盖：
+  - `LD1 {Vt.H}[lane]` 跨页 fault 的 `FAR_EL1`
+  - `LD1R {Vt.4H}` 跨页 fault 的 `FAR_EL1`
+  - `ST1 {Vt.S}[lane], [Xn], Xm` 跨页 fault 的 `FAR_EL1` 与 fault 时禁止写回
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 120s bash -lc 'AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_structured_ls_regpost.bin -load 0x0 -entry 0x0 -steps 400000 2>/dev/null | tr -d "\\r\\n"'`
+- `timeout 120s bash -lc 'AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/cpacr_fp_structured_regpost_trap.bin -load 0x0 -entry 0x0 -steps 400000 2>/dev/null | tr -d "\\r\\n"'`
+- `timeout 120s bash -lc 'AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/mmu_fpsimd_structured_fault_far.bin -load 0x0 -entry 0x0 -steps 4000000 2>/dev/null | tr -d "\\r\\n"'`
+- `timeout 120s bash -lc 'AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/mmu_fpsimd_lane_fault_far.bin -load 0x0 -entry 0x0 -steps 4000000 2>/dev/null | tr -d "\\r\\n"'`
+- `timeout 5400s tests/arm64/run_all.sh`
+- `timeout 5400s tests/linux/run_functional_suite.sh`
+- `timeout 5400s tests/linux/run_functional_suite_smp.sh`
+
 # 修改日志 2026-03-22 17:38
 
 ## 本轮修改

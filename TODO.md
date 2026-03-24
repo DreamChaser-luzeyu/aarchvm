@@ -33,6 +33,8 @@
 - [x] 已收口 `LDP/STP Q,Q` pair transfer 在 `SCTLR_EL1.A=1` 下按“每个 Q 元素 16-byte”而不是内部 8-byte 子访问做对齐检查的语义。
 - [x] 已收口 structured `LD1/ST1 {Vt.8B/16B}` / `{Vt.8B/16B,Vt2.8B/16B}` 的 element-size 对齐语义，避免 `.16B` multiple-structures 形式被错误按 8-byte 对齐要求触发 alignment fault。
 - [x] 已收口 `FP/AdvSIMD` memory 路径在 `Rn==SP` 时的 `CheckSPAlignment()` 语义，覆盖 `LDR/STR Q`、single-structure lane/replicate 与 whole-register structured load/store，并补裸机单测验证 fault 优先于访问与写回。
+- [x] 已补 whole-register structured `LD1/ST1/LD2/ST2/LD3/ST3/LD4/ST4` 的 register post-index (`[Xn|SP], Xm`) 形式，并用裸机单测覆盖各家族的 load/store 与写回语义。
+- [x] 已修正 `CPACR/CPTR` 下 `FP/AdvSIMD` trap 识别漏掉 whole-register structured register post-index 的问题，确保 `[Xn|SP], Xm` 形式也先走 `EC=0x07` trap，并补裸机单测验证 trap 优先于写回。
 
 ### 2. 异常 / 系统寄存器 / trap 语义收尾
 
@@ -92,6 +94,8 @@
 当前进展：
 - [x] 已补齐并回归验证一组高优先级对齐/fault 边界：`SP` alignment、标量 misaligned load/pair、`LDAR/STLR/LDXR/LSE atomic` misaligned fault、普通 `SIMD&FP` `LDR/STR Q` misaligned fault、`LDP/STP Q,Q` misaligned fault。
 - [x] 已补裸机单测确认 structured `LD1/ST1` `.16B` multiple-structures 在 `SCTLR_EL1.A=1` 下仍按 byte element 对齐工作，不应错误 fault。
+- [x] 已修正 whole-register structured `AdvSIMD` `LD1/ST1/LD2/ST2/LD3/ST3/LD4/ST4` 在跨页 fault 时的 `FAR_EL1` 报告，确保返回实际 faulting byte 而不是起始地址，并补裸机单测覆盖 sequential/interleaved、load/store 与 post-index fault 不写回。
+- [x] 已修正 single-structure lane/replicate `AdvSIMD` load/store 在多字节元素跨页 fault 时的 `FAR_EL1` 报告，并补裸机单测覆盖 lane load、replicate load 与 post-index lane store 的 faulting byte 和 fault 时不写回。
 
 ### 5. 正确性验证基础设施补强
 

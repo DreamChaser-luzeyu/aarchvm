@@ -3251,19 +3251,19 @@ bool Cpu::insn_uses_fp_asimd(std::uint32_t insn) const {
       (insn & 0xFFC00C00u) == 0xFC000000u || (insn & 0xFFC00C00u) == 0xFC400000u;
   const bool asimd_structured_ls =
       (insn & 0xBFFFFC00u) == 0x0C407000u || (insn & 0xBFFFFC00u) == 0x0C007000u ||
-      (insn & 0xBFFFFC00u) == 0x0CDF7000u || (insn & 0xBFFFFC00u) == 0x0C9F7000u ||
+      (insn & 0xBFE0FC00u) == 0x0CC07000u || (insn & 0xBFE0FC00u) == 0x0C807000u ||
       (insn & 0xBFFFFC00u) == 0x0C40A000u || (insn & 0xBFFFFC00u) == 0x0C00A000u ||
-      (insn & 0xBFFFFC00u) == 0x0CDFA000u || (insn & 0xBFFFFC00u) == 0x0C9FA000u ||
+      (insn & 0xBFE0FC00u) == 0x0CC0A000u || (insn & 0xBFE0FC00u) == 0x0C80A000u ||
       (insn & 0xBFFFFC00u) == 0x0C406000u || (insn & 0xBFFFFC00u) == 0x0C006000u ||
-      (insn & 0xBFFFFC00u) == 0x0CDF6000u || (insn & 0xBFFFFC00u) == 0x0C9F6000u ||
+      (insn & 0xBFE0FC00u) == 0x0CC06000u || (insn & 0xBFE0FC00u) == 0x0C806000u ||
       (insn & 0xBFFFFC00u) == 0x0C402000u || (insn & 0xBFFFFC00u) == 0x0C002000u ||
-      (insn & 0xBFFFFC00u) == 0x0CDF2000u || (insn & 0xBFFFFC00u) == 0x0C9F2000u ||
+      (insn & 0xBFE0FC00u) == 0x0CC02000u || (insn & 0xBFE0FC00u) == 0x0C802000u ||
       (insn & 0xBFFFFC00u) == 0x0C408000u || (insn & 0xBFFFFC00u) == 0x0C008000u ||
-      (insn & 0xBFFFFC00u) == 0x0CDF8000u || (insn & 0xBFFFFC00u) == 0x0C9F8000u ||
+      (insn & 0xBFE0FC00u) == 0x0CC08000u || (insn & 0xBFE0FC00u) == 0x0C808000u ||
       (insn & 0xBFFFFC00u) == 0x0C404000u || (insn & 0xBFFFFC00u) == 0x0C004000u ||
-      (insn & 0xBFFFFC00u) == 0x0CDF4000u || (insn & 0xBFFFFC00u) == 0x0C9F4000u ||
+      (insn & 0xBFE0FC00u) == 0x0CC04000u || (insn & 0xBFE0FC00u) == 0x0C804000u ||
       (insn & 0xBFFFFC00u) == 0x0C400000u || (insn & 0xBFFFFC00u) == 0x0C000000u ||
-      (insn & 0xBFFFFC00u) == 0x0CDF0000u || (insn & 0xBFFFFC00u) == 0x0C9F0000u ||
+      (insn & 0xBFE0FC00u) == 0x0CC00000u || (insn & 0xBFE0FC00u) == 0x0C800000u ||
       (insn & 0xBF9F0000u) == 0x0D000000u || (insn & 0xBF800000u) == 0x0D800000u;
   if (fp_ls_unsigned_imm || fp_ls_pre_post || fp_ls_regoffset || fp_ls_unscaled || asimd_structured_ls) {
     return true;
@@ -9834,12 +9834,13 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       const auto lo = raw_mmu_read(addr, 8u);
       if (!lo.has_value()) {
         access_failed = true;
+        fault_addr = this->last_data_fault_va_.value_or(addr);
         return false;
       }
       const auto hi = raw_mmu_read(addr + 8u, 8u);
       if (!hi.has_value()) {
         access_failed = true;
-        fault_addr = addr + 8u;
+        fault_addr = this->last_data_fault_va_.value_or(addr + 8u);
         return false;
       }
       qregs_[vt][0] = *lo;
@@ -9849,6 +9850,7 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     const auto value = raw_mmu_read(addr, size);
     if (!value.has_value()) {
       access_failed = true;
+      fault_addr = this->last_data_fault_va_.value_or(addr);
       return false;
     }
     if (size == 8u) {
@@ -9890,11 +9892,12 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     if (size == 16u) {
       if (!raw_mmu_write(addr, qregs_[vt][0], 8u)) {
         access_failed = true;
+        fault_addr = this->last_data_fault_va_.value_or(addr);
         return false;
       }
       if (!raw_mmu_write(addr + 8u, qregs_[vt][1], 8u)) {
         access_failed = true;
-        fault_addr = addr + 8u;
+        fault_addr = this->last_data_fault_va_.value_or(addr + 8u);
         return false;
       }
       return true;
@@ -9912,6 +9915,9 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       return false;
     }
     const bool ok = raw_mmu_write(addr, value, size);
+    if (!ok) {
+      fault_addr = this->last_data_fault_va_.value_or(addr);
+    }
     access_failed |= !ok;
     return ok;
   };
@@ -9936,11 +9942,14 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
   const auto load_vec_seq_element_bytes = [&](std::uint64_t addr,
                                               std::uint32_t vt,
                                               std::size_t reg_bytes,
-                                              std::size_t reg_count) -> bool {
+                                              std::size_t reg_count,
+                                              std::uint64_t& fault_addr) -> bool {
+    fault_addr = addr;
     std::array<std::array<std::uint64_t, 2>, 4> regs{};
     for (std::size_t reg_idx = 0; reg_idx < reg_count; ++reg_idx) {
       for (std::size_t lane = 0; lane < reg_bytes; ++lane) {
-        const auto value = mmu_read(addr + reg_idx * reg_bytes + lane, 1u);
+        fault_addr = addr + reg_idx * reg_bytes + lane;
+        const auto value = mmu_read(fault_addr, 1u);
         if (!value.has_value()) {
           return false;
         }
@@ -9955,14 +9964,17 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
   const auto store_vec_seq_element_bytes = [&](std::uint64_t addr,
                                                std::uint32_t vt,
                                                std::size_t reg_bytes,
-                                               std::size_t reg_count) -> bool {
+                                               std::size_t reg_count,
+                                               std::uint64_t& fault_addr) -> bool {
+    fault_addr = addr;
     std::array<std::array<std::uint64_t, 2>, 4> regs{};
     for (std::size_t reg_idx = 0; reg_idx < reg_count; ++reg_idx) {
       regs[reg_idx] = qregs_[(vt + static_cast<std::uint32_t>(reg_idx)) & 0x1Fu];
     }
     for (std::size_t reg_idx = 0; reg_idx < reg_count; ++reg_idx) {
       for (std::size_t lane = 0; lane < reg_bytes; ++lane) {
-        if (!mmu_write(addr + reg_idx * reg_bytes + lane,
+        fault_addr = addr + reg_idx * reg_bytes + lane;
+        if (!mmu_write(fault_addr,
                        vector_get_elem(regs[reg_idx], 8u, static_cast<std::uint32_t>(lane)) & 0xFFu,
                        1u)) {
           return false;
@@ -9974,11 +9986,14 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
   const auto load_vec_struct_bytes = [&](std::uint64_t addr,
                                          std::uint32_t vt,
                                          std::size_t reg_bytes,
-                                         std::size_t reg_count) -> bool {
+                                         std::size_t reg_count,
+                                         std::uint64_t& fault_addr) -> bool {
+    fault_addr = addr;
     std::array<std::array<std::uint64_t, 2>, 4> regs{};
     for (std::size_t lane = 0; lane < reg_bytes; ++lane) {
       for (std::size_t reg_idx = 0; reg_idx < reg_count; ++reg_idx) {
-        const auto value = mmu_read(addr + lane * reg_count + reg_idx, 1u);
+        fault_addr = addr + lane * reg_count + reg_idx;
+        const auto value = mmu_read(fault_addr, 1u);
         if (!value.has_value()) {
           return false;
         }
@@ -9993,14 +10008,17 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
   const auto store_vec_struct_bytes = [&](std::uint64_t addr,
                                           std::uint32_t vt,
                                           std::size_t reg_bytes,
-                                          std::size_t reg_count) -> bool {
+                                          std::size_t reg_count,
+                                          std::uint64_t& fault_addr) -> bool {
+    fault_addr = addr;
     std::array<std::array<std::uint64_t, 2>, 4> regs{};
     for (std::size_t reg_idx = 0; reg_idx < reg_count; ++reg_idx) {
       regs[reg_idx] = qregs_[(vt + static_cast<std::uint32_t>(reg_idx)) & 0x1Fu];
     }
     for (std::size_t lane = 0; lane < reg_bytes; ++lane) {
       for (std::size_t reg_idx = 0; reg_idx < reg_count; ++reg_idx) {
-        if (!mmu_write(addr + lane * reg_count + reg_idx,
+        fault_addr = addr + lane * reg_count + reg_idx;
+        if (!mmu_write(fault_addr,
                        vector_get_elem(regs[reg_idx], 8u, static_cast<std::uint32_t>(lane)) & 0xFFu,
                        1u)) {
           return false;
@@ -10027,22 +10045,38 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     if (is_load) {
       std::array<std::array<std::uint64_t, 2>, 4> regs{};
       for (std::uint32_t reg_idx = 0; reg_idx < reg_count; ++reg_idx) {
-        const auto value = mmu_read(addr + static_cast<std::uint64_t>(reg_idx) * ebytes, ebytes);
-        if (!value.has_value()) {
-          fault_addr = addr + static_cast<std::uint64_t>(reg_idx) * ebytes;
+        const std::uint64_t elem_addr = addr + static_cast<std::uint64_t>(reg_idx) * ebytes;
+        fault_addr = elem_addr;
+        if (access_failed) {
           return false;
+        }
+        if (maybe_take_sp_alignment_fault(rn) ||
+            maybe_take_data_alignment_fault(elem_addr, ebytes, AccessType::Read)) {
+          access_failed = true;
+          sync_exception_taken = true;
+          return false;
+        }
+        std::uint64_t value = 0u;
+        for (std::size_t byte = 0; byte < ebytes; ++byte) {
+          fault_addr = elem_addr + byte;
+          const auto part = raw_mmu_read(fault_addr, 1u);
+          if (!part.has_value()) {
+            access_failed = true;
+            return false;
+          }
+          value |= (*part & 0xFFu) << (byte * 8u);
         }
 
         if (replicate) {
           std::array<std::uint64_t, 2> dst{};
           const std::uint32_t lanes = datasize_bits / esize_bits;
           for (std::uint32_t lane = 0; lane < lanes; ++lane) {
-            vector_set_elem(dst, esize_bits, lane, *value & ones(esize_bits));
+            vector_set_elem(dst, esize_bits, lane, value & ones(esize_bits));
           }
           regs[reg_idx] = dst;
         } else {
           auto dst = qregs_[(vt + reg_idx) & 0x1Fu];
-          vector_set_elem(dst, esize_bits, lane_index, *value & ones(esize_bits));
+          vector_set_elem(dst, esize_bits, lane_index, value & ones(esize_bits));
           regs[reg_idx] = dst;
         }
       }
@@ -10055,11 +10089,24 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
 
     for (std::uint32_t reg_idx = 0; reg_idx < reg_count; ++reg_idx) {
       const auto& src = qregs_[(vt + reg_idx) & 0x1Fu];
-      if (!mmu_write(addr + static_cast<std::uint64_t>(reg_idx) * ebytes,
-                     vector_get_elem(src, esize_bits, lane_index) & ones(esize_bits),
-                     ebytes)) {
-        fault_addr = addr + static_cast<std::uint64_t>(reg_idx) * ebytes;
+      const std::uint64_t elem_addr = addr + static_cast<std::uint64_t>(reg_idx) * ebytes;
+      fault_addr = elem_addr;
+      if (access_failed) {
         return false;
+      }
+      if (maybe_take_sp_alignment_fault(rn) ||
+          maybe_take_data_alignment_fault(elem_addr, ebytes, AccessType::Write)) {
+        access_failed = true;
+        sync_exception_taken = true;
+        return false;
+      }
+      const std::uint64_t elem = vector_get_elem(src, esize_bits, lane_index) & ones(esize_bits);
+      for (std::size_t byte = 0; byte < ebytes; ++byte) {
+        fault_addr = elem_addr + byte;
+        if (!raw_mmu_write(fault_addr, (elem >> (byte * 8u)) & 0xFFu, 1u)) {
+          access_failed = true;
+          return false;
+        }
       }
     }
 
@@ -10129,6 +10176,46 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       return std::nullopt;
     }
     return sp_or_reg(rn);
+  };
+  const auto exec_vec_seq_postindex = [&](std::size_t reg_bytes,
+                                          std::size_t reg_count,
+                                          bool is_load) -> bool {
+    const auto base = checked_fp_mem_base();
+    if (!base.has_value()) {
+      return true;
+    }
+    const std::uint64_t addr = *base;
+    std::uint64_t fault_addr = addr;
+    const bool ok = is_load ? load_vec_seq_element_bytes(addr, rt, reg_bytes, reg_count, fault_addr)
+                            : store_vec_seq_element_bytes(addr, rt, reg_bytes, reg_count, fault_addr);
+    if (!ok) {
+      data_abort(fault_addr);
+      return true;
+    }
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint64_t off = rm == 31u ? reg_bytes * reg_count : reg(rm);
+    set_sp_or_reg(rn, addr + off, false);
+    return true;
+  };
+  const auto exec_vec_struct_postindex = [&](std::size_t reg_bytes,
+                                             std::size_t reg_count,
+                                             bool is_load) -> bool {
+    const auto base = checked_fp_mem_base();
+    if (!base.has_value()) {
+      return true;
+    }
+    const std::uint64_t addr = *base;
+    std::uint64_t fault_addr = addr;
+    const bool ok = is_load ? load_vec_struct_bytes(addr, rt, reg_bytes, reg_count, fault_addr)
+                            : store_vec_struct_bytes(addr, rt, reg_bytes, reg_count, fault_addr);
+    if (!ok) {
+      data_abort(fault_addr);
+      return true;
+    }
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint64_t off = rm == 31u ? reg_bytes * reg_count : reg(rm);
+    set_sp_or_reg(rn, addr + off, false);
+    return true;
   };
 
   // SIMD&FP memory subset, including whole-register structured load/store
@@ -10311,8 +10398,9 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       return true;
     }
     const std::uint64_t addr = *base;
-    if (!load_vec_seq_element_bytes(addr, rt, size, 1u)) {
-      data_abort(addr);
+    std::uint64_t fault_addr = addr;
+    if (!load_vec_seq_element_bytes(addr, rt, size, 1u, fault_addr)) {
+      data_abort(fault_addr);
     }
     return true;
   }
@@ -10325,42 +10413,23 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       return true;
     }
     const std::uint64_t addr = *base;
-    if (!store_vec_seq_element_bytes(addr, rt, size, 1u)) {
-      data_abort(addr);
+    std::uint64_t fault_addr = addr;
+    if (!store_vec_seq_element_bytes(addr, rt, size, 1u, fault_addr)) {
+      data_abort(fault_addr);
     }
     return true;
   }
 
-  if ((insn & 0xBFFFFC00u) == 0x0CDF7000u) { // LD1 {Vt.8B/16B}, [Xn|SP], #imm
+  if ((insn & 0xBFE0FC00u) == 0x0CC07000u) { // LD1 {Vt.8B/16B}, [Xn|SP], #imm|Xm
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::size_t size = q ? 16u : 8u;
-    const auto base = checked_fp_mem_base();
-    if (!base.has_value()) {
-      return true;
-    }
-    const std::uint64_t addr = *base;
-    if (!load_vec_seq_element_bytes(addr, rt, size, 1u)) {
-      data_abort(addr);
-      return true;
-    }
-    set_sp_or_reg(rn, addr + size, false);
-    return true;
+    return exec_vec_seq_postindex(size, 1u, true);
   }
 
-  if ((insn & 0xBFFFFC00u) == 0x0C9F7000u) { // ST1 {Vt.8B/16B}, [Xn|SP], #imm
+  if ((insn & 0xBFE0FC00u) == 0x0C807000u) { // ST1 {Vt.8B/16B}, [Xn|SP], #imm|Xm
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::size_t size = q ? 16u : 8u;
-    const auto base = checked_fp_mem_base();
-    if (!base.has_value()) {
-      return true;
-    }
-    const std::uint64_t addr = *base;
-    if (!store_vec_seq_element_bytes(addr, rt, size, 1u)) {
-      data_abort(addr);
-      return true;
-    }
-    set_sp_or_reg(rn, addr + size, false);
-    return true;
+    return exec_vec_seq_postindex(size, 1u, false);
   }
 
   if ((insn & 0xBFFFFC00u) == 0x0C40A000u) { // LD1 {Vt.8B/16B,Vt2.8B/16B}, [Xn|SP]
@@ -10371,8 +10440,9 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       return true;
     }
     const std::uint64_t addr = *base;
-    if (!load_vec_seq_element_bytes(addr, rt, reg_bytes, 2u)) {
-      data_abort(addr);
+    std::uint64_t fault_addr = addr;
+    if (!load_vec_seq_element_bytes(addr, rt, reg_bytes, 2u, fault_addr)) {
+      data_abort(fault_addr);
     }
     return true;
   }
@@ -10385,42 +10455,23 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       return true;
     }
     const std::uint64_t addr = *base;
-    if (!store_vec_seq_element_bytes(addr, rt, reg_bytes, 2u)) {
-      data_abort(addr);
+    std::uint64_t fault_addr = addr;
+    if (!store_vec_seq_element_bytes(addr, rt, reg_bytes, 2u, fault_addr)) {
+      data_abort(fault_addr);
     }
     return true;
   }
 
-  if ((insn & 0xBFFFFC00u) == 0x0CDFA000u) { // LD1 {Vt.8B/16B,Vt2.8B/16B}, [Xn|SP], #imm
+  if ((insn & 0xBFE0FC00u) == 0x0CC0A000u) { // LD1 {Vt.8B/16B,Vt2.8B/16B}, [Xn|SP], #imm|Xm
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::size_t reg_bytes = q ? 16u : 8u;
-    const auto base = checked_fp_mem_base();
-    if (!base.has_value()) {
-      return true;
-    }
-    const std::uint64_t addr = *base;
-    if (!load_vec_seq_element_bytes(addr, rt, reg_bytes, 2u)) {
-      data_abort(addr);
-      return true;
-    }
-    set_sp_or_reg(rn, addr + reg_bytes * 2u, false);
-    return true;
+    return exec_vec_seq_postindex(reg_bytes, 2u, true);
   }
 
-  if ((insn & 0xBFFFFC00u) == 0x0C9FA000u) { // ST1 {Vt.8B/16B,Vt2.8B/16B}, [Xn|SP], #imm
+  if ((insn & 0xBFE0FC00u) == 0x0C80A000u) { // ST1 {Vt.8B/16B,Vt2.8B/16B}, [Xn|SP], #imm|Xm
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::size_t reg_bytes = q ? 16u : 8u;
-    const auto base = checked_fp_mem_base();
-    if (!base.has_value()) {
-      return true;
-    }
-    const std::uint64_t addr = *base;
-    if (!store_vec_seq_element_bytes(addr, rt, reg_bytes, 2u)) {
-      data_abort(addr);
-      return true;
-    }
-    set_sp_or_reg(rn, addr + reg_bytes * 2u, false);
-    return true;
+    return exec_vec_seq_postindex(reg_bytes, 2u, false);
   }
 
   if ((insn & 0xBFFFFC00u) == 0x0C406000u) { // LD1 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B}, [Xn|SP]
@@ -10431,8 +10482,9 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       return true;
     }
     const std::uint64_t addr = *base;
-    if (!load_vec_seq_element_bytes(addr, rt, reg_bytes, 3u)) {
-      data_abort(addr);
+    std::uint64_t fault_addr = addr;
+    if (!load_vec_seq_element_bytes(addr, rt, reg_bytes, 3u, fault_addr)) {
+      data_abort(fault_addr);
     }
     return true;
   }
@@ -10445,42 +10497,23 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       return true;
     }
     const std::uint64_t addr = *base;
-    if (!store_vec_seq_element_bytes(addr, rt, reg_bytes, 3u)) {
-      data_abort(addr);
+    std::uint64_t fault_addr = addr;
+    if (!store_vec_seq_element_bytes(addr, rt, reg_bytes, 3u, fault_addr)) {
+      data_abort(fault_addr);
     }
     return true;
   }
 
-  if ((insn & 0xBFFFFC00u) == 0x0CDF6000u) { // LD1 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B}, [Xn|SP], #imm
+  if ((insn & 0xBFE0FC00u) == 0x0CC06000u) { // LD1 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B}, [Xn|SP], #imm|Xm
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::size_t reg_bytes = q ? 16u : 8u;
-    const auto base = checked_fp_mem_base();
-    if (!base.has_value()) {
-      return true;
-    }
-    const std::uint64_t addr = *base;
-    if (!load_vec_seq_element_bytes(addr, rt, reg_bytes, 3u)) {
-      data_abort(addr);
-      return true;
-    }
-    set_sp_or_reg(rn, addr + reg_bytes * 3u, false);
-    return true;
+    return exec_vec_seq_postindex(reg_bytes, 3u, true);
   }
 
-  if ((insn & 0xBFFFFC00u) == 0x0C9F6000u) { // ST1 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B}, [Xn|SP], #imm
+  if ((insn & 0xBFE0FC00u) == 0x0C806000u) { // ST1 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B}, [Xn|SP], #imm|Xm
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::size_t reg_bytes = q ? 16u : 8u;
-    const auto base = checked_fp_mem_base();
-    if (!base.has_value()) {
-      return true;
-    }
-    const std::uint64_t addr = *base;
-    if (!store_vec_seq_element_bytes(addr, rt, reg_bytes, 3u)) {
-      data_abort(addr);
-      return true;
-    }
-    set_sp_or_reg(rn, addr + reg_bytes * 3u, false);
-    return true;
+    return exec_vec_seq_postindex(reg_bytes, 3u, false);
   }
 
   if ((insn & 0xBFFFFC00u) == 0x0C402000u) { // LD1 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B,Vt4.8B/16B}, [Xn|SP]
@@ -10491,8 +10524,9 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       return true;
     }
     const std::uint64_t addr = *base;
-    if (!load_vec_seq_element_bytes(addr, rt, reg_bytes, 4u)) {
-      data_abort(addr);
+    std::uint64_t fault_addr = addr;
+    if (!load_vec_seq_element_bytes(addr, rt, reg_bytes, 4u, fault_addr)) {
+      data_abort(fault_addr);
     }
     return true;
   }
@@ -10505,42 +10539,23 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       return true;
     }
     const std::uint64_t addr = *base;
-    if (!store_vec_seq_element_bytes(addr, rt, reg_bytes, 4u)) {
-      data_abort(addr);
+    std::uint64_t fault_addr = addr;
+    if (!store_vec_seq_element_bytes(addr, rt, reg_bytes, 4u, fault_addr)) {
+      data_abort(fault_addr);
     }
     return true;
   }
 
-  if ((insn & 0xBFFFFC00u) == 0x0CDF2000u) { // LD1 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B,Vt4.8B/16B}, [Xn|SP], #imm
+  if ((insn & 0xBFE0FC00u) == 0x0CC02000u) { // LD1 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B,Vt4.8B/16B}, [Xn|SP], #imm|Xm
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::size_t reg_bytes = q ? 16u : 8u;
-    const auto base = checked_fp_mem_base();
-    if (!base.has_value()) {
-      return true;
-    }
-    const std::uint64_t addr = *base;
-    if (!load_vec_seq_element_bytes(addr, rt, reg_bytes, 4u)) {
-      data_abort(addr);
-      return true;
-    }
-    set_sp_or_reg(rn, addr + reg_bytes * 4u, false);
-    return true;
+    return exec_vec_seq_postindex(reg_bytes, 4u, true);
   }
 
-  if ((insn & 0xBFFFFC00u) == 0x0C9F2000u) { // ST1 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B,Vt4.8B/16B}, [Xn|SP], #imm
+  if ((insn & 0xBFE0FC00u) == 0x0C802000u) { // ST1 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B,Vt4.8B/16B}, [Xn|SP], #imm|Xm
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::size_t reg_bytes = q ? 16u : 8u;
-    const auto base = checked_fp_mem_base();
-    if (!base.has_value()) {
-      return true;
-    }
-    const std::uint64_t addr = *base;
-    if (!store_vec_seq_element_bytes(addr, rt, reg_bytes, 4u)) {
-      data_abort(addr);
-      return true;
-    }
-    set_sp_or_reg(rn, addr + reg_bytes * 4u, false);
-    return true;
+    return exec_vec_seq_postindex(reg_bytes, 4u, false);
   }
 
   if ((insn & 0xBFFFFC00u) == 0x0C408000u) { // LD2 {Vt.8B/16B,Vt2.8B/16B}, [Xn|SP]
@@ -10551,8 +10566,9 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       return true;
     }
     const std::uint64_t addr = *base;
-    if (!load_vec_struct_bytes(addr, rt, reg_bytes, 2u)) {
-      data_abort(addr);
+    std::uint64_t fault_addr = addr;
+    if (!load_vec_struct_bytes(addr, rt, reg_bytes, 2u, fault_addr)) {
+      data_abort(fault_addr);
     }
     return true;
   }
@@ -10565,42 +10581,23 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       return true;
     }
     const std::uint64_t addr = *base;
-    if (!store_vec_struct_bytes(addr, rt, reg_bytes, 2u)) {
-      data_abort(addr);
+    std::uint64_t fault_addr = addr;
+    if (!store_vec_struct_bytes(addr, rt, reg_bytes, 2u, fault_addr)) {
+      data_abort(fault_addr);
     }
     return true;
   }
 
-  if ((insn & 0xBFFFFC00u) == 0x0CDF8000u) { // LD2 {Vt.8B/16B,Vt2.8B/16B}, [Xn|SP], #imm
+  if ((insn & 0xBFE0FC00u) == 0x0CC08000u) { // LD2 {Vt.8B/16B,Vt2.8B/16B}, [Xn|SP], #imm|Xm
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::size_t reg_bytes = q ? 16u : 8u;
-    const auto base = checked_fp_mem_base();
-    if (!base.has_value()) {
-      return true;
-    }
-    const std::uint64_t addr = *base;
-    if (!load_vec_struct_bytes(addr, rt, reg_bytes, 2u)) {
-      data_abort(addr);
-      return true;
-    }
-    set_sp_or_reg(rn, addr + reg_bytes * 2u, false);
-    return true;
+    return exec_vec_struct_postindex(reg_bytes, 2u, true);
   }
 
-  if ((insn & 0xBFFFFC00u) == 0x0C9F8000u) { // ST2 {Vt.8B/16B,Vt2.8B/16B}, [Xn|SP], #imm
+  if ((insn & 0xBFE0FC00u) == 0x0C808000u) { // ST2 {Vt.8B/16B,Vt2.8B/16B}, [Xn|SP], #imm|Xm
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::size_t reg_bytes = q ? 16u : 8u;
-    const auto base = checked_fp_mem_base();
-    if (!base.has_value()) {
-      return true;
-    }
-    const std::uint64_t addr = *base;
-    if (!store_vec_struct_bytes(addr, rt, reg_bytes, 2u)) {
-      data_abort(addr);
-      return true;
-    }
-    set_sp_or_reg(rn, addr + reg_bytes * 2u, false);
-    return true;
+    return exec_vec_struct_postindex(reg_bytes, 2u, false);
   }
 
   if ((insn & 0xBFFFFC00u) == 0x0C404000u) { // LD3 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B}, [Xn|SP]
@@ -10611,8 +10608,9 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       return true;
     }
     const std::uint64_t addr = *base;
-    if (!load_vec_struct_bytes(addr, rt, reg_bytes, 3u)) {
-      data_abort(addr);
+    std::uint64_t fault_addr = addr;
+    if (!load_vec_struct_bytes(addr, rt, reg_bytes, 3u, fault_addr)) {
+      data_abort(fault_addr);
     }
     return true;
   }
@@ -10625,42 +10623,23 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       return true;
     }
     const std::uint64_t addr = *base;
-    if (!store_vec_struct_bytes(addr, rt, reg_bytes, 3u)) {
-      data_abort(addr);
+    std::uint64_t fault_addr = addr;
+    if (!store_vec_struct_bytes(addr, rt, reg_bytes, 3u, fault_addr)) {
+      data_abort(fault_addr);
     }
     return true;
   }
 
-  if ((insn & 0xBFFFFC00u) == 0x0CDF4000u) { // LD3 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B}, [Xn|SP], #imm
+  if ((insn & 0xBFE0FC00u) == 0x0CC04000u) { // LD3 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B}, [Xn|SP], #imm|Xm
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::size_t reg_bytes = q ? 16u : 8u;
-    const auto base = checked_fp_mem_base();
-    if (!base.has_value()) {
-      return true;
-    }
-    const std::uint64_t addr = *base;
-    if (!load_vec_struct_bytes(addr, rt, reg_bytes, 3u)) {
-      data_abort(addr);
-      return true;
-    }
-    set_sp_or_reg(rn, addr + reg_bytes * 3u, false);
-    return true;
+    return exec_vec_struct_postindex(reg_bytes, 3u, true);
   }
 
-  if ((insn & 0xBFFFFC00u) == 0x0C9F4000u) { // ST3 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B}, [Xn|SP], #imm
+  if ((insn & 0xBFE0FC00u) == 0x0C804000u) { // ST3 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B}, [Xn|SP], #imm|Xm
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::size_t reg_bytes = q ? 16u : 8u;
-    const auto base = checked_fp_mem_base();
-    if (!base.has_value()) {
-      return true;
-    }
-    const std::uint64_t addr = *base;
-    if (!store_vec_struct_bytes(addr, rt, reg_bytes, 3u)) {
-      data_abort(addr);
-      return true;
-    }
-    set_sp_or_reg(rn, addr + reg_bytes * 3u, false);
-    return true;
+    return exec_vec_struct_postindex(reg_bytes, 3u, false);
   }
 
   if ((insn & 0xBFFFFC00u) == 0x0C400000u) { // LD4 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B,Vt4.8B/16B}, [Xn|SP]
@@ -10671,8 +10650,9 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       return true;
     }
     const std::uint64_t addr = *base;
-    if (!load_vec_struct_bytes(addr, rt, reg_bytes, 4u)) {
-      data_abort(addr);
+    std::uint64_t fault_addr = addr;
+    if (!load_vec_struct_bytes(addr, rt, reg_bytes, 4u, fault_addr)) {
+      data_abort(fault_addr);
     }
     return true;
   }
@@ -10685,42 +10665,23 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       return true;
     }
     const std::uint64_t addr = *base;
-    if (!store_vec_struct_bytes(addr, rt, reg_bytes, 4u)) {
-      data_abort(addr);
+    std::uint64_t fault_addr = addr;
+    if (!store_vec_struct_bytes(addr, rt, reg_bytes, 4u, fault_addr)) {
+      data_abort(fault_addr);
     }
     return true;
   }
 
-  if ((insn & 0xBFFFFC00u) == 0x0CDF0000u) { // LD4 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B,Vt4.8B/16B}, [Xn|SP], #imm
+  if ((insn & 0xBFE0FC00u) == 0x0CC00000u) { // LD4 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B,Vt4.8B/16B}, [Xn|SP], #imm|Xm
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::size_t reg_bytes = q ? 16u : 8u;
-    const auto base = checked_fp_mem_base();
-    if (!base.has_value()) {
-      return true;
-    }
-    const std::uint64_t addr = *base;
-    if (!load_vec_struct_bytes(addr, rt, reg_bytes, 4u)) {
-      data_abort(addr);
-      return true;
-    }
-    set_sp_or_reg(rn, addr + reg_bytes * 4u, false);
-    return true;
+    return exec_vec_struct_postindex(reg_bytes, 4u, true);
   }
 
-  if ((insn & 0xBFFFFC00u) == 0x0C9F0000u) { // ST4 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B,Vt4.8B/16B}, [Xn|SP], #imm
+  if ((insn & 0xBFE0FC00u) == 0x0C800000u) { // ST4 {Vt.8B/16B,Vt2.8B/16B,Vt3.8B/16B,Vt4.8B/16B}, [Xn|SP], #imm|Xm
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::size_t reg_bytes = q ? 16u : 8u;
-    const auto base = checked_fp_mem_base();
-    if (!base.has_value()) {
-      return true;
-    }
-    const std::uint64_t addr = *base;
-    if (!store_vec_struct_bytes(addr, rt, reg_bytes, 4u)) {
-      data_abort(addr);
-      return true;
-    }
-    set_sp_or_reg(rn, addr + reg_bytes * 4u, false);
-    return true;
+    return exec_vec_struct_postindex(reg_bytes, 4u, false);
   }
 
   // LDTR/STTR family (unprivileged immediate). In this model FEAT_UAO is not
