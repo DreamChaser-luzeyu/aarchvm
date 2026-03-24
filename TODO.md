@@ -61,6 +61,13 @@
 - [x] 已收口 `SPSR_EL1` 在“AArch64-only + 当前 absent feature 集”下的 `RES0` / 固定位语义，避免 guest 通过 `MSR SPSR_EL1` 把 `UAO/DIT/TCO/SSBS/BTYPE/ALLINT/PM/PPEND/EXLOCK/PACM/UINJ` 等当前未实现位读回成 1。
 - [x] 已修正 `MSR SPSel` 的程序可见切换语义，确保切换 `PSTATE.SP` 时同步保存当前 `SP` bank 并装载目标 `SP_EL0/SP_EL1`。
 - [x] 已修正“同一条 load/store 指令在 helper 已经取同步异常后仍继续发起后续访存或再次 `data_abort()`”的问题，避免双重异常和错误的异常覆盖。
+- [x] 已收口 `FEAT_PAuth absent` 下 hint-space 与 integer / direct `PAuth` encoding 的语义边界，确保前者为 `NOP`、后者为 `UNDEFINED`，并修正 direct integer encodings 被 generic integer decode 误吞的问题。
+- [x] 已收口 `PACM` 在 `!FEAT_PAuth_LR` 下的语义，确保它作为 hint-space 指令表现为 `NOP` 而不是 `UNDEFINED`，并补裸机单测覆盖 EL1 / EL0 两种执行路径。
+- [x] 已收口 `LDRAA/LDRAB` 在 `!FEAT_PAuth` 下的语义，确保它们不再被 generic X load/store post/pre-index decode 误吞，而是稳定表现为 `UNDEFINED`，并补裸机单测覆盖 offset/pre-index 与“无访存、无写回”边界。
+- [x] 已把 `BRAA/BLRAA/RETAA/ERETAA` 以及 `RETAASPPCR/RETABSPPCR` 等 `PAuth/PAuth_LR` 分支返回类 absent-feature 语义固化进正式裸机回归，防止后续解码调整把它们误吞成普通 `BR/BLR/RET/ERET`。
+- [x] 已补 `RETAASPPC/RETABSPPC` immediate-return 形式的正式裸机回归，确认当前 `!FEAT_PAuth_LR` 模型下它们稳定表现为 `UNDEFINED`，且不会被其它分支类解码误吞。
+- [x] 已补 `RMIF/SETF8/SETF16` 的正式裸机回归，确认当前 `!FEAT_FlagM` 模型下它们在 EL1/EL0 都稳定表现为 `UNDEFINED`，且 `FAR_EL1` 保持当前未定义指令异常形态。
+- [x] 已补 `DGH/ESB/TSB/GCSB/CLRBHB/BTI/CHKFEAT/STSHH` 的 hint-space absent-feature 裸机回归，确认当前 feature 声明下它们稳定表现为 `NOP`，且 `CHKFEAT X16` 保持输入值不变。
 
 ### 3. SMP 内存模型与同步原语收尾
 
@@ -96,6 +103,8 @@
 - [x] 已补裸机单测确认 structured `LD1/ST1` `.16B` multiple-structures 在 `SCTLR_EL1.A=1` 下仍按 byte element 对齐工作，不应错误 fault。
 - [x] 已修正 whole-register structured `AdvSIMD` `LD1/ST1/LD2/ST2/LD3/ST3/LD4/ST4` 在跨页 fault 时的 `FAR_EL1` 报告，确保返回实际 faulting byte 而不是起始地址，并补裸机单测覆盖 sequential/interleaved、load/store 与 post-index fault 不写回。
 - [x] 已修正 single-structure lane/replicate `AdvSIMD` load/store 在多字节元素跨页 fault 时的 `FAR_EL1` 报告，并补裸机单测覆盖 lane load、replicate load 与 post-index lane store 的 faulting byte 和 fault 时不写回。
+- [x] 已补 `LDXP/LDAXP/STXP/STLXP` 32-bit pair 成功路径与 pair 对齐/fault 边界的裸机回归，并修正 `CASP` misaligned fault 的 `WnR` 断言为“atomic read 会先触发同一 fault 时 `WnR=0`”的架构语义。
+- [x] 已补 pair-exclusive / `CASP` 在“对齐合法、地址翻译合法、但写权限 fault”场景下的裸机回归，确认 `STXP/CASP` fault 时内存不更新、`STXP` status 不写回，且 `FAR_EL1/DFSC/WnR` 保持正确。
 
 ### 5. 正确性验证基础设施补强
 
@@ -111,6 +120,9 @@
 
 预期收益：
 - 后续再做性能优化、预解码、事件驱动、JIT 时，不会轻易把程序可见语义重新弄坏。
+
+当前进展：
+- [x] 已新增并修正一组 pair atomic 裸机回归，覆盖 `32-bit pair exclusive` 成功路径、`CASP` / pair-exclusive 对齐 fault，以及写权限 fault 下的“无部分提交 / status 不写回 / syndrome 正确”行为。
 
 ### 6. 建议实施顺序
 

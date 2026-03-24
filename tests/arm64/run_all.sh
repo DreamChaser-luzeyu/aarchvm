@@ -121,8 +121,17 @@ test "$(./build/aarchvm -bin tests/arm64/out/el0_hvc_smc_undef.bin -load 0x0 -en
 test "$(./build/aarchvm -bin tests/arm64/out/el1_hvc_smc_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'J'
 run_expect_trap brk_exception.bin 600000 B
 run_expect_trap hlt_undef.bin 600000 H
-test "$(./build/aarchvm -bin tests/arm64/out/pacm_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'M'
+test "$(./build/aarchvm -bin tests/arm64/out/pacm_absent_nop.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'M'
+test "$(./build/aarchvm -bin tests/arm64/out/ldraa_ldrab_absent_undef.bin -load 0x0 -entry 0x0 -steps 800000 | tr -d '\r\n')" = 'A'
+test "$(./build/aarchvm -bin tests/arm64/out/pauth_branch_absent_undef.bin -load 0x0 -entry 0x0 -steps 1200000 | tr -d '\r\n')" = 'B'
+test "$(./build/aarchvm -bin tests/arm64/out/pauth_absent_nop.bin -load 0x0 -entry 0x0 -steps 800000 | tr -d '\r\n')" = 'P'
+test "$(./build/aarchvm -bin tests/arm64/out/pauth_absent_integer_undef.bin -load 0x0 -entry 0x0 -steps 1200000 | tr -d '\r\n')" = 'U'
+test "$(./build/aarchvm -bin tests/arm64/out/pauth_lr_absent_integer_undef.bin -load 0x0 -entry 0x0 -steps 1200000 | tr -d '\r\n')" = 'L'
+test "$(./build/aarchvm -bin tests/arm64/out/pauth_lr_return_imm_absent_undef.bin -load 0x0 -entry 0x0 -steps 800000 | tr -d '\r\n')" = 'I'
+test "$(./build/aarchvm -bin tests/arm64/out/pauth_lr_return_absent_undef.bin -load 0x0 -entry 0x0 -steps 800000 | tr -d '\r\n')" = 'R'
 test "$(./build/aarchvm -bin tests/arm64/out/flagm_sys_undef.bin -load 0x0 -entry 0x0 -steps 800000 | tr -d '\r\n')" = 'G'
+test "$(./build/aarchvm -bin tests/arm64/out/flagm_integer_undef.bin -load 0x0 -entry 0x0 -steps 800000 | tr -d '\r\n')" = 'm'
+test "$(./build/aarchvm -bin tests/arm64/out/hint_feature_absent_nop.bin -load 0x0 -entry 0x0 -steps 800000 | tr -d '\r\n')" = 'K'
 test "$(./build/aarchvm -bin tests/arm64/out/system_feature_absent_undef.bin -load 0x0 -entry 0x0 -steps 1200000 | tr -d '\r\n')" = 'W'
 test "$(./build/aarchvm -bin tests/arm64/out/gcs_system_absent_undef.bin -load 0x0 -entry 0x0 -steps 1500000 | tr -d '\r\n')" = 'Q'
 test "$(./build/aarchvm -bin tests/arm64/out/dcps_drps_non_debug_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'D'
@@ -231,6 +240,8 @@ run mmu_tlb_asid_scope.bin 4000000
 run svc_sysreg_minimal.bin 300000
 run lse_atomics.bin 400000
 run casp_pair.bin 400000
+run_expect pair_atomic_more.bin 800000 Q
+run_expect pair_atomic_fault_no_partial.bin 5000000 K
 run lse_atomics_narrow.bin 400000
 run irq_spsel.bin 1800000
 run logic_misc.bin 300000

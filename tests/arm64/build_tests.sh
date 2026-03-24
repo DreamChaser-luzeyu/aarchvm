@@ -123,8 +123,17 @@ build_asm_prog el0_hvc_smc_undef
 build_asm_prog el1_hvc_smc_undef
 build_asm_prog brk_exception
 build_asm_prog hlt_undef
-build_asm_prog pacm_undef
+build_asm_prog pacm_absent_nop
+build_asm_prog ldraa_ldrab_absent_undef
+build_asm_prog pauth_branch_absent_undef
+build_asm_prog pauth_absent_nop
+build_asm_prog pauth_absent_integer_undef
+build_asm_prog pauth_lr_absent_integer_undef
+build_asm_prog pauth_lr_return_imm_absent_undef
+build_asm_prog pauth_lr_return_absent_undef
 build_asm_prog flagm_sys_undef
+build_asm_prog flagm_integer_undef
+build_asm_prog hint_feature_absent_nop
 build_asm_prog system_feature_absent_undef
 build_asm_prog gcs_system_absent_undef
 build_asm_prog dcps_drps_non_debug_undef
@@ -145,6 +154,8 @@ build_asm_prog spe_sysreg_absent
 build_asm_prog spe_pmb_sysreg_absent
 build_asm_prog lse_atomics
 build_asm_prog casp_pair
+build_asm_prog pair_atomic_more
+build_asm_prog pair_atomic_fault_no_partial
 build_asm_prog lse_atomics_narrow
 build_asm_prog irq_spsel
 build_asm_prog instr_legacy_each

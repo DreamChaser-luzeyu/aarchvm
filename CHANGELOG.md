@@ -1,3 +1,351 @@
+# 修改日志 2026-03-24 21:27
+
+## 本轮修改
+
+- 继续沿着 pair-exclusive / `CASP` 这条线收口程序可见 fault 语义，这轮没有继续改模拟器执行逻辑，而是修正并补强了刚加上的裸机回归，使其真正验证架构定义而不是被测试自身误伤：
+  - [tests/arm64/pair_atomic_more.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/pair_atomic_more.S)
+  - [tests/arm64/pair_atomic_fault_no_partial.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/pair_atomic_fault_no_partial.S)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 修正了 `pair_atomic_more` 里的两个测试假设错误：
+  - `CASP` misaligned fault 的 `WnR` 断言此前写成了 `1`，但按 ARM ARM 对 atomic read-modify-write fault 的定义，这类“read 也会先触发同一 fault”的场景应报告 `WnR=0`；
+  - `CASP` fault 后要检查的 `x2/x3/x8/x9` 之前被异常处理器自己当 scratch 寄存器踩掉，现已在 handler 中显式保存/恢复。
+- 重写了 [tests/arm64/pair_atomic_fault_no_partial.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/pair_atomic_fault_no_partial.S) 的 fault 构造方式：
+  - 原来试图做“跨页 pair store 第二半 fault”；
+  - 但对 `LDXP/STXP/CASP` 这类 pair access 来说，访问必须按 pair 总大小自然对齐，配合 4KiB 页粒度时，真正可达的跨页 pair fault 场景并不存在；
+  - 现改为先在 `RW` 页表上下文执行 `LDXP` 建立 monitor，再无访存切换到 `RO` 页表上下文，用 `TTBR0_EL1 + TLBI` 触发 `STXP/CASP` 写权限 fault；
+  - 新测试确认：
+    - `STXP` fault 时内存不更新；
+    - `STXP` 的 status 寄存器不被写回；
+    - `CASP` fault 时内存不更新；
+    - `FAR_EL1` 指向 fault address，`DFSC=permission fault level 3`，`WnR=1`。
+- 同时修正了新测试自身的异常处理器寄存器保存问题，避免 `x6` 被 handler 覆盖后误判成 guest 行为错误。
+
+## 本轮测试
+
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 60s bash -lc 'AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/pair_atomic_more.bin -load 0x0 -entry 0x0 -steps 1200000 > out/pair_atomic_more.log 2>&1'`
+- `timeout 60s bash -lc 'AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/pair_atomic_fault_no_partial.bin -load 0x0 -entry 0x0 -steps 6000000 > out/pair_atomic_fault_no_partial.log 2>&1'`
+- `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_20260324_pair.log 2>&1'`
+- `timeout 3600s bash -lc 'tests/linux/run_functional_suite.sh > out/linux_functional_suite_20260324_pair.log 2>&1'`
+- `timeout 3600s bash -lc 'tests/linux/run_functional_suite_smp.sh > out/linux_functional_suite_smp_20260324_pair.log 2>&1'`
+
+## 当前结论
+
+- 这轮确认此前新增的 pair-exclusive / `CASP` 执行逻辑没有被新回归推翻，真正的问题在于测试假设和 handler 自身寄存器破坏。
+- 当前正式回归已经覆盖：
+  - `32-bit pair exclusive` 成功路径；
+  - `LDXP/CASP` pair 对齐 fault；
+  - `STXP/CASP` 在合法对齐下遇到写权限 fault 时的“无部分提交 / 正确 syndrome / status 不写回”行为。
+- 本轮完成后：
+  - `tests/arm64/run_all.sh` 通过；
+  - Linux UMP 功能回归通过；
+  - Linux SMP 功能回归通过。
+
+# 修改日志 2026-03-24 16:42
+
+## 本轮修改
+
+- 继续审 `trap / undef / no-op` 边界，这轮没有发现新的模拟器执行行为 bug，但把一组仍未正式覆盖的 hint-space absent-feature 语义并入已有回归：
+  - [tests/arm64/hint_feature_absent_nop.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/hint_feature_absent_nop.S)
+  - 补充覆盖：
+    - `ESB`
+    - `TSB CSYNC`
+    - `GCSB DSYNC`
+    - `STSHH KEEP`
+    - `STSHH STRM`
+- 这使当前 `hint_feature_absent_nop` 正式回归可一次性覆盖：
+  - `DGH`
+  - `ESB`
+  - `TSB CSYNC`
+  - `GCSB DSYNC`
+  - `CLRBHB`
+  - `BTI c`
+  - `BTI jc`
+  - `CHKFEAT X16`
+  - `STSHH KEEP`
+  - `STSHH STRM`
+- 验证点保持不变：
+  - EL1 / EL0 下都不取异常；
+  - `CHKFEAT X16` 在 `!FEAT_CHK` 下保持输入值不变；
+  - 这些 hint-space 指令不会改写其它通用寄存器。
+- 更新：
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+
+## 本轮测试
+
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/hint_feature_absent_nop.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_20260324_hint_feature_absent_nop_round2.log 2>&1'`
+- `timeout 5400s bash -lc 'AARCHVM_FUNCTIONAL_LOG=out/linux_functional_20260324_hint_round2_ump.log tests/linux/run_functional_suite.sh'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh'`
+
+## 当前结论
+
+- 当前模型下一批依赖 hint-space 默认 `NOP` 的 optional 指令已经有正式回归兜底，不再只依赖“代码看起来会落到 default case”。
+- 继续审下来，下一处更值得投入的程序可见缺口，已经更偏向：
+  - `DMB/DSB/ISB` 与 SMP 可见内存序；
+  - `SEV/WFE/WFI` 与跨核唤醒/事件寄存器传播；
+  - `TLBI / IC IVAU / TTBR-SCTLR-TCR` 切换在多核下的传播边界。
+
+# 修改日志 2026-03-24 16:31
+
+## 本轮修改
+
+- 继续审 `trap / undef / no-op` 边界时，修正了 `!FEAT_FlagM` 下 integer-encoding `RMIF/SETF8/SETF16` 的真实语义缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - 旧实现里 `RMIF` 会落到 catch-all `UNDEFINED`，但 `SETF8/SETF16` 会被 generic integer decode 误吞；
+  - 现已在 `exec_data_processing()` 开头把 `RMIF` 与 `SETF8/SETF16` 显式按 `UNDEFINED` 收口，避免 future decode 调整再次别名到其它整数指令。
+- 修正了新加 `FlagM` 回归自身的两个问题，使它真正验证 faulting instruction 的程序可见行为，而不是被测试脚本自身的寄存器/标签错误误伤：
+  - [tests/arm64/flagm_integer_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/flagm_integer_undef.S)
+- 新增一条 hint-space absent-feature 正式回归，覆盖当前模型下应执行为 `NOP` 的几类指令：
+  - [tests/arm64/hint_feature_absent_nop.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/hint_feature_absent_nop.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - 覆盖：
+    - `DGH`
+    - `CLRBHB`
+    - `BTI c`
+    - `BTI jc`
+    - `CHKFEAT X16`
+  - 验证点：
+    - EL1 / EL0 两种执行路径都不取异常；
+    - `CHKFEAT X16` 在 `!FEAT_CHK` 下保持输入值不变；
+    - 这些 hint-space 指令不会偷偷改写其它通用寄存器。
+- 更新：
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+
+## 本轮测试
+
+- `timeout 600s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/flagm_integer_undef.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_20260324_flagm_fix.log 2>&1'`
+- `timeout 5400s bash -lc 'AARCHVM_FUNCTIONAL_LOG=out/linux_functional_20260324_flagm_fix_ump.log tests/linux/run_functional_suite.sh'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh'`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/hint_feature_absent_nop.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_20260324_hint_feature_absent_nop.log 2>&1'`
+
+## 当前结论
+
+- `RMIF/SETF8/SETF16` 在当前 `!FEAT_FlagM` 模型下已稳定表现为 `UNDEFINED`，不再依赖 catch-all 路径，也不会再被 generic integer family 误吞。
+- hint-space `DGH/CLRBHB/BTI/CHKFEAT` 在当前 feature 声明下已由正式裸机回归覆盖，确认它们稳定表现为 `NOP`。
+- 这轮完成后：
+  - `tests/arm64/run_all.sh` 通过；
+  - Linux UMP 功能回归通过；
+  - Linux SMP 功能回归通过。
+
+# 修改日志 2026-03-24 16:10
+
+## 本轮修改
+
+- 继续审 `FlagM/FlagM2` 相关 absent-feature 边界，并把 `RMIF/SETF8/SETF16` 固化进正式回归：
+  - [tests/arm64/flagm_integer_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/flagm_integer_undef.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 这轮先做了临时 probe，确认当前实现里 `RMIF/SETF8/SETF16` 虽然没有专门 helper，但会自然落到未实现路径，表现为 `UNDEFINED`，没有被误执行成别的整数指令。
+- 随后删除了临时 probe，并新增正式回归，覆盖：
+  - `RMIF`
+  - `SETF8`
+  - `SETF16`
+  - EL1 / EL0 两种执行路径
+  - `ESR_EL1/FAR_EL1` 的当前未定义指令异常形态
+
+## 本轮测试
+
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/flagm_integer_undef.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_20260324_flagm_integer_undef.log 2>&1'`
+- `timeout 5400s bash -lc 'AARCHVM_FUNCTIONAL_LOG=out/linux_functional_20260324_flagm_integer_undef_ump.log tests/linux/run_functional_suite.sh'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh'`
+
+## 当前结论
+
+- `FlagM` 相关的 system-encoding 和 integer-encoding absent-feature 边界现在都已有正式回归覆盖：
+  - `CFINV/AXFLAG/XAFLAG`
+  - `RMIF/SETF8/SETF16`
+
+# 修改日志 2026-03-24 16:02
+
+## 本轮修改
+
+- 继续收 `PAuth_LR` 返回类 absent-feature 边界，并补上上一轮还没正式覆盖的 immediate-return 形式：
+  - [tests/arm64/pauth_lr_return_imm_absent_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/pauth_lr_return_imm_absent_undef.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 这轮使用 `llvm-mc` 求出了当前 binutils 还不认助记符的两条 opcode，并固化为 `.inst`：
+  - `RETAASPPC` -> `0x5500001f`
+  - `RETABSPPC` -> `0x5520003f`
+- 新用例验证当前 `!FEAT_PAuth_LR` 模型下：
+  - `RETAASPPC/RETABSPPC` 应取 `UNDEFINED`
+  - 不应被通用分支或返回路径误当成其它指令执行
+
+## 本轮测试
+
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/pauth_lr_return_imm_absent_undef.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_20260324_pauth_lr_return_imm_absent_undef.log 2>&1'`
+- `timeout 5400s bash -lc 'AARCHVM_FUNCTIONAL_LOG=out/linux_functional_20260324_pauth_lr_return_imm_absent_undef_ump.log tests/linux/run_functional_suite.sh'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh'`
+
+## 当前结论
+
+- `PAuth_LR` 返回类的 immediate / register 两种 absent-feature 形式现在都已有正式回归覆盖。
+- 这块继续收窄了“主循环 fast path 改动后悄悄把高级返回类编码误吞”的风险。
+
+# 修改日志 2026-03-24 15:54
+
+## 本轮修改
+
+- 在上一轮修正 `LDRAA/LDRAB` 真 bug 后，继续审 `trap / undef / no-op` 的 `PAuth` 分支/返回边界，并把之前只在 `agent_work/` 中验证过的 probe 固化成正式回归：
+  - [tests/arm64/pauth_branch_absent_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/pauth_branch_absent_undef.S)
+  - [tests/arm64/pauth_lr_return_absent_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/pauth_lr_return_absent_undef.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 这轮没有再改模拟器执行语义，重点是把已确认正确的边界变成长期覆盖：
+  - `BRAA/BRAAZ/BRAB/BRABZ`
+  - `BLRAA/BLRAAZ/BLRAB/BLRABZ`
+  - `RETAA/RETAB`
+  - `ERETAA/ERETAB`
+  - `RETAASPPCR/RETABSPPCR`
+- 这些测试共同验证：
+  - 当前 `!FEAT_PAuth` / `!FEAT_PAuth_LR` 模型下，它们都应走 `UNDEFINED`
+  - 不应被 generic `BR/BLR/RET/ERET` 路径误执行
+  - ESR/FAR 维持当前未定义指令异常的程序可见形态
+
+## 本轮测试
+
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/pauth_branch_absent_undef.bin -load 0x0 -entry 0x0 -steps 1200000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/pauth_lr_return_absent_undef.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_20260324_pauth_branch_absent_undef.log 2>&1'`
+- `timeout 5400s bash -lc 'AARCHVM_FUNCTIONAL_LOG=out/linux_functional_20260324_pauth_branch_absent_undef_ump.log tests/linux/run_functional_suite.sh'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh'`
+
+## 当前结论
+
+- 当前主循环的 `RET/BR/BLR/ERET` fast path 没有把这批 `PAuth` 分支/返回编码误吞。
+- 这块现在已经有正式回归覆盖，后续继续审别的 absent-feature 语义时，不容易把这批边界带坏而不自知。
+
+# 修改日志 2026-03-24 15:42
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮收的是 `LDRAA/LDRAB` 在 `!FEAT_PAuth` 下的程序可见语义：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/ldraa_ldrab_absent_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/ldraa_ldrab_absent_undef.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 重新对照 ARM ARM 后确认：
+  - `LDRAA/LDRAB` 明确要求在 `!FEAT_PAuth` 时 `Decode_UNDEF`；
+  - 它们不是 hint-space `NOP`，也不能退化成普通 `LDR`。
+- 旧实现里，这组编码同时撞上了 generic X load/store post/pre-index 掩码：
+  - 慢路径 `exec_load_store()` 会把它们执行成普通 `LDR/STR` 家族；
+  - 预解码路径也会把它们缓存成 generic `LoadStore`，因此即使开着 predecode 也会稳定误执行。
+- 这轮把 `LDRAA/LDRAB` 的编码识别提取成通用 helper，并在两处同时收口：
+  - 预解码阶段不再把它们缓存成 generic load/store；
+  - 慢路径显式按 `UNDEFINED` 处理，保证当前 `ID_AA64ISAR*` 声明的 `FEAT_PAuth absent` 与行为一致。
+- 新增 [tests/arm64/ldraa_ldrab_absent_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/ldraa_ldrab_absent_undef.S)，覆盖：
+  - `LDRAA` / `LDRAB`
+  - offset / pre-index 两种 addressing mode
+  - pre-index 形式在 `UNDEFINED` 时不得偷偷执行访存或写回 base register
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/ldraa_ldrab_absent_undef.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 60s env AARCHVM_DEBUG_SLOW=1 ./build/aarchvm -bin tests/arm64/out/ldraa_ldrab_absent_undef.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_20260324_ldraa_ldrab_absent_undef.log 2>&1'`
+- `timeout 5400s bash -lc 'AARCHVM_FUNCTIONAL_LOG=out/linux_functional_20260324_ldraa_ldrab_absent_undef_ump.log tests/linux/run_functional_suite.sh'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh'`
+
+## 当前结论
+
+- `LDRAA/LDRAB` 在当前 `!FEAT_PAuth` 模型下已与 ARM ARM 对齐为 `UNDEFINED`。
+- 这组编码不再被 predecode 或慢路径误当成 generic X load/store post/pre-index 指令执行。
+
+# 修改日志 2026-03-24 15:25
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮继续收 `trap / undef / no-op` 的 `PAuth_LR` 边界，并纠正了上一轮遗留的一个错误结论：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/pacm_absent_nop.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/pacm_absent_nop.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 重新对照 ARM ARM 后确认：
+  - `PACM` 虽然属于 `FEAT_PAuth_LR`，但它位于 architectural hint space；
+  - 在 `!FEAT_PAuth_LR` 时，它的 architected 语义是 `Decode_NOP`，不是 `UNDEFINED`。
+- 旧实现把 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中的 `PACM` 当成 `UNDEFINED`，因此 guest 会错误收到 `EC=0x00` 的同步异常。
+- 这轮已把 `PACM` 修正为 absent-feature `NOP`，不再在 EL1/EL0 下错误取未定义指令异常。
+- 原来的 [tests/arm64/pacm_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/pacm_undef.S) 结论也因此被证实是错的；本轮将其更正为 [tests/arm64/pacm_absent_nop.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/pacm_absent_nop.S)，覆盖：
+  - EL1 下执行 `PACM` 不取异常；
+  - EL0 下执行 `PACM` 不取异常；
+  - EL0 后续通过 `SVC` 返回 EL1，验证 `PACM` 本身没有偷偷走进 `UNDEFINED` 路径。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/pacm_absent_nop.bin -load 0x0 -entry 0x0 -steps 600000`
+- `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_20260324_pacm_absent_nop.log 2>&1'`
+- `timeout 5400s bash -lc 'AARCHVM_FUNCTIONAL_LOG=out/linux_functional_20260324_pacm_absent_nop_ump.log tests/linux/run_functional_suite.sh'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh'`
+
+## 当前结论
+
+- `PACM` 在当前 `!FEAT_PAuth_LR` 模型下已经与 ARM ARM 对齐为 `NOP`。
+- 这也说明此前把 `PACM` 归类到“absent-feature 仍应 `UNDEFINED`”的判断是错误的；当前 `PAuth` / `PAuth_LR` 相关边界应区分：
+  - hint-space `PAuth` / `PACM`: absent 时 `NOP`
+  - integer / direct `PAuth` / `PAuth_LR`: absent 时 `UNDEFINED`
+
+# 修改日志 2026-03-24 15:10
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮收的是 `FEAT_PAuth` absent 时一批已分配 `PAuth` 指令的程序可见语义：
+  - [include/aarchvm/system_registers.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/system_registers.hpp)
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/pauth_absent_nop.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/pauth_absent_nop.S)
+  - [tests/arm64/pauth_absent_integer_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/pauth_absent_integer_undef.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 结合 ARM ARM 与当前 `ID_AA64ISAR1_EL1` / `ID_AA64ISAR2_EL1` 的声明复查后确认，当前模型对外声明 `FEAT_PAuth` absent。
+- 上一轮曾误把 direct / integer `PAuth` encodings 也放宽成 `NOP`；重新对照 ARM ARM 后确认这条结论是错的：
+  - hint-space `PAuth` encodings 在 `!FEAT_PAuth` 时为 `NOP`
+  - integer / direct `PAuth` encodings 在 `!FEAT_PAuth` 时为 `UNDEFINED`
+- 这轮据此修正了 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中的语义边界：
+  - 保留 hint-space `XPACLRI`、`PACIA1716/PACIB1716/AUTIA1716/AUTIB1716`、`PACIASP/PACIBSP/AUTIASP/AUTIBSP`、`PACIAZ/PACIBZ/AUTIAZ/AUTIBZ` 的 absent-feature `NOP` 行为；
+  - 删除对 integer / direct `XPACI/XPACD/PACIA/PACIB/PACDA/PACDB/AUTIA/AUTIB/AUTDA/AUTDB/...` 的错误 `NOP` 放宽，改为 `UNDEFINED`。
+- 同时修复了一个更隐蔽的 decode bug：
+  - 一批 integer / direct `PAuth` 编码会误撞到通用 integer `Data-processing (1 source)` 解码分支，被当成 `RBIT/REV16/REV/CLZ/CLS` 之类指令吞掉；
+  - 这轮在 generic integer decode 之前显式拦截该家族，确保当前 `!FEAT_PAuth` 模型下稳定走 `UNDEFINED`，不再 alias 成其它整数指令。
+- 测试侧相应调整为两组裸机单测：
+  - [tests/arm64/pauth_absent_nop.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/pauth_absent_nop.S)：只覆盖 hint-space `PAuth` absent -> `NOP`
+  - [tests/arm64/pauth_absent_integer_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/pauth_absent_integer_undef.S)：覆盖 integer / direct `PAuth` absent -> `UNDEFINED`
+
+## 本轮测试
+
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/pacm_undef.bin -load 0x0 -entry 0x0 -steps 600000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/pauth_absent_nop.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/pauth_absent_integer_undef.bin -load 0x0 -entry 0x0 -steps 1200000`
+- `timeout 5400s bash -lc 'tests/arm64/run_all.sh > out/arm64_run_all_20260324_pauth_integer_undef.log 2>&1'`
+- `timeout 5400s bash -lc 'AARCHVM_FUNCTIONAL_LOG=out/linux_functional_20260324_pauth_integer_undef_ump.log tests/linux/run_functional_suite.sh'`
+- `timeout 5400s bash -lc 'tests/linux/run_functional_suite_smp.sh'`
+
+## 当前结论
+
+- 当前 `ID_AA64ISAR*` 所声明的 `FEAT_PAuth absent` 已与两类编码空间的程序可见行为重新对齐：
+  - hint-space `PAuth` 保持 `NOP`
+  - integer / direct `PAuth` 稳定 `UNDEFINED`
+- 一批原本会 alias 到通用 integer decode 的 integer `PAuth` 编码也已经被拦下，不再悄悄执行成其它数据处理指令。
+
 # 修改日志 2026-03-23 11:18
 
 ## 本轮修改

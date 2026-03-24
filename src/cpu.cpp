@@ -44,6 +44,10 @@ bool brk_halt_mode_enabled() {
   return enabled;
 }
 
+constexpr bool is_ldraa_ldrab_encoding(std::uint32_t insn) {
+  return (insn & 0xFF200400u) == 0xF8200400u;
+}
+
 constexpr std::uint16_t kDecodedFlagSf = 1u << 0;
 constexpr std::uint16_t kDecodedFlagSetFlags = 1u << 1;
 constexpr std::uint16_t kDecodedFlagSub = 1u << 2;
@@ -2554,6 +2558,13 @@ Cpu::DecodedInsn Cpu::decode_insn(std::uint32_t insn) const {
     return decoded;
   }
 
+  // LDRAA/LDRAB share the generic X post/pre-index load/store bit-patterns.
+  // Leave them undecoded here so the slow path can apply the architected
+  // FEAT_PAuth-absent behavior instead of caching them as plain LDR/STR.
+  if (is_ldraa_ldrab_encoding(insn)) {
+    return decoded;
+  }
+
   if ((insn & 0xFFC00C00u) == 0x38400400u || (insn & 0xFFC00C00u) == 0x38000400u ||
       (insn & 0xFFC00C00u) == 0x38400C00u || (insn & 0xFFC00C00u) == 0x38000C00u ||
       (insn & 0xFFC00C00u) == 0x78400400u || (insn & 0xFFC00C00u) == 0x78000400u ||
@@ -4514,10 +4525,6 @@ bool Cpu::exec_system(std::uint32_t insn) {
   // but otherwise keep the current model aligned with the architected
   // absent-feature behavior for each allocated hint encoding.
   if ((insn & 0xFFFFF01Fu) == 0xD503201Fu) {
-    const auto undefined_current_instruction = [&]() {
-      enter_sync_exception(pc_ - 4u, 0x00u, 0u, false, 0u);
-      return true;
-    };
     const auto trap_wfx = [&](std::uint32_t iss) {
       enter_sync_exception(pc_ - 4u, 0x01u, iss, false, 0u);
       return true;
@@ -4551,9 +4558,9 @@ bool Cpu::exec_system(std::uint32_t insn) {
       event_register_ = true;
       return true;
     case 0x27u: // PACM
-      // FEAT_PAuth_LR is not implemented by the current model, so PACM must be
-      // UNDEFINED rather than a silently ignored hint.
-      return undefined_current_instruction();
+      // PACM lives in the architectural hint space. When FEAT_PAuth_LR is
+      // absent, Arm specifies it as Decode_NOP rather than UNDEFINED.
+      return true;
     default:
       return true;
     }
@@ -5504,6 +5511,43 @@ bool Cpu::exec_system(std::uint32_t insn) {
 bool Cpu::exec_data_processing(std::uint32_t insn) {
   const std::uint32_t rd = insn & 0x1Fu;
   const std::uint32_t rn = (insn >> 5) & 0x1Fu;
+
+  // FEAT_FlagM is absent in the current model. RMIF / SETF8 / SETF16 live in
+  // generic integer decode space, so intercept them explicitly before wider
+  // arithmetic/select families can mis-handle them as unrelated instructions.
+  if ((insn & 0xFFE07C10u) == 0xBA000400u ||   // RMIF Xn, #imm6, #mask
+      (insn & 0xFFFFBC1Fu) == 0x3A00080Du) {   // SETF8/SETF16 Wn
+    enter_sync_exception(pc_ - 4u, 0x00u, 0u, false, 0u);
+    return true;
+  }
+
+  // The current model declares FEAT_PAuth absent in ID_AA64ISAR*.
+  // Several direct integer PAuth encodings overlap with generic integer
+  // decode space (for example the 1-source RBIT/REV/CLZ/CLS masks). Treat
+  // these allocated encodings as UNDEFINED explicitly so they do not alias to
+  // unrelated integer instructions.
+  if ((insn & 0xFFFFFFE0u) == 0xDAC143E0u ||   // XPACI Xd
+      (insn & 0xFFFFFFE0u) == 0xDAC147E0u ||   // XPACD Xd
+      (insn & 0xFFFFFC00u) == 0xDAC10000u ||   // PACIA Xd, Xn|SP
+      (insn & 0xFFFFFFE0u) == 0xDAC123E0u ||   // PACIZA Xd
+      (insn & 0xFFFFFC00u) == 0xDAC10400u ||   // PACIB Xd, Xn|SP
+      (insn & 0xFFFFFFE0u) == 0xDAC127E0u ||   // PACIZB Xd
+      (insn & 0xFFFFFC00u) == 0xDAC10800u ||   // PACDA Xd, Xn|SP
+      (insn & 0xFFFFFFE0u) == 0xDAC12BE0u ||   // PACDZA Xd
+      (insn & 0xFFFFFC00u) == 0xDAC10C00u ||   // PACDB Xd, Xn|SP
+      (insn & 0xFFFFFFE0u) == 0xDAC12FE0u ||   // PACDZB Xd
+      (insn & 0xFFFFFC00u) == 0xDAC11000u ||   // AUTIA Xd, Xn|SP
+      (insn & 0xFFFFFFE0u) == 0xDAC133E0u ||   // AUTIZA Xd
+      (insn & 0xFFFFFC00u) == 0xDAC11400u ||   // AUTIB Xd, Xn|SP
+      (insn & 0xFFFFFFE0u) == 0xDAC137E0u ||   // AUTIZB Xd
+      (insn & 0xFFFFFC00u) == 0xDAC11800u ||   // AUTDA Xd, Xn|SP
+      (insn & 0xFFFFFFE0u) == 0xDAC13BE0u ||   // AUTDZA Xd
+      (insn & 0xFFFFFC00u) == 0xDAC11C00u ||   // AUTDB Xd, Xn|SP
+      (insn & 0xFFFFFFE0u) == 0xDAC13FE0u ||   // AUTDZB Xd
+      (insn & 0xFFE0FC00u) == 0x9AC03000u) {   // PACGA Xd, Xn, Xm|SP
+    enter_sync_exception(pc_ - 4u, 0x00u, 0u, false, 0u);
+    return true;
+  }
 
   const auto read_fp32 = [&](std::uint32_t idx) -> float {
     return std::bit_cast<float>(static_cast<std::uint32_t>(qregs_[idx][0] & 0xFFFFFFFFu));
@@ -9693,6 +9737,40 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
   const auto raw_mmu_write = [this](std::uint64_t va, std::uint64_t value, std::size_t size) -> bool {
     return mmu_write_value(va, value, size);
   };
+  const auto raw_mmu_write_pair_atomic =
+      [this](std::uint64_t addr, std::uint64_t first, std::uint64_t second, std::size_t elem_size) -> bool {
+    last_data_fault_va_.reset();
+    const std::size_t total_size = elem_size * 2u;
+    if (elem_size == 0u || total_size > 16u) {
+      return false;
+    }
+
+    std::array<std::uint64_t, 16> pas{};
+    for (std::size_t i = 0; i < total_size; ++i) {
+      std::uint64_t pa = 0;
+      if (!translate_data_address_fast(addr + i, AccessType::Write, &pa)) {
+        last_data_fault_va_ = addr + i;
+        return false;
+      }
+      pas[i] = pa;
+    }
+
+    for (std::size_t i = 0; i < total_size; ++i) {
+      const std::uint64_t value = (i < elem_size)
+                                      ? ((first >> (i * 8u)) & 0xFFu)
+                                      : ((second >> ((i - elem_size) * 8u)) & 0xFFu);
+      if (!bus_.write(pas[i], value, 1u)) {
+        last_data_fault_va_ = addr + i;
+        return false;
+      }
+      on_code_write(addr + i, pas[i], 1u);
+      if (callbacks_.memory_write) {
+        callbacks_.memory_write(*this, pas[i], 1u);
+      }
+    }
+    clear_exclusive_monitor();
+    return true;
+  };
   const auto mmu_read = [&](std::uint64_t va, std::size_t size) -> std::optional<std::uint64_t> {
     if (access_failed) {
       return std::nullopt;
@@ -9749,6 +9827,15 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     access_failed |= !ok;
     return ok;
   };
+
+  // LDRAA/LDRAB are architecturally allocated PAuth loads. With FEAT_PAuth
+  // absent they must decode as UNDEFINED, but their encodings collide with the
+  // generic X post/pre-index load/store masks handled later in this function.
+  if (is_ldraa_ldrab_encoding(insn)) {
+    enter_sync_exception(pc_ - 4u, 0x00u, 0u, false, 0u);
+    return true;
+  }
+
   const auto load_vec = [&](std::uint64_t addr, std::uint32_t vt, std::size_t size) -> bool {
     if (size == 16u) {
       const auto lo = mmu_read(addr, 8u);
@@ -10851,6 +10938,10 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     const std::uint32_t rt_pair = rt;
     const std::uint64_t mask = (elem_size == 8u) ? ~0ull : 0xFFFFFFFFull;
     const std::uint64_t addr = sp_or_reg(rn);
+    if (maybe_take_sp_alignment_fault(rn) ||
+        maybe_take_data_alignment_fault(addr, elem_size * 2u, AccessType::Read, true)) {
+      return true;
+    }
     const auto old_lo = mmu_strict_read(addr, elem_size);
     const auto old_hi = mmu_strict_read(addr + elem_size, elem_size);
     if (!old_lo.has_value() || !old_hi.has_value()) {
@@ -10864,7 +10955,7 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     const std::uint64_t desired_lo = ((elem_size == 8u) ? reg(rt_pair) : static_cast<std::uint64_t>(reg32(rt_pair))) & mask;
     const std::uint64_t desired_hi = ((elem_size == 8u) ? reg(rt_pair + 1u) : static_cast<std::uint64_t>(reg32(rt_pair + 1u))) & mask;
     if (old_lo_value == compare_lo && old_hi_value == compare_hi) {
-      if (!mmu_strict_write(addr, desired_lo, elem_size) || !mmu_strict_write(addr + elem_size, desired_hi, elem_size)) {
+      if (!raw_mmu_write_pair_atomic(addr, desired_lo, desired_hi, elem_size)) {
         data_abort(addr);
         return true;
       }
@@ -11003,34 +11094,56 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     }
   }
 
-  // LDXP / LDAXP / STXP / STLXP (64-bit pair exclusive).
+  // LDXP / LDAXP / STXP / STLXP (32/64-bit pair exclusive).
   {
     const std::uint32_t tag = insn & 0xFFE08000u;
-    if (tag == 0xC8600000u || tag == 0xC8608000u ||
-        tag == 0xC8200000u || tag == 0xC8208000u) {
+    std::size_t elem_size = 0u;
+    bool is_load = false;
+    if (tag == 0x88600000u || tag == 0x88608000u) {
+      elem_size = 4u;
+      is_load = true;
+    } else if (tag == 0x88200000u || tag == 0x88208000u) {
+      elem_size = 4u;
+    } else if (tag == 0xC8600000u || tag == 0xC8608000u) {
+      elem_size = 8u;
+      is_load = true;
+    } else if (tag == 0xC8200000u || tag == 0xC8208000u) {
+      elem_size = 8u;
+    }
+    if (elem_size != 0u) {
+      const std::size_t total_size = elem_size * 2u;
       const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
       const std::uint64_t addr = sp_or_reg(rn);
-      if (tag == 0xC8600000u || tag == 0xC8608000u) {
-        const auto v1 = mmu_strict_read(addr, 8);
-        const auto v2 = mmu_strict_read(addr + 8, 8);
+      if (is_load) {
+        if (maybe_take_sp_alignment_fault(rn) ||
+            maybe_take_data_alignment_fault(addr, total_size, AccessType::Read, true)) {
+          return true;
+        }
+        const auto v1 = mmu_strict_read(addr, elem_size);
+        const auto v2 = mmu_strict_read(addr + elem_size, elem_size);
         if (!v1.has_value() || !v2.has_value()) {
           data_abort(addr);
           return true;
         }
-        set_reg(rt, *v1);
-        set_reg(rt2, *v2);
-        set_exclusive_monitor(addr, 16u);
+        if (elem_size == 8u) {
+          set_reg(rt, *v1);
+          set_reg(rt2, *v2);
+        } else {
+          set_reg32(rt, static_cast<std::uint32_t>(*v1));
+          set_reg32(rt2, static_cast<std::uint32_t>(*v2));
+        }
+        set_exclusive_monitor(addr, total_size);
         return true;
       }
 
       const std::uint32_t rs = (insn >> 16) & 0x1Fu;
       bool match = false;
       if (maybe_take_sp_alignment_fault(rn) ||
-          maybe_take_data_alignment_fault(addr, 16u, AccessType::Write, true)) {
+          maybe_take_data_alignment_fault(addr, total_size, AccessType::Write, true)) {
         clear_exclusive_monitor();
         return true;
       }
-      if (!check_exclusive_monitor(addr, 16u, &match)) {
+      if (!check_exclusive_monitor(addr, total_size, &match)) {
         clear_exclusive_monitor();
         data_abort(addr);
         return true;
@@ -11040,7 +11153,9 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
         set_reg32(rs, 1u);
         return true;
       }
-      if (!raw_mmu_write(addr, reg(rt), 8) || !raw_mmu_write(addr + 8, reg(rt2), 8)) {
+      const std::uint64_t first = (elem_size == 8u) ? reg(rt) : static_cast<std::uint64_t>(reg32(rt));
+      const std::uint64_t second = (elem_size == 8u) ? reg(rt2) : static_cast<std::uint64_t>(reg32(rt2));
+      if (!raw_mmu_write_pair_atomic(addr, first, second, elem_size)) {
         data_abort(addr);
         return true;
       }

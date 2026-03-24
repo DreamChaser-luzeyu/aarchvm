@@ -9,7 +9,7 @@ _start:
     adr  x10, vectors
     msr  vbar_el1, x10
 
-    adr  x11, handled
+    adr  x11, fail_seen
     str  xzr, [x11]
 
 el1_pacm_insn:
@@ -17,9 +17,7 @@ el1_pacm_insn:
 
 after_el1_pacm:
     ldr  x12, [x11]
-    movz x13, #1
-    cmp  x12, x13
-    b.ne fail
+    cbnz x12, fail
 
     adr  x3, el0_pacm_entry
     msr  elr_el1, x3
@@ -28,9 +26,7 @@ after_el1_pacm:
 
 after_el0_pacm:
     ldr  x12, [x11]
-    movz x13, #3
-    cmp  x12, x13
-    b.ne fail
+    cbnz x12, fail
 
     movz x0, #'M'
     str  x0, [x1]
@@ -41,6 +37,8 @@ after_el0_pacm:
 el0_pacm_entry:
 el0_pacm_insn:
     .inst 0xD50324FF                  // pacm
+el0_svc_insn:
+    svc  #0
     b    fail
 
 fail:
@@ -68,41 +66,38 @@ sync_lower:
 sync_handler:
     mrs  x20, esr_el1
     ubfx x21, x20, #26, #6
-    cbnz x21, fail_from_handler      // undefined instruction: EC=0
+    mrs  x24, elr_el1
+    cmp  x21, #0x15                  // SVC from EL0
+    b.eq handle_el0_svc
+
+    cmp  x21, #0x00                  // unexpected UNDEFINED
+    b.ne fail_from_handler
     tbz  x20, #25, fail_from_handler
     and  x22, x20, #0x1ffffff
     cbnz x22, fail_from_handler
-
     mrs  x23, far_el1
     cbnz x23, fail_from_handler
-    mrs  x24, elr_el1
 
     adr  x25, el1_pacm_insn
     cmp  x24, x25
-    b.eq handle_el1_pacm
+    b.eq unexpected_pacm_undef
     adr  x25, el0_pacm_insn
     cmp  x24, x25
-    b.eq handle_el0_pacm
+    b.eq unexpected_pacm_undef
     b fail_from_handler
 
-handle_el1_pacm:
-    adr  x26, handled
-    movz x27, #1
-    str  x27, [x26]
-    adr  x28, after_el1_pacm
-    msr  elr_el1, x28
-    eret
-
-handle_el0_pacm:
-    adr  x26, handled
-    ldr  x27, [x26]
-    orr  x27, x27, #2
-    str  x27, [x26]
+handle_el0_svc:
     adr  x28, after_el0_pacm
     movz x29, #0x5                  // EL1h
     msr  spsr_el1, x29
     msr  elr_el1, x28
     eret
+
+unexpected_pacm_undef:
+    adr  x26, fail_seen
+    movz x27, #1
+    str  x27, [x26]
+    b fail_from_handler
 
 fail_from_handler:
     adr  x28, fail
@@ -113,5 +108,5 @@ fail_from_handler:
 
     .data
     .balign 8
-handled:
+fail_seen:
     .quad 0
