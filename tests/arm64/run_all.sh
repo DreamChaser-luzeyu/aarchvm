@@ -31,6 +31,13 @@ run_expect() {
   test "$(./build/aarchvm -bin "tests/arm64/out/${bin}" -load 0x0 -entry 0x0 -steps "$steps" | tr -d '\r\n')" = "$expected"
 }
 
+run_expect_smp() {
+  local bin="$1"
+  local steps="$2"
+  local expected="$3"
+  test "$(./build/aarchvm -smp 2 -bin "tests/arm64/out/${bin}" -load 0x0 -entry 0x0 -steps "$steps" | tr -d '\r\n')" = "$expected"
+}
+
 run_expect_trap() {
   local bin="$1"
   local steps="$2"
@@ -39,24 +46,24 @@ run_expect_trap() {
 }
 
 run_expect instr_legacy_each.bin 3000000 E
-run mmu_tlb_cache.bin 5000000
-run mmu_ttbr1_early.bin 3000000
-run mmu_tlb_vae1_scope.bin 4000000
-run mmu_ttbr_switch.bin 4000000
-run mmu_unmap_data_abort.bin 4000000
+run_expect mmu_tlb_cache.bin 5000000 Q
+run_expect mmu_ttbr1_early.bin 3000000 K
+run_expect mmu_tlb_vae1_scope.bin 4000000 1
+run_expect mmu_ttbr_switch.bin 4000000 2
+run_expect mmu_unmap_data_abort.bin 4000000 3
 test "$(./build/aarchvm -bin tests/arm64/out/mmu_cache_maint_fault.bin -load 0x0 -entry 0x0 -steps 4000000 | tr -d '\r\n')" = 'M'
-run mmu_tlbi_non_target.bin 4000000
-run mmu_l2_block_vmalle1.bin 4000000
-run mmu_at_tlb_observe.bin 4000000
-run mmu_at_el0_permissions.bin 4000000
-run mmu_ttbr_asid_mask.bin 4000000
-run mmu_perm_ro_write_abort.bin 4000000
+run_expect mmu_tlbi_non_target.bin 4000000 4
+run_expect mmu_l2_block_vmalle1.bin 4000000 5
+run_expect mmu_at_tlb_observe.bin 4000000 6
+run_expect mmu_at_el0_permissions.bin 4000000 A
+run_expect mmu_ttbr_asid_mask.bin 4000000 7
+run_expect mmu_perm_ro_write_abort.bin 4000000 8
 run_expect mmu_dc_cva_el0_perm_fault.bin 4000000 C
 run_expect mmu_dc_ivac_perm_fault.bin 4000000 I
 run_expect mmu_dc_zva_fault.bin 4000000 Z
 run_expect mmu_dc_zva_el0_perm_fault.bin 4000000 Z
 run_expect mmu_ic_ivau_el0_perm_fault.bin 4000000 I
-run mmu_xn_fetch_abort.bin 4000000
+run_expect mmu_xn_fetch_abort.bin 4000000 9
 run mmu_cross_page_load.bin 4000000
 run mmu_cross_page_store.bin 4000000
 run mmu_cross_page_fault_far_load.bin 4000000
@@ -198,6 +205,7 @@ run_expect fp_dn_misc.bin 400000 D
 run_expect fp_scalar_compare_misc.bin 300000 J
 run_expect fp_scalar_pairwise.bin 300000 Y
 run_expect fp_scalar_frecpx.bin 300000 X
+run_expect fp_ah_absent_ignored.bin 400000 H
 run fpsimd_ins_xtl.bin 300000
 run_expect fpsimd_fcvt_rounding.bin 400000 O
 run_expect fpsimd_fcvtxn_roundodd.bin 400000 X
@@ -209,19 +217,19 @@ run_expect fpsimd_fp_misc_rounding.bin 400000 V
 run_expect fpsimd_arith_fpcr_flags.bin 400000 N
 run_expect fpsimd_fp_pairwise.bin 400000 Z
 run_expect fpsimd_misc_more.bin 300000 G
-run fpsimd_arith_shift_perm.bin 300000
-run fpsimd_fp_vector.bin 400000
-run fpsimd_more_perm_fp.bin 400000
-run fpsimd_structured_ls.bin 400000
+run_expect fpsimd_arith_shift_perm.bin 300000 V
+run_expect fpsimd_fp_vector.bin 400000 V
+run_expect fpsimd_more_perm_fp.bin 400000 M
+run_expect fpsimd_structured_ls.bin 400000 T
 run_expect fpsimd_structured_ls_more.bin 600000 Y
 run_expect fpsimd_structured_ls_regpost.bin 900000 T
 run_expect fpsimd_structured_lane_ls.bin 800000 Y
-run fpsimd_widen_sat.bin 400000
-run cpacr_fp_trap.bin 300000
-run cpacr_fp_mem_trap.bin 300000
-run cpacr_fp_structured_trap.bin 400000
-run cpacr_fp_structured_regpost_trap.bin 400000
-run pstate_pan.bin 200000
+run_expect fpsimd_widen_sat.bin 400000 Y
+run_expect cpacr_fp_trap.bin 300000 C
+run_expect cpacr_fp_mem_trap.bin 300000 T
+run_expect cpacr_fp_structured_trap.bin 400000 T
+run_expect cpacr_fp_structured_regpost_trap.bin 400000 T
+run_expect pstate_pan.bin 200000 W
 run_expect pan_span_exception.bin 300000 S
 run_expect spsr_el1_res0_bits.bin 200000 P
 run_expect sctlr_endian_fixed_bits.bin 200000 E
@@ -281,19 +289,20 @@ run predecode_va_exec_switch.bin 5000000
 run predecode_load_store_min.bin 400000
 run predecode_logic_min.bin 400000
 run pl050_basic.bin 400000
-run_smp smp_mpidr_boot.bin 200000
-run_smp smp_sev_wfe.bin 200000
-run_smp smp_ldxr_invalidate.bin 200000
-./build/aarchvm -smp 2 -bin tests/arm64/out/smp_ldxr_invalidate_mmu.bin -load 0x0 -entry 0x0 -steps 1200000 | grep -qx 'V'
-run_smp smp_spinlock_ldaxr_stlxr.bin 600000
-run_smp smp_tlbi_broadcast.bin 1200000
-./build/aarchvm -smp 2 -bin tests/arm64/out/smp_wfe_monitor_event.bin -load 0x0 -entry 0x0 -steps 300000 | grep -qx 'M'
-./build/aarchvm -smp 2 -bin tests/arm64/out/smp_wfe_store_no_event.bin -load 0x0 -entry 0x0 -steps 300000 | grep -qx 'N'
-./build/aarchvm -smp 2 -smp-mode psci -bin tests/arm64/out/psci_cpu_on_min.bin -load 0x0 -entry 0x0 -steps 400000 | grep -qx 'P'
-./build/aarchvm -smp 2 -bin tests/arm64/out/smp_gic_sgi.bin -load 0x0 -entry 0x0 -steps 400000 | grep -qx 'G'
-./build/aarchvm -smp 2 -bin tests/arm64/out/smp_timer_ppi.bin -load 0x0 -entry 0x0 -steps 400000 | grep -qx 'T'
-./build/aarchvm -smp 2 -bin tests/arm64/out/smp_timer_rate.bin -load 0x0 -entry 0x0 -steps 400000 | grep -qx 'R'
-./build/aarchvm -smp 2 -bin tests/arm64/out/smp_dc_zva_invalidate.bin -load 0x0 -entry 0x0 -steps 400000 | grep -qx 'D'
+run_expect_smp smp_mpidr_boot.bin 200000 S
+run_expect_smp smp_sev_wfe.bin 200000 E
+run_expect_smp smp_ldxr_invalidate.bin 200000 I
+run_expect_smp smp_ldxr_invalidate_mmu.bin 1200000 V
+run_expect_smp smp_spinlock_ldaxr_stlxr.bin 600000 L
+run_expect_smp smp_lse_ldaddal_counter.bin 600000 J
+run_expect_smp smp_tlbi_broadcast.bin 1200000 M
+run_expect_smp smp_wfe_monitor_event.bin 300000 M
+run_expect_smp smp_wfe_store_no_event.bin 300000 N
+test "$(./build/aarchvm -smp 2 -smp-mode psci -bin tests/arm64/out/psci_cpu_on_min.bin -load 0x0 -entry 0x0 -steps 400000 | tr -d '\r\n')" = 'P'
+run_expect_smp smp_gic_sgi.bin 400000 G
+run_expect_smp smp_timer_ppi.bin 400000 T
+run_expect_smp smp_timer_rate.bin 400000 R
+run_expect_smp smp_dc_zva_invalidate.bin 400000 D
 AARCHVM_PS2_RX_SCRIPT='100:0x41,1000:0x42,5000:0x43' ./build/aarchvm -bin tests/arm64/out/ps2_rx_spaced.bin -load 0x0 -entry 0x0 -steps 200000 | grep -qx 'ABCP'
 
 PS2_SNAP=tests/arm64/out/ps2_rx_spaced.snap

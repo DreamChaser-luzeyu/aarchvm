@@ -84,6 +84,11 @@
 预期收益：
 - 提高 SMP Linux、锁、futex 风格同步、自旋锁、并发用户态 workload 的稳定性。
 
+当前进展：
+- [x] 已新增 `smp_lse_ldaddal_counter` 裸机单测，覆盖 2 核 `LDADDAL` 原子累加与 `LDAR/STLR + SEV/WFE` 配合下的可见性。
+- [x] 已把 `smp_mpidr_boot`、`smp_sev_wfe`、`smp_ldxr_invalidate`、`smp_spinlock_ldaxr_stlxr`、`smp_tlbi_broadcast`、`smp_wfe_*`、`smp_gic_sgi`、`smp_timer_*`、`smp_dc_zva_invalidate` 这组高价值 SMP 裸机用例升级为正式强断言回归，不再只是“跑一下不检查结果”。
+- [x] 已新增 Linux 用户态 `pthread_sync_stress`，覆盖 `pthread + sched_setaffinity + C11 atomic` 下的双线程计数与 release/acquire 消息传递。
+
 ### 4. MMU / 地址翻译 / fault 边界收尾
 
 目标：
@@ -105,6 +110,7 @@
 - [x] 已修正 single-structure lane/replicate `AdvSIMD` load/store 在多字节元素跨页 fault 时的 `FAR_EL1` 报告，并补裸机单测覆盖 lane load、replicate load 与 post-index lane store 的 faulting byte 和 fault 时不写回。
 - [x] 已补 `LDXP/LDAXP/STXP/STLXP` 32-bit pair 成功路径与 pair 对齐/fault 边界的裸机回归，并修正 `CASP` misaligned fault 的 `WnR` 断言为“atomic read 会先触发同一 fault 时 `WnR=0`”的架构语义。
 - [x] 已补 pair-exclusive / `CASP` 在“对齐合法、地址翻译合法、但写权限 fault”场景下的裸机回归，确认 `STXP/CASP` fault 时内存不更新、`STXP` status 不写回，且 `FAR_EL1/DFSC/WnR` 保持正确。
+- [x] 已新增 Linux 用户态 `mprotect_exec_stress`，覆盖 `RW -> NONE -> RX` 权限切换、动态代码生成执行、`__builtin___clear_cache` 以及 `fork/execve` 路径。
 
 ### 5. 正确性验证基础设施补强
 
@@ -123,6 +129,9 @@
 
 当前进展：
 - [x] 已新增并修正一组 pair atomic 裸机回归，覆盖 `32-bit pair exclusive` 成功路径、`CASP` / pair-exclusive 对齐 fault，以及写权限 fault 下的“无部分提交 / status 不写回 / syndrome 正确”行为。
+- [x] 已新增 `fp_ah_absent_ignored` 裸机单测，确认在当前 `ID_AA64ISAR1_EL1=0`、`!FEAT_AFP` 模型下，`FPCR.AH` 对 `FRECPE/FRECPS/FRSQRTE/FRSQRTS/FMAX` 的结果与 `FPSR` 都被正确忽略。
+- [x] 已把 Linux UMP/SMP 功能回归接入 `mprotect_exec_stress`、`pthread_sync_stress` 与 `run_dmesg_stress_check` 的显式输出断言和无乱码检查。
+- [x] 已新增 host 侧 `tests/linux/run_qemu_user_diff.sh`，把 `fpsimd_selftest`、`fpint_selftest`、`mprotect_exec_stress`、`pthread_sync_stress` 固化为 `qemu-aarch64` 差分验证入口。
 
 ### 6. 建议实施顺序
 

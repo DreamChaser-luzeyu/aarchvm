@@ -36,6 +36,12 @@ aarch64-linux-gnu-gcc -O2 -static -Wall -Wextra -march=armv8-a -mno-outline-atom
 aarch64-linux-gnu-gcc -O2 -static -Wall -Wextra -march=armv8-a -mno-outline-atomics -fno-tree-vectorize -fno-tree-slp-vectorize \
   -o out/read_tty_spin_affine tests/linux/read_tty_spin_affine.c
 
+aarch64-linux-gnu-gcc -O2 -static -Wall -Wextra -pthread -march=armv8-a -mno-outline-atomics -fno-tree-vectorize -fno-tree-slp-vectorize \
+  -o out/pthread_sync_stress tests/linux/pthread_sync_stress.c
+
+aarch64-linux-gnu-gcc -O2 -static -Wall -Wextra -march=armv8-a -mno-outline-atomics -fno-tree-vectorize -fno-tree-slp-vectorize \
+  -o out/mprotect_exec_stress tests/linux/mprotect_exec_stress.c
+
 if [[ ! -d out/initramfs-full-root ]]; then
   echo "missing out/initramfs-full-root; build the full busybox rootfs first" >&2
   exit 1
@@ -54,6 +60,8 @@ cp out/poll_tty_smoke out/initramfs-usertests-root/bin/poll_tty_smoke
 cp out/poll_tty_affine out/initramfs-usertests-root/bin/poll_tty_affine
 cp out/poll_pipe_tty_affine out/initramfs-usertests-root/bin/poll_pipe_tty_affine
 cp out/read_tty_spin_affine out/initramfs-usertests-root/bin/read_tty_spin_affine
+cp out/pthread_sync_stress out/initramfs-usertests-root/bin/pthread_sync_stress
+cp out/mprotect_exec_stress out/initramfs-usertests-root/bin/mprotect_exec_stress
 
 cat > out/initramfs-usertests-root/init <<'EOS'
 #!/bin/sh
@@ -167,6 +175,7 @@ echo DMESG-OK
 dmesg | grep hang >/dev/null || true
 echo GREP-HANG-OK
 /bin/run_dmesg_stress_check
+/bin/mprotect_exec_stress
 ping -c 1 127.0.0.1 || true
 mount
 df
@@ -190,6 +199,9 @@ while [ "$i" -le 3 ]; do
   cat /proc/cpuinfo
   /bin/busybox ls /bin >/dev/null
   ping -c 1 127.0.0.1 || true
+  /bin/pthread_sync_stress
+  /bin/mprotect_exec_stress
+  /bin/run_dmesg_stress_check
   i=$((i + 1))
 done
 echo SMP-FUNCTIONAL-SUITE PASS
@@ -207,6 +219,8 @@ chmod 0755 \
   out/initramfs-usertests-root/bin/poll_tty_affine \
   out/initramfs-usertests-root/bin/poll_pipe_tty_affine \
   out/initramfs-usertests-root/bin/read_tty_spin_affine \
+  out/initramfs-usertests-root/bin/pthread_sync_stress \
+  out/initramfs-usertests-root/bin/mprotect_exec_stress \
   out/initramfs-usertests-root/bin/run_dmesg_stress_check \
   out/initramfs-usertests-root/bin/run_usertests \
   out/initramfs-usertests-root/bin/run_functional_suite \

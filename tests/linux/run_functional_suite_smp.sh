@@ -25,7 +25,12 @@ print_cmd() {
   printf '\n'
 }
 
-if [[ ! -f "$SNAPSHOT" || ! -f "$BUILD_LOG" || ./build/aarchvm -nt "$BUILD_LOG" || tests/linux/build_linux_smp_shell_snapshot.sh -nt "$BUILD_LOG" ]]; then
+if [[ ! -f "$SNAPSHOT" ||
+      ! -f "$BUILD_LOG" ||
+      ./build/aarchvm -nt "$BUILD_LOG" ||
+      tests/linux/build_usertests_rootfs.sh -nt "$BUILD_LOG" ||
+      tests/linux/build_linux_shell_snapshot.sh -nt "$BUILD_LOG" ||
+      tests/linux/build_linux_smp_shell_snapshot.sh -nt "$BUILD_LOG" ]]; then
   ./tests/linux/build_linux_smp_shell_snapshot.sh >/dev/null
 fi
 
@@ -85,6 +90,10 @@ check $'processor\t: 0'
 check $'processor\t: 1'
 check 'PING 127.0.0.1 (127.0.0.1): 56 data bytes'
 check 'SMP-DMESG-OK:3'
+check 'PTHREAD-SYNC PASS'
+check 'EXECVE-OK'
+check 'MPROTECT-EXEC PASS'
+check 'DMESG-STRESS PASS'
 check 'ping: sendto: Network is unreachable'
 check 'SMP-FUNCTIONAL-SUITE PASS'
 
@@ -93,6 +102,31 @@ if rg -n 'Illegal instruction|Kernel panic|malloc\(|free\(\)|stack smashing|Atte
   tail -n 160 "$CLEAN_LOG" >&2
   exit 1
 fi
+
+python3 - "$CLEAN_LOG" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+data = path.read_bytes()
+start = b'DMESG-STRESS-BEGIN\n'
+end = b'DMESG-STRESS-END\n'
+pos = 0
+count = 0
+while True:
+    s = data.find(start, pos)
+    if s < 0:
+        break
+    e = data.find(end, s)
+    if e < 0:
+        raise SystemExit('missing DMESG-STRESS-END marker')
+    block = data[s + len(start):e]
+    bad = [b for b in block if b not in (9, 10) and not (32 <= b <= 126)]
+    if bad:
+        raise SystemExit(f'unexpected non-printable byte in SMP dmesg stress output: 0x{bad[0]:02x}')
+    count += 1
+    pos = e + len(end)
+if count == 0:
+    raise SystemExit('missing dmesg stress block in SMP functional suite log')
+PY
 
 LESS_CMD_RX='1000:0x73,5000:0x74,9000:0x74,13000:0x79,17000:0x20,21000:0x2d,25000:0x65,29000:0x63,33000:0x68,37000:0x6f,41000:0x0a,45000:0x64,49000:0x6d,53000:0x65,57000:0x73,61000:0x67,65000:0x20,69000:0x7c,73000:0x20,77000:0x6c,81000:0x65,85000:0x73,89000:0x73,93000:0x0a'
 LESS_BEGIN_CMD=(

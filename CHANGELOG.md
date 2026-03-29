@@ -1,3 +1,57 @@
+# 修改日志 2026-03-29 17:26
+
+## 本轮修改
+
+- 继续按“检查并完善 `SMP` 同步原语与 barrier / `MMU-TLB-fault` 一致性 / `FP-AdvSIMD` 细节 / 差分验证与 Linux 压力回归”这四条线补强验证基础设施，这一轮没有改模拟器执行逻辑，重点是把原先覆盖不足的高风险路径变成正式、可回归、可断言的测试：
+  - [tests/arm64/fp_ah_absent_ignored.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_ah_absent_ignored.S)
+  - [tests/arm64/smp_lse_ldaddal_counter.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/smp_lse_ldaddal_counter.S)
+  - [tests/linux/pthread_sync_stress.c](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/pthread_sync_stress.c)
+  - [tests/linux/mprotect_exec_stress.c](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/mprotect_exec_stress.c)
+  - [tests/linux/run_qemu_user_diff.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/run_qemu_user_diff.sh)
+- 补上两条新的裸机回归：
+  - `fp_ah_absent_ignored`：验证当前 `ID_AA64ISAR1_EL1=0`、`!FEAT_AFP` 模型下 `FPCR.AH` 被忽略，覆盖 `FRECPE/FRECPS/FRSQRTE/FRSQRTS/FMAX` 的结果和 `FPSR`。
+  - `smp_lse_ldaddal_counter`：验证 2 核 `LDADDAL` 原子累加在 `LDAR/STLR + SEV/WFE` 同步下的程序可见结果。
+- 把一组此前“只运行、不校验输出”的高价值裸机用例升级为正式强断言：
+  - `MMU/TLB/fault`：`mmu_tlb_cache`、`mmu_ttbr1_early`、`mmu_tlb_vae1_scope`、`mmu_ttbr_switch`、`mmu_unmap_data_abort`、`mmu_tlbi_non_target`、`mmu_l2_block_vmalle1`、`mmu_at_tlb_observe`、`mmu_at_el0_permissions`、`mmu_ttbr_asid_mask`、`mmu_perm_ro_write_abort`、`mmu_xn_fetch_abort`
+  - `FP/AdvSIMD`：`fp_ah_absent_ignored`、`fpsimd_arith_shift_perm`、`fpsimd_fp_vector`、`fpsimd_more_perm_fp`、`fpsimd_structured_ls`、`fpsimd_widen_sat`、`cpacr_fp_*`、`pstate_pan`
+  - `SMP`：`smp_mpidr_boot`、`smp_sev_wfe`、`smp_ldxr_invalidate`、`smp_spinlock_ldaxr_stlxr`、`smp_lse_ldaddal_counter`、`smp_tlbi_broadcast`、`smp_wfe_*`、`smp_gic_sgi`、`smp_timer_*`、`smp_dc_zva_invalidate`
+- 补强 Linux 用户态压力回归：
+  - [tests/linux/build_usertests_rootfs.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/build_usertests_rootfs.sh)
+  - [tests/linux/run_functional_suite.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/run_functional_suite.sh)
+  - [tests/linux/run_functional_suite_smp.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/run_functional_suite_smp.sh)
+  - 新增并接入 `mprotect_exec_stress` 与 `pthread_sync_stress`
+  - `UMP/SMP` 功能回归现在都会显式检查 `EXECVE-OK` / `MPROTECT-EXEC PASS`，`SMP` 额外检查 `PTHREAD-SYNC PASS`
+  - `SMP` 回归补上 `DMESG-STRESS` 输出块的可打印字符检查，防止刷屏乱码回归
+- 修复了一处回归基础设施缺陷：
+  - [tests/linux/run_functional_suite_smp.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/run_functional_suite_smp.sh)
+  - 之前 `SMP` 功能回归只按 `build_linux_smp_shell_snapshot.sh` 的时间戳决定是否重建快照，导致 `build_usertests_rootfs.sh` 或 `build_linux_shell_snapshot.sh` 更新后仍可能继续使用旧快照。
+  - 现在它会在 `aarchvm`、`build_usertests_rootfs.sh`、`build_linux_shell_snapshot.sh`、`build_linux_smp_shell_snapshot.sh` 任一更新时自动重建 `SMP` 快照。
+- 新增 host 侧差分验证入口：
+  - [tests/linux/run_qemu_user_diff.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/run_qemu_user_diff.sh)
+  - 用 `qemu-aarch64` 固化 `fpsimd_selftest`、`fpint_selftest`、`mprotect_exec_stress`、`pthread_sync_stress` 的输出检查，给 `FP/AdvSIMD` 与 Linux 用户态同步/权限切换语义提供一条轻量差分路径。
+- 更新：
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+
+## 本轮测试
+
+- `timeout 600s cmake --build build -j`
+- `timeout 300s ./tests/arm64/build_tests.sh`
+- `timeout 600s ./tests/linux/build_usertests_rootfs.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_ah_absent_ignored.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 60s ./build/aarchvm -smp 2 -bin tests/arm64/out/smp_lse_ldaddal_counter.bin -load 0x0 -entry 0x0 -steps 600000`
+- `timeout 60s qemu-aarch64 ./out/mprotect_exec_stress`
+- `timeout 60s qemu-aarch64 ./out/pthread_sync_stress`
+- `timeout 300s ./tests/linux/run_qemu_user_diff.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+
+## 当前结论
+
+- 这轮新增的 `FP/SMP/MMU/Linux` 强断言回归全部通过，当前没有被新测试直接打出的模拟器执行语义缺口。
+- 现阶段 `DMB/DSB/ISB` 虽仍是保守实现，但结合新增的 `LDADDAL`、`pthread_sync_stress`、`mprotect_exec_stress`、`TLBI`、`dmesg` 压力回归，至少当前模型下最容易出现程序可见错误的几条路径都已有正式覆盖。
+- 这轮真正修到的行为问题不在 CPU，而在测试基础设施：`SMP` 快照重建条件此前不完整，已经修正。
+
 # 修改日志 2026-03-24 21:27
 
 ## 本轮修改

@@ -77,6 +77,7 @@ build_asm_prog fp_dn_misc
 build_asm_prog fp_scalar_compare_misc
 build_asm_prog fp_scalar_pairwise
 build_asm_prog fp_scalar_frecpx
+build_asm_prog fp_ah_absent_ignored
 build_asm_prog fpsimd_ins_xtl
 build_asm_prog fpsimd_fcvt_rounding
 build_asm_prog fpsimd_fcvtxn_roundodd
@@ -241,6 +242,7 @@ build_asm_prog smp_sev_wfe
 build_asm_prog smp_ldxr_invalidate
 build_asm_prog smp_ldxr_invalidate_mmu
 build_asm_prog smp_spinlock_ldaxr_stlxr
+build_asm_prog smp_lse_ldaddal_counter
 build_asm_prog smp_tlbi_broadcast
 build_asm_prog smp_wfe_monitor_event
 build_asm_prog smp_wfe_store_no_event
