@@ -35,6 +35,8 @@
 - [x] 已收口 `FP/AdvSIMD` memory 路径在 `Rn==SP` 时的 `CheckSPAlignment()` 语义，覆盖 `LDR/STR Q`、single-structure lane/replicate 与 whole-register structured load/store，并补裸机单测验证 fault 优先于访问与写回。
 - [x] 已补 whole-register structured `LD1/ST1/LD2/ST2/LD3/ST3/LD4/ST4` 的 register post-index (`[Xn|SP], Xm`) 形式，并用裸机单测覆盖各家族的 load/store 与写回语义。
 - [x] 已修正 `CPACR/CPTR` 下 `FP/AdvSIMD` trap 识别漏掉 whole-register structured register post-index 的问题，确保 `[Xn|SP], Xm` 形式也先走 `EC=0x07` trap，并补裸机单测验证 trap 优先于写回。
+- [x] 已收口当前已实现的饱和 AdvSIMD 整数指令 `SQADD/UQADD/SQXTN/UQXTN` 的 `FPSR.QC` 程序可见语义，并把 `FPSR` 读写掩码收回到当前 AArch64-only 模型真正实现的 architected 位，避免 `QC/IDC/IOC..IXC` 之外的保留位被错误读回。
+- [x] 已收口当前 AArch64-only 模型的 `FPCR` direct read/write 掩码：把 `!FEAT_AFP` 下的 `NEP/AH/FIZ`、`!FEAT_FP16` 下的 `FZ16`、`!FEAT_EBF16` 下的 `EBF`，以及当前未实现 trapped FP exception 时本应 `RAZ/WI` 的 `IDE/IXE/UFE/OFE/DZE/IOE` 从 guest 可见状态中移除，并新增裸机回归锁定这组可见位。
 
 ### 2. 异常 / 系统寄存器 / trap 语义收尾
 

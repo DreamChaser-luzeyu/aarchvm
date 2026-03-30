@@ -36,6 +36,17 @@ constexpr std::uint64_t kMdscrEl1OsLockRwMask =
     kMdscrEl1IntdisMask | kMdscrEl1Tda | kMdscrEl1Hde | kMdscrEl1Err;
 constexpr std::uint64_t kMdscrEl1ArchitecturalMask =
     kMdscrEl1DirectRwMask | kMdscrEl1OsLockRwMask;
+constexpr std::uint64_t kFpsrArchitecturalMask =
+    (1ull << 27) | // QC
+    (1ull << 7)  | // IDC
+    0x1Full;       // IXC/UFC/OFC/DZC/IOC
+constexpr std::uint64_t kFpcrArchitecturalMask =
+    (1ull << 26) |  // AHP
+    (1ull << 25) |  // DN
+    (1ull << 24) |  // FZ
+    (0x3ull << 22) | // RMode
+    (0x3ull << 20) | // Stride
+    (0x7ull << 16);  // Len
 constexpr std::uint64_t kSpsrEl1SupportedMask =
     (0xFull << 28) | // NZCV
     (1ull << 22) |   // PAN (FEAT_PAN is implemented)
@@ -172,6 +183,18 @@ void SystemRegisters::reset() {
   fpsr_ = 0;
   pstate_ = {};
   pstate_.mode = 0x5u;
+}
+
+void SystemRegisters::set_fpsr(std::uint64_t value) {
+  fpsr_ = value & kFpsrArchitecturalMask;
+}
+
+void SystemRegisters::set_fpcr(std::uint64_t value) {
+  fpcr_ = value & kFpcrArchitecturalMask;
+}
+
+void SystemRegisters::fp_or_fpsr(std::uint64_t bits) {
+  fpsr_ = (fpsr_ | bits) & kFpsrArchitecturalMask;
 }
 
 bool SystemRegisters::read(std::uint32_t op0,
@@ -350,8 +373,8 @@ bool SystemRegisters::write(std::uint32_t op0,
   case SysReg(3, 0, 4, 2, 0): set_spsel(value); return true;
   case SysReg(3, 0, 14, 1, 0): cntkctl_el1_ = value; return true;
   case SysReg(3, 0, 4, 2, 3): pstate_.pan = (value & 1u) != 0; return true;
-  case SysReg(3, 3, 4, 4, 0): fpcr_ = value & 0xFFFFFFFFu; return true;
-  case SysReg(3, 3, 4, 4, 1): fpsr_ = value & 0xFFFFFFFFu; return true;
+  case SysReg(3, 3, 4, 4, 0): set_fpcr(value); return true;
+  case SysReg(3, 3, 4, 4, 1): set_fpsr(value); return true;
   case SysReg(3, 3, 4, 2, 0): set_nzcv(value); return true;
   default:
     return false;
@@ -749,6 +772,8 @@ bool SystemRegisters::load_state(std::istream& in, std::uint32_t version) {
          ((sctlr_el1_ = sanitize_sctlr_el1(sctlr_el1_, id_aa64mmfr0_el1_)), true) &&
          ((spsr_el1_ = sanitize_spsr_el1(spsr_el1_)), true) &&
          ((mdscr_el1_ = sanitize_mdscr_el1(mdscr_el1_)), true) &&
+         ((set_fpcr(fpcr_)), true) &&
+         ((set_fpsr(fpsr_)), true) &&
          ((dbgprcr_el1_ = sanitize_dbgprcr_el1(dbgprcr_el1_)), true);
 }
 

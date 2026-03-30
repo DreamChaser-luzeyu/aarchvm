@@ -7,7 +7,7 @@ _start:
     msr  cpacr_el1, x25
     isb
 
-    mov  x24, #(1 << 26)            // FPCR.AH
+    mov  x24, #(1 << 1)             // FPCR.AH
 
     // FEAT_AFP is absent in the current model, so FPCR.AH must be ignored.
     movz x23, #'1'

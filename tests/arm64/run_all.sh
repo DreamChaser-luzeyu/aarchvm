@@ -233,6 +233,7 @@ run_expect fp_scalar_compare_misc.bin 300000 J
 run_expect fp_scalar_pairwise.bin 300000 Y
 run_expect fp_scalar_frecpx.bin 300000 X
 run_expect fp_ah_absent_ignored.bin 400000 H
+run_expect fpcr_visible_bits.bin 200000 P
 run fpsimd_ins_xtl.bin 300000
 run_expect fpsimd_fcvt_rounding.bin 400000 O
 run_expect fpsimd_fcvtxn_roundodd.bin 400000 X
@@ -252,6 +253,7 @@ run_expect fpsimd_structured_ls_more.bin 600000 Y
 run_expect fpsimd_structured_ls_regpost.bin 900000 T
 run_expect fpsimd_structured_lane_ls.bin 800000 Y
 run_expect fpsimd_widen_sat.bin 400000 Y
+run_expect fpsr_qc_saturation.bin 400000 Q
 run_expect cpacr_fp_trap.bin 300000 C
 run_expect cpacr_fp_mem_trap.bin 300000 T
 run_expect cpacr_fp_structured_trap.bin 400000 T

@@ -78,6 +78,7 @@ build_asm_prog fp_scalar_compare_misc
 build_asm_prog fp_scalar_pairwise
 build_asm_prog fp_scalar_frecpx
 build_asm_prog fp_ah_absent_ignored
+build_asm_prog fpcr_visible_bits
 build_asm_prog fpsimd_ins_xtl
 build_asm_prog fpsimd_fcvt_rounding
 build_asm_prog fpsimd_fcvtxn_roundodd
@@ -97,6 +98,7 @@ build_asm_prog fpsimd_structured_ls_more
 build_asm_prog fpsimd_structured_ls_regpost
 build_asm_prog fpsimd_structured_lane_ls
 build_asm_prog fpsimd_widen_sat
+build_asm_prog fpsr_qc_saturation
 build_asm_prog cpacr_fp_trap
 build_asm_prog cpacr_fp_mem_trap
 build_asm_prog cpacr_fp_structured_trap

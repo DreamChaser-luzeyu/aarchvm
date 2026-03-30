@@ -1,3 +1,85 @@
+# 修改日志 2026-03-30 12:38
+
+## 本轮修改
+
+- 继续沿着 “Armv8-A 程序可见正确性收尾计划” 审 `FPCR/FP` 这条线，补上了一处直接 `MRS/MSR FPCR` 就能观察到的程序可见缺口：
+  - [src/system_registers.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/system_registers.cpp)
+  - [include/aarchvm/system_registers.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/system_registers.hpp)
+- 收口了当前 AArch64-only 模型的 `FPCR` direct read/write 掩码：
+  - 现在只保留当前模型真正支持、且对 guest architecturally visible 的 `AHP/DN/FZ/RMode/Stride/Len`。
+  - `!FEAT_AFP` 下的 `NEP/AH/FIZ`、`!FEAT_FP16` 下的 `FZ16`、`!FEAT_EBF16` 下的 `EBF`，以及当前未实现 trapped FP exception 时本应 `RAZ/WI` 的 `IDE/IXE/UFE/OFE/DZE/IOE`，现在都不会再被 guest 错误写回并读出。
+  - snapshot 恢复路径也会对 `FPCR` 做同样归一化，避免旧快照把本模型未实现的位重新暴露给 guest。
+- 修正了一个测试覆盖错误：
+  - [tests/arm64/fp_ah_absent_ignored.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_ah_absent_ignored.S) 之前把 `FPCR.AH` 错写成了 bit `26`，实际应为 bit `1`；现在已改成真正覆盖 `AH` 这条语义。
+- 新增正式裸机回归：
+  - [tests/arm64/fpcr_visible_bits.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpcr_visible_bits.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - 覆盖：
+    - `MSR FPCR, Xt` 写入全 1 后，只保留当前模型允许 guest 观察到的位；
+    - `AH/FIZ/NEP` 等当前模型里应为 `RES0/RAZ/WI` 的位不会被错误读回；
+    - 保留的 `AHP/DN/FZ/RMode/Stride/Len` 仍可正常读回。
+- 更新：
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+
+## 本轮测试
+
+- `timeout 600s cmake --build build -j`
+- `timeout 300s ./tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpcr_visible_bits.bin -load 0x0 -entry 0x0 -steps 200000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fp_ah_absent_ignored.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮之后，`FPCR` direct access 至少不再把当前模型里本就不该对 AArch64 guest 可见的 feature-absent / trap-absent 位暴露出去。
+- 但我仍不能自信宣称“Armv8-A 程序可见最小集已完整收口”；当前更值得继续审的，仍然是：
+  - `FPSR.IOC/DZC/OFC/UFC/IXC` 在剩余标量/向量 FP 路径中的一致性尾差；
+  - `FPCR.DN/FZ` 在少数尚未系统覆盖的 conversion / compare / misc 路径边界；
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 与异常类型的完全对齐。
+
+# 修改日志 2026-03-30 12:19
+
+## 本轮修改
+
+- 继续沿着 “Armv8-A 程序可见正确性收尾计划” 审 `FP/AdvSIMD + FPSR` 这条线，补上了一处真实的程序可见缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [src/system_registers.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/system_registers.cpp)
+  - [include/aarchvm/system_registers.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/system_registers.hpp)
+- 修正当前已实现的饱和 AdvSIMD 整数指令没有更新 `FPSR.QC` 的问题：
+  - `SQADD/UQADD` 向量形式现在在任一 lane 发生饱和时都会置位 `FPSR.QC`。
+  - `SQXTN/UQXTN` 及其 `*2` 路径现在在窄化时发生饱和也会置位 `FPSR.QC`。
+  - 未发生饱和时，这些路径不会错误污染 `FPSR.QC`。
+- 收口了 `FPSR` 的 direct read/write 掩码：
+  - 当前 AArch64-only 模型下，只保留 `QC`、`IDC`、`IOC/DZC/OFC/UFC/IXC` 这些已实现且 architecturally visible 的位。
+  - 之前可被 `MSR FPSR, Xt` 错误写回的 `N/Z/C/V` 和其它 `RES0` 位现在不再对 guest 可见。
+- 新增正式裸机回归：
+  - [tests/arm64/fpsr_qc_saturation.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsr_qc_saturation.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - 覆盖：
+    - `FPSR` 仅保留当前模型支持的 architected 位；
+    - `SQADD` 饱和/非饱和两条路径；
+    - `SQXTN` 与 `UQXTN` 的饱和置位行为。
+- 更新：
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+
+## 本轮测试
+
+- `timeout 600s cmake --build build -j`
+- `timeout 300s ./tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsr_qc_saturation.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这一轮之后，当前模型里已经实现出来的那批饱和 AdvSIMD 整数指令，至少不会再出现“结果被夹到了边界，但 `FPSR.QC` 仍旧静默不变”的程序可见错误。
+- `FPSR` 的 direct access 也不再把一堆当前模型里本就不该对 AArch64 guest 可见的保留位暴露出去。
+
 # 修改日志 2026-03-30 00:35
 
 ## 本轮修改

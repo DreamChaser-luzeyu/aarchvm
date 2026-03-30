@@ -368,6 +368,7 @@ constexpr std::uint64_t kFpsrOfc = 1ull << 2;
 constexpr std::uint64_t kFpsrUfc = 1ull << 3;
 constexpr std::uint64_t kFpsrIxc = 1ull << 4;
 constexpr std::uint64_t kFpsrIdc = 1ull << 7;
+constexpr std::uint64_t kFpsrQc = 1ull << 27;
 
 enum class FpToIntRoundingMode {
   TieEven,
@@ -7849,28 +7850,53 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     const auto src = qregs_[rn];
     auto dst = upper_half ? qregs_[rd] : std::array<std::uint64_t, 2>{0, 0};
     const std::uint32_t dst_base = upper_half ? lanes : 0u;
+    bool saturated = false;
     for (std::uint32_t lane = 0; lane < lanes; ++lane) {
       std::uint64_t narrowed = 0;
       const std::uint64_t value = vector_get_elem(src, src_esize_bits, lane);
       if (is_unsigned) {
         switch (dst_esize_bits) {
-          case 8u: narrowed = saturate_unsigned_value<std::uint8_t>(value); break;
-          case 16u: narrowed = saturate_unsigned_value<std::uint16_t>(value); break;
-          case 32u: narrowed = saturate_unsigned_value<std::uint32_t>(value); break;
+          case 8u:
+            saturated |= value > std::numeric_limits<std::uint8_t>::max();
+            narrowed = saturate_unsigned_value<std::uint8_t>(value);
+            break;
+          case 16u:
+            saturated |= value > std::numeric_limits<std::uint16_t>::max();
+            narrowed = saturate_unsigned_value<std::uint16_t>(value);
+            break;
+          case 32u:
+            saturated |= value > std::numeric_limits<std::uint32_t>::max();
+            narrowed = saturate_unsigned_value<std::uint32_t>(value);
+            break;
           default: return false;
         }
       } else {
         const std::int64_t signed_value = sign_extend(value, src_esize_bits);
         switch (dst_esize_bits) {
-          case 8u: narrowed = static_cast<std::uint64_t>(static_cast<std::uint8_t>(saturate_signed_value<std::int8_t>(signed_value))); break;
-          case 16u: narrowed = static_cast<std::uint64_t>(static_cast<std::uint16_t>(saturate_signed_value<std::int16_t>(signed_value))); break;
-          case 32u: narrowed = static_cast<std::uint64_t>(static_cast<std::uint32_t>(saturate_signed_value<std::int32_t>(signed_value))); break;
+          case 8u:
+            saturated |= signed_value < std::numeric_limits<std::int8_t>::min() ||
+                         signed_value > std::numeric_limits<std::int8_t>::max();
+            narrowed = static_cast<std::uint64_t>(static_cast<std::uint8_t>(saturate_signed_value<std::int8_t>(signed_value)));
+            break;
+          case 16u:
+            saturated |= signed_value < std::numeric_limits<std::int16_t>::min() ||
+                         signed_value > std::numeric_limits<std::int16_t>::max();
+            narrowed = static_cast<std::uint64_t>(static_cast<std::uint16_t>(saturate_signed_value<std::int16_t>(signed_value)));
+            break;
+          case 32u:
+            saturated |= signed_value < std::numeric_limits<std::int32_t>::min() ||
+                         signed_value > std::numeric_limits<std::int32_t>::max();
+            narrowed = static_cast<std::uint64_t>(static_cast<std::uint32_t>(saturate_signed_value<std::int32_t>(signed_value)));
+            break;
           default: return false;
         }
       }
       vector_set_elem(dst, dst_esize_bits, dst_base + lane, narrowed);
     }
     qregs_[rd] = dst;
+    if (saturated) {
+      sysregs_.fp_or_fpsr(kFpsrQc);
+    }
     return true;
   }
 
@@ -7954,6 +7980,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     const auto lhs = qregs_[rn];
     const auto rhs = qregs_[rm];
     std::array<std::uint64_t, 2> dst = {0, 0};
+    bool saturated = false;
     for (std::uint32_t lane = 0; lane < lanes; ++lane) {
       std::uint64_t value = 0;
       const std::uint64_t a = vector_get_elem(lhs, esize_bits, lane);
@@ -7961,24 +7988,50 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
       if (is_unsigned) {
         const std::uint64_t sum = a + b;
         switch (esize_bits) {
-          case 8u: value = saturate_unsigned_value<std::uint8_t>(sum); break;
-          case 16u: value = saturate_unsigned_value<std::uint16_t>(sum); break;
-          case 32u: value = saturate_unsigned_value<std::uint32_t>(sum); break;
-          case 64u: value = (sum < a) ? std::numeric_limits<std::uint64_t>::max() : sum; break;
+          case 8u:
+            saturated |= sum > std::numeric_limits<std::uint8_t>::max();
+            value = saturate_unsigned_value<std::uint8_t>(sum);
+            break;
+          case 16u:
+            saturated |= sum > std::numeric_limits<std::uint16_t>::max();
+            value = saturate_unsigned_value<std::uint16_t>(sum);
+            break;
+          case 32u:
+            saturated |= sum > std::numeric_limits<std::uint32_t>::max();
+            value = saturate_unsigned_value<std::uint32_t>(sum);
+            break;
+          case 64u:
+            saturated |= sum < a;
+            value = (sum < a) ? std::numeric_limits<std::uint64_t>::max() : sum;
+            break;
           default: return false;
         }
       } else {
         const std::int64_t sum = sign_extend(a, esize_bits) + sign_extend(b, esize_bits);
         switch (esize_bits) {
-          case 8u: value = static_cast<std::uint64_t>(static_cast<std::uint8_t>(saturate_signed_value<std::int8_t>(sum))); break;
-          case 16u: value = static_cast<std::uint64_t>(static_cast<std::uint16_t>(saturate_signed_value<std::int16_t>(sum))); break;
-          case 32u: value = static_cast<std::uint64_t>(static_cast<std::uint32_t>(saturate_signed_value<std::int32_t>(sum))); break;
+          case 8u:
+            saturated |= sum < std::numeric_limits<std::int8_t>::min() ||
+                         sum > std::numeric_limits<std::int8_t>::max();
+            value = static_cast<std::uint64_t>(static_cast<std::uint8_t>(saturate_signed_value<std::int8_t>(sum)));
+            break;
+          case 16u:
+            saturated |= sum < std::numeric_limits<std::int16_t>::min() ||
+                         sum > std::numeric_limits<std::int16_t>::max();
+            value = static_cast<std::uint64_t>(static_cast<std::uint16_t>(saturate_signed_value<std::int16_t>(sum)));
+            break;
+          case 32u:
+            saturated |= sum < std::numeric_limits<std::int32_t>::min() ||
+                         sum > std::numeric_limits<std::int32_t>::max();
+            value = static_cast<std::uint64_t>(static_cast<std::uint32_t>(saturate_signed_value<std::int32_t>(sum)));
+            break;
           case 64u: {
             const std::int64_t sa = static_cast<std::int64_t>(a);
             const std::int64_t sb = static_cast<std::int64_t>(b);
             if ((sb > 0 && sa > (std::numeric_limits<std::int64_t>::max() - sb))) {
+              saturated = true;
               value = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
             } else if ((sb < 0 && sa < (std::numeric_limits<std::int64_t>::min() - sb))) {
+              saturated = true;
               value = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::min());
             } else {
               value = static_cast<std::uint64_t>(sa + sb);
@@ -7991,6 +8044,9 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
       vector_set_elem(dst, esize_bits, lane, value);
     }
     qregs_[rd] = dst;
+    if (saturated) {
+      sysregs_.fp_or_fpsr(kFpsrQc);
+    }
     return true;
   }
 
