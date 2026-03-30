@@ -142,6 +142,7 @@
 当前进展：
 - [x] 已新增并修正一组 pair atomic 裸机回归，覆盖 `32-bit pair exclusive` 成功路径、`CASP` / pair-exclusive 对齐 fault，以及写权限 fault 下的“无部分提交 / status 不写回 / syndrome 正确”行为。
 - [x] 已新增 `fp_ah_absent_ignored` 裸机单测，确认在当前 `ID_AA64ISAR1_EL1=0`、`!FEAT_AFP` 模型下，`FPCR.AH` 对 `FRECPE/FRECPS/FRSQRTE/FRSQRTS/FMAX` 的结果与 `FPSR` 都被正确忽略。
+- [x] 已修正一处裸机回归覆盖空洞：`fpsimd_minimal` 现在显式断言当前模型下 `FPCR/FPSR` direct read/write 的掩码语义，`run_all.sh` 也不再只“运行看看”而会真正把这条失败记成回归失败。
 - [x] 已把 Linux UMP/SMP 功能回归接入 `mprotect_exec_stress`、`pthread_sync_stress` 与 `run_dmesg_stress_check` 的显式输出断言和无乱码检查。
 - [x] 已新增 host 侧 `tests/linux/run_qemu_user_diff.sh`，把 `fpsimd_selftest`、`fpint_selftest`、`mprotect_exec_stress`、`pthread_sync_stress` 固化为 `qemu-aarch64` 差分验证入口。
 

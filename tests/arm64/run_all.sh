@@ -186,7 +186,7 @@ test "$(./build/aarchvm -bin tests/arm64/out/spe_pmb_sysreg_absent.bin -load 0x0
 test "$(./build/aarchvm -bin tests/arm64/out/el0_cache_ops_privilege.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'C'
 test "$(./build/aarchvm -bin tests/arm64/out/el0_wfx_trap.bin -load 0x0 -entry 0x0 -steps 800000 | tr -d '\r\n')" = 'T'
 run ldtr_sttr_usercopy.bin 400000
-run fpsimd_minimal.bin 400000
+run_expect fpsimd_minimal.bin 400000 W
 run fpsimd_mvni.bin 400000
 run fpsimd_logic_more.bin 400000
 run fp_scalar_ls.bin 400000

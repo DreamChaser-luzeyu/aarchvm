@@ -14,14 +14,16 @@ _start:
     movk x2, #0xabcd, lsl #16
     msr  fpcr, x2
     mrs  x3, fpcr
-    cmp  x3, x2
+    movz x4, #0x03c5, lsl #16
+    cmp  x3, x4
     b.ne fail1
 
     movz x2, #0x00ff
     movk x2, #0x0055, lsl #16
     msr  fpsr, x2
     mrs  x3, fpsr
-    cmp  x3, x2
+    movz x4, #0x009f
+    cmp  x3, x4
     b.ne fail1
 
     ldp  q0, q1, [x0]

@@ -1,3 +1,36 @@
+# 修改日志 2026-03-30 13:15
+
+## 本轮修改
+
+- 继续沿着 “Armv8-A 程序可见正确性收尾计划” 往前审时，发现了一处会直接降低我们对回归结论可信度的测试空洞：
+  - [tests/arm64/fpsimd_minimal.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_minimal.S)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 具体问题是：
+  - 上一轮把 `FPCR/FPSR` direct access 掩码收口后，`fpsimd_minimal` 里那段“写 `FPCR/FPSR` 再读回”的老检查其实已经失效；
+  - 但 `run_all.sh` 对这个用例用的是 `run` 而不是 `run_expect`，所以即便它打印失败字符，整套裸机回归也不会报错。
+- 这轮修正了两部分：
+  - 把 `fpsimd_minimal` 的预期改成当前模型真实的 architected 语义：
+    - `FPCR` 现在期望读回当前模型允许可见的掩码值；
+    - `FPSR` 现在期望只保留 `QC/IDC/IOC..IXC` 这些当前模型实现的位。
+  - 把 `run_all.sh` 中的 `fpsimd_minimal` 从“只运行”改成“必须断言输出为 `W`”，避免今后再把这类失败静默吞掉。
+- 更新：
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+
+## 本轮测试
+
+- `timeout 300s ./tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_minimal.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮没有改模拟器执行逻辑，但修掉了一处真实的“回归能绿、语义其实已经坏了”的验证缺口。
+- 这也说明当前我仍不能自信宣称“Armv8-A 程序可见最小集已完整收口”：
+  - 一方面还存在剩余语义尾差需要继续审；
+  - 另一方面也还需要继续把这种只 smoke、不断言的旧测试逐步收紧。
+
 # 修改日志 2026-03-30 12:38
 
 ## 本轮修改
