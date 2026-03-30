@@ -45,6 +45,21 @@ run_expect_trap() {
   test "$(AARCHVM_BRK_MODE=trap ./build/aarchvm -bin "tests/arm64/out/${bin}" -load 0x0 -entry 0x0 -steps "$steps" | tr -d '\r\n')" = "$expected"
 }
 
+run_expect_halt_output() {
+  local bin="$1"
+  local steps="$2"
+  local expected="$3"
+  local out=""
+  local status=0
+  set +e
+  out="$(timeout 30s ./build/aarchvm -bin "tests/arm64/out/${bin}" -load 0x0 -entry 0x0 -steps "$steps" 2>&1)"
+  status=$?
+  set -e
+  test "$status" -eq 0
+  printf '%s' "$out" | grep -q "$expected"
+  printf '%s' "$out" | grep -q 'CPU-HALT'
+}
+
 run_expect instr_legacy_each.bin 3000000 E
 run_expect mmu_tlb_cache.bin 5000000 Q
 run_expect mmu_ttbr1_early.bin 3000000 K
@@ -85,6 +100,17 @@ run_expect eret_clears_exclusive.bin 300000 E
 ./build/aarchvm -bin tests/arm64/out/nested_sync_depth.bin -load 0x0 -entry 0x0 -steps 400000 | grep -qx 'P'
 run_expect gic_sysreg_id_consistency.bin 300000 J
 run_expect debug_sysreg_resource_bounds.bin 800000 K
+run_expect debug_break_watch_basic.bin 1200000 Q
+run_expect debug_halted_sysregs_undef.bin 800000 D
+run_expect debug_dcc_minimal.bin 800000 C
+run_expect debug_dcc_sysregs_minimal.bin 800000 Y
+run_expect debug_mdscr_dcc_flags.bin 800000 Z
+run_expect debug_misc_sysregs_minimal.bin 800000 O
+run_expect debug_ctrl_sysregs_minimal.bin 800000 P
+run_expect_trap debug_lock_exception_gating.bin 1200000 L
+run_expect_halt_output debug_software_access_halt_read.bin 400000 'TDA-READ'
+run_expect_halt_output debug_software_access_halt_write.bin 400000 'TDA-WRITE'
+run_expect software_step_basic.bin 1200000 T
 run gic_timer_sysreg.bin 2000000
 run gic_timer_rearm_no_spurious.bin 2000000
 run gic_timer_phys_sysreg.bin 2000000
@@ -126,6 +152,7 @@ test "$(./build/aarchvm -bin tests/arm64/out/msr_imm_absent_features_undef.bin -
 test "$(./build/aarchvm -bin tests/arm64/out/el0_eret_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'E'
 test "$(./build/aarchvm -bin tests/arm64/out/el0_hvc_smc_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'H'
 test "$(./build/aarchvm -bin tests/arm64/out/el1_hvc_smc_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'J'
+test "$(./build/aarchvm -bin tests/arm64/out/sp_special_sysreg_access.bin -load 0x0 -entry 0x0 -steps 800000 | tr -d '\r\n')" = 'R'
 run_expect_trap brk_exception.bin 600000 B
 run_expect_trap hlt_undef.bin 600000 H
 test "$(./build/aarchvm -bin tests/arm64/out/pacm_absent_nop.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'M'

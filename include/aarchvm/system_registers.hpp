@@ -13,6 +13,7 @@ public:
     bool z = false;
     bool c = false;
     bool v = false;
+    bool ss = false;
     bool il = false;
     bool d = false;
     bool a = false;
@@ -71,6 +72,19 @@ public:
   [[nodiscard]] std::uint64_t esr_el1() const { return esr_el1_; }
   [[nodiscard]] std::uint64_t far_el1() const { return far_el1_; }
   [[nodiscard]] std::uint64_t mdscr_el1() const { return mdscr_el1_; }
+  [[nodiscard]] bool monitor_debug_enabled() const;
+  [[nodiscard]] bool software_step_enabled() const;
+  [[nodiscard]] bool kernel_debug_enabled() const;
+  [[nodiscard]] bool debug_exceptions_enabled_current() const;
+  [[nodiscard]] bool breakpoint_watchpoint_enabled_current() const;
+  [[nodiscard]] bool software_step_active_pending() const;
+  [[nodiscard]] bool software_step_active_not_pending() const;
+  [[nodiscard]] bool software_step_state() const { return pstate_.ss; }
+  void set_software_step_state(bool value) { pstate_.ss = value; }
+  [[nodiscard]] std::uint64_t dbgbvr_el1(std::uint32_t index) const { return dbgbvr_el1_[index]; }
+  [[nodiscard]] std::uint64_t dbgbcr_el1(std::uint32_t index) const { return dbgbcr_el1_[index]; }
+  [[nodiscard]] std::uint64_t dbgwvr_el1(std::uint32_t index) const { return dbgwvr_el1_[index]; }
+  [[nodiscard]] std::uint64_t dbgwcr_el1(std::uint32_t index) const { return dbgwcr_el1_[index]; }
   [[nodiscard]] std::uint64_t tpidr_el0() const { return tpidr_el0_; }
   [[nodiscard]] std::uint64_t tpidr2_el0() const { return tpidr2_el0_; }
   [[nodiscard]] std::uint64_t tpidrro_el0() const { return tpidrro_el0_; }
@@ -96,15 +110,20 @@ public:
   void set_sp_el1(std::uint64_t value) { sp_el1_ = value; }
   void set_spsel(std::uint64_t value);
 
-  void exception_enter_irq(std::uint64_t return_pc);
-  void exception_enter_sync(std::uint64_t return_pc, std::uint32_t ec, std::uint32_t iss, bool far_valid, std::uint64_t far);
+  void exception_enter_irq(std::uint64_t return_pc, std::uint64_t saved_pstate_bits);
+  void exception_enter_sync(std::uint64_t return_pc,
+                            std::uint64_t saved_pstate_bits,
+                            std::uint32_t ec,
+                            std::uint32_t iss,
+                            bool far_valid,
+                            std::uint64_t far);
   [[nodiscard]] bool illegal_exception_return() const;
   [[nodiscard]] std::uint64_t exception_return(bool illegal_psr_state);
   void daif_set(std::uint8_t imm4);
   void daif_clr(std::uint8_t imm4);
 
   [[nodiscard]] bool save_state(std::ostream& out) const;
-  [[nodiscard]] bool load_state(std::istream& in, std::uint32_t version = 15);
+  [[nodiscard]] bool load_state(std::istream& in, std::uint32_t version = 19);
 
 private:
   static std::uint32_t make_key(std::uint32_t op0,
@@ -112,6 +131,8 @@ private:
                                 std::uint32_t crn,
                                 std::uint32_t crm,
                                 std::uint32_t op2);
+  [[nodiscard]] bool os_lock_active() const;
+  [[nodiscard]] bool double_lock_active() const;
 
   std::uint64_t sctlr_el1_ = 0x30D00800;
   std::uint64_t cpacr_el1_ = 0;
@@ -143,6 +164,9 @@ private:
   std::uint64_t contextidr_el1_ = 0;
   std::uint64_t osdlr_el1_ = 0;
   std::uint64_t oslar_el1_ = 0;
+  std::uint64_t oseccr_el1_ = 0;
+  std::uint64_t dbgclaim_el1_ = 0;
+  std::uint64_t dbgprcr_el1_ = 0;
   std::array<std::uint64_t, 16> dbgbvr_el1_{};
   std::array<std::uint64_t, 16> dbgbcr_el1_{};
   std::array<std::uint64_t, 16> dbgwvr_el1_{};

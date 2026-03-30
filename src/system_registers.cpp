@@ -17,6 +17,25 @@ constexpr std::uint32_t SysReg(std::uint32_t op0,
 constexpr std::uint64_t kSctlrEl1Span = 1ull << 23;
 constexpr std::uint64_t kSctlrEl1Ee = 1ull << 25;
 constexpr std::uint64_t kSctlrEl1E0e = 1ull << 24;
+constexpr std::uint64_t kMdscrEl1Kde = 1ull << 13;
+constexpr std::uint64_t kMdscrEl1Mde = 1ull << 15;
+constexpr std::uint64_t kMdscrEl1Hde = 1ull << 14;
+constexpr std::uint64_t kMdscrEl1Tdcc = 1ull << 12;
+constexpr std::uint64_t kMdscrEl1Err = 1ull << 6;
+constexpr std::uint64_t kMdscrEl1Ss = 1ull << 0;
+constexpr std::uint64_t kMdscrEl1IntdisMask = 0x3ull << 22;
+constexpr std::uint64_t kMdscrEl1Tda = 1ull << 21;
+constexpr std::uint64_t kMdscrEl1Txu = 1ull << 26;
+constexpr std::uint64_t kMdscrEl1Rxo = 1ull << 27;
+constexpr std::uint64_t kMdscrEl1Txfull = 1ull << 29;
+constexpr std::uint64_t kMdscrEl1Rxfull = 1ull << 30;
+constexpr std::uint64_t kMdscrEl1DirectRwMask =
+    kMdscrEl1Mde | kMdscrEl1Kde | kMdscrEl1Tdcc | kMdscrEl1Ss;
+constexpr std::uint64_t kMdscrEl1OsLockRwMask =
+    kMdscrEl1Rxfull | kMdscrEl1Txfull | kMdscrEl1Rxo | kMdscrEl1Txu |
+    kMdscrEl1IntdisMask | kMdscrEl1Tda | kMdscrEl1Hde | kMdscrEl1Err;
+constexpr std::uint64_t kMdscrEl1ArchitecturalMask =
+    kMdscrEl1DirectRwMask | kMdscrEl1OsLockRwMask;
 constexpr std::uint64_t kSpsrEl1SupportedMask =
     (0xFull << 28) | // NZCV
     (1ull << 22) |   // PAN (FEAT_PAN is implemented)
@@ -61,6 +80,34 @@ std::uint64_t sanitize_spsr_el1(std::uint64_t value) {
   return value & kSpsrEl1SupportedMask;
 }
 
+std::uint64_t sanitize_mdscr_el1(std::uint64_t value) {
+  return value & kMdscrEl1ArchitecturalMask;
+}
+
+std::uint64_t merge_mdscr_el1(std::uint64_t current, std::uint64_t value, bool os_lock_locked) {
+  const std::uint64_t writable =
+      kMdscrEl1Mde | kMdscrEl1Kde | kMdscrEl1Tdcc | kMdscrEl1Ss |
+      (os_lock_locked ? kMdscrEl1OsLockRwMask : 0ull);
+  const std::uint64_t merged = (current & ~writable) | (value & writable);
+  return sanitize_mdscr_el1(merged);
+}
+
+std::uint64_t sanitize_dbgprcr_el1(std::uint64_t value) {
+  return value & 0x1ull;
+}
+
+bool debug_exceptions_enabled_from_el(std::uint8_t from_el,
+                                      bool d_masked,
+                                      std::uint64_t mdscr_el1) {
+  if (from_el == 0u) {
+    return true;
+  }
+  if (from_el == 1u) {
+    return (mdscr_el1 & kMdscrEl1Kde) != 0u && !d_masked;
+  }
+  return false;
+}
+
 } // namespace
 
 void SystemRegisters::reset() {
@@ -93,7 +140,10 @@ void SystemRegisters::reset() {
   mair_el1_ = 0;
   contextidr_el1_ = 0;
   osdlr_el1_ = 0;
-  oslar_el1_ = 0;
+  oslar_el1_ = 1;
+  oseccr_el1_ = 0;
+  dbgclaim_el1_ = 0;
+  dbgprcr_el1_ = 0;
   dbgbvr_el1_.fill(0);
   dbgbcr_el1_.fill(0);
   dbgwvr_el1_.fill(0);
@@ -174,23 +224,39 @@ bool SystemRegisters::read(std::uint32_t op0,
   case SysReg(3, 0, 0, 4, 2): value = 0; return true; // ID_AA64PFR2_EL1
   case SysReg(3, 0, 0, 4, 5): value = 0; return true; // ID_AA64SMFR0_EL1
   case SysReg(3, 0, 0, 4, 7): value = 0; return true; // Reserved/unknown feature ID, keep disabled
+  case SysReg(2, 0, 1, 0, 0): value = 0; return true; // MDRAR_EL1: no debug ROM exposed.
   case SysReg(3, 0, 10, 2, 0): value = mair_el1_; return true;
   case SysReg(3, 0, 13, 0, 1): value = contextidr_el1_; return true;
   case SysReg(2, 0, 1, 3, 4): value = osdlr_el1_; return true;
   case SysReg(2, 0, 1, 1, 4): value = 0x8ull | ((oslar_el1_ & 1ull) << 1); return true;
+  case SysReg(2, 0, 0, 6, 2): value = (oslar_el1_ & 1ull) ? (oseccr_el1_ & 0xFFFFFFFFull) : 0ull; return true;
+  case SysReg(2, 0, 7, 8, 6): value = dbgclaim_el1_ & 0xFFull; return true;
+  case SysReg(2, 0, 7, 9, 6): value = dbgclaim_el1_ & 0xFFull; return true;
+  case SysReg(2, 0, 7, 14, 6): value = 0xAull; return true; // Non-secure debug implemented but disabled.
+  case SysReg(2, 0, 1, 4, 4): value = dbgprcr_el1_; return true;
   case SysReg(3, 0, 12, 0, 0): value = vbar_el1_; return true;
   case SysReg(3, 0, 4, 0, 1): value = elr_el1_; return true;
   case SysReg(3, 0, 4, 0, 0): value = spsr_el1_; return true;
   case SysReg(3, 0, 4, 2, 2): value = static_cast<std::uint64_t>(current_el()) << 2; return true;
   case SysReg(3, 0, 5, 2, 0): value = esr_el1_; return true;
   case SysReg(3, 0, 6, 0, 0): value = far_el1_; return true;
-  case SysReg(2, 0, 0, 2, 2): value = mdscr_el1_; return true;
+  case SysReg(2, 0, 0, 2, 2): value = sanitize_mdscr_el1(mdscr_el1_); return true;
   case SysReg(3, 3, 13, 0, 2): value = tpidr_el0_; return true;
   case SysReg(3, 3, 13, 0, 3): value = tpidrro_el0_; return true;
   case SysReg(3, 0, 13, 0, 4): value = tpidr_el1_; return true;
   case SysReg(3, 4, 13, 0, 2): value = tpidr_el2_; return true;
-  case SysReg(3, 0, 4, 1, 0): value = sp_el0_; return true;
-  case SysReg(3, 4, 4, 1, 0): value = sp_el1_; return true;
+  case SysReg(3, 0, 4, 1, 0):
+    if (current_el() == 0u || current_uses_sp_el0()) {
+      return false;
+    }
+    value = sp_el0_;
+    return true;
+  case SysReg(3, 4, 4, 1, 0):
+    if (current_el() <= 1u) {
+      return false;
+    }
+    value = sp_el1_;
+    return true;
   case SysReg(3, 0, 7, 4, 0): value = par_el1_; return true;
   case SysReg(3, 3, 4, 2, 1): value = daif(); return true;
   case SysReg(3, 0, 4, 2, 0): value = spsel_; return true;
@@ -241,18 +307,44 @@ bool SystemRegisters::write(std::uint32_t op0,
   case SysReg(3, 0, 13, 0, 1): contextidr_el1_ = value; return true;
   case SysReg(2, 0, 1, 3, 4): osdlr_el1_ = value; return true;
   case SysReg(2, 0, 1, 0, 4): oslar_el1_ = value & 1ull; return true;
+  case SysReg(2, 0, 0, 6, 2):
+    if ((oslar_el1_ & 1ull) != 0u) {
+      oseccr_el1_ = value & 0xFFFFFFFFull;
+    }
+    return true;
+  case SysReg(2, 0, 7, 8, 6):
+    dbgclaim_el1_ |= value & 0xFFull;
+    return true;
+  case SysReg(2, 0, 7, 9, 6):
+    dbgclaim_el1_ &= ~(value & 0xFFull);
+    return true;
+  case SysReg(2, 0, 1, 4, 4):
+    dbgprcr_el1_ = sanitize_dbgprcr_el1(value);
+    return true;
   case SysReg(3, 0, 12, 0, 0): vbar_el1_ = value; return true;
   case SysReg(3, 0, 4, 0, 1): elr_el1_ = value; return true;
   case SysReg(3, 0, 4, 0, 0): spsr_el1_ = sanitize_spsr_el1(value); return true;
   case SysReg(3, 0, 5, 2, 0): esr_el1_ = value; return true;
   case SysReg(3, 0, 6, 0, 0): far_el1_ = value; return true;
-  case SysReg(2, 0, 0, 2, 2): mdscr_el1_ = value; return true;
+  case SysReg(2, 0, 0, 2, 2):
+    mdscr_el1_ = merge_mdscr_el1(mdscr_el1_, value, (oslar_el1_ & 1ull) != 0u);
+    return true;
   case SysReg(3, 3, 13, 0, 2): tpidr_el0_ = value; return true;
   case SysReg(3, 3, 13, 0, 3): tpidrro_el0_ = value; return true;
   case SysReg(3, 0, 13, 0, 4): tpidr_el1_ = value; return true;
   case SysReg(3, 4, 13, 0, 2): tpidr_el2_ = value; return true;
-  case SysReg(3, 0, 4, 1, 0): sp_el0_ = value; return true;
-  case SysReg(3, 4, 4, 1, 0): sp_el1_ = value; return true;
+  case SysReg(3, 0, 4, 1, 0):
+    if (current_el() == 0u || current_uses_sp_el0()) {
+      return false;
+    }
+    sp_el0_ = value;
+    return true;
+  case SysReg(3, 4, 4, 1, 0):
+    if (current_el() <= 1u) {
+      return false;
+    }
+    sp_el1_ = value;
+    return true;
   case SysReg(3, 0, 7, 4, 0): par_el1_ = value; return true;
   case SysReg(3, 3, 4, 2, 1): set_daif(value); return true;
   case SysReg(3, 0, 4, 2, 0): set_spsel(value); return true;
@@ -297,6 +389,7 @@ std::uint64_t SystemRegisters::daif() const {
 
 std::uint64_t SystemRegisters::pstate_bits() const {
   return nzcv() |
+         (pstate_.ss ? (1ull << 21) : 0ull) |
          (pstate_.il ? (1ull << 20) : 0ull) |
          daif() |
          (pstate_.pan ? (1ull << 22) : 0ull) |
@@ -305,6 +398,7 @@ std::uint64_t SystemRegisters::pstate_bits() const {
 
 void SystemRegisters::set_pstate_bits(std::uint64_t value) {
   set_nzcv(value);
+  pstate_.ss = ((value >> 21) & 1u) != 0;
   pstate_.il = ((value >> 20) & 1u) != 0;
   set_daif(value);
   pstate_.pan = ((value >> 22) & 1u) != 0;
@@ -330,12 +424,61 @@ void SystemRegisters::set_spsel(std::uint64_t value) {
   }
 }
 
-void SystemRegisters::exception_enter_irq(std::uint64_t return_pc) {
+bool SystemRegisters::software_step_enabled() const {
+  return (mdscr_el1_ & kMdscrEl1Ss) != 0u;
+}
+
+bool SystemRegisters::os_lock_active() const {
+  return (oslar_el1_ & 1u) != 0u;
+}
+
+bool SystemRegisters::double_lock_active() const {
+  return (osdlr_el1_ & 1u) != 0u && (dbgprcr_el1_ & 1u) == 0u;
+}
+
+bool SystemRegisters::monitor_debug_enabled() const {
+  return (mdscr_el1_ & kMdscrEl1Mde) != 0u;
+}
+
+bool SystemRegisters::kernel_debug_enabled() const {
+  return (mdscr_el1_ & kMdscrEl1Kde) != 0u;
+}
+
+bool SystemRegisters::debug_exceptions_enabled_current() const {
+  return debug_exceptions_enabled_from_el(current_el(), pstate_.d, mdscr_el1_);
+}
+
+bool SystemRegisters::breakpoint_watchpoint_enabled_current() const {
+  return monitor_debug_enabled() &&
+         debug_exceptions_enabled_current() &&
+         !os_lock_active() &&
+         !double_lock_active();
+}
+
+bool SystemRegisters::software_step_active_pending() const {
+  return software_step_enabled() &&
+         debug_exceptions_enabled_current() &&
+         !os_lock_active() &&
+         !double_lock_active() &&
+         !pstate_.ss;
+}
+
+bool SystemRegisters::software_step_active_not_pending() const {
+  return software_step_enabled() &&
+         debug_exceptions_enabled_current() &&
+         !os_lock_active() &&
+         !double_lock_active() &&
+         pstate_.ss;
+}
+
+void SystemRegisters::exception_enter_irq(std::uint64_t return_pc,
+                                          std::uint64_t saved_pstate_bits) {
   elr_el1_ = return_pc;
-  spsr_el1_ = pstate_bits();
+  spsr_el1_ = sanitize_spsr_el1(saved_pstate_bits);
   esr_el1_ = 0;
   pstate_.mode = 0x5u;
   spsel_ = 1u;
+  pstate_.ss = false;
   pstate_.il = false;
   pstate_.d = true;
   pstate_.a = true;
@@ -347,12 +490,13 @@ void SystemRegisters::exception_enter_irq(std::uint64_t return_pc) {
 }
 
 void SystemRegisters::exception_enter_sync(std::uint64_t return_pc,
+                                           std::uint64_t saved_pstate_bits,
                                            std::uint32_t ec,
                                            std::uint32_t iss,
                                            bool far_valid,
                                            std::uint64_t far) {
   elr_el1_ = return_pc;
-  spsr_el1_ = pstate_bits();
+  spsr_el1_ = sanitize_spsr_el1(saved_pstate_bits);
   // This model only supports AArch64 guest execution, so synchronous exceptions
   // are always reported as arising from a 32-bit A64 instruction.
   esr_el1_ = (static_cast<std::uint64_t>(ec & 0x3Fu) << 26) |
@@ -361,6 +505,7 @@ void SystemRegisters::exception_enter_sync(std::uint64_t return_pc,
   far_el1_ = far_valid ? far : 0;
   pstate_.mode = 0x5u;
   spsel_ = 1u;
+  pstate_.ss = false;
   pstate_.il = false;
   pstate_.d = true;
   pstate_.a = true;
@@ -387,15 +532,27 @@ bool SystemRegisters::illegal_exception_return() const {
 }
 
 std::uint64_t SystemRegisters::exception_return(bool illegal_psr_state) {
+  const bool enabled_at_source = debug_exceptions_enabled_from_el(current_el(), pstate_.d, mdscr_el1_);
+  const std::uint8_t dest_el = illegal_psr_state ? current_el()
+                                                 : static_cast<std::uint8_t>((spsr_el1_ >> 2) & 0x3u);
+  const bool dest_d_masked = ((spsr_el1_ >> 9) & 1u) != 0u;
+  const bool enabled_at_dest = debug_exceptions_enabled_from_el(dest_el, dest_d_masked, mdscr_el1_);
+  const bool restore_software_step =
+      software_step_enabled() &&
+      !enabled_at_source &&
+      enabled_at_dest &&
+      (((spsr_el1_ >> 21) & 1u) != 0u);
   if (illegal_psr_state) {
     set_nzcv(spsr_el1_);
     set_daif(spsr_el1_);
     pstate_.pan = ((spsr_el1_ >> 22) & 1u) != 0;
+    pstate_.ss = restore_software_step;
     pstate_.il = true;
     return elr_el1_;
   }
 
   set_pstate_bits(spsr_el1_);
+  pstate_.ss = restore_software_step;
   return elr_el1_;
 }
 
@@ -469,6 +626,9 @@ bool SystemRegisters::save_state(std::ostream& out) const {
          snapshot_io::write(out, contextidr_el1_) &&
          snapshot_io::write(out, osdlr_el1_) &&
          snapshot_io::write(out, oslar_el1_) &&
+         snapshot_io::write(out, oseccr_el1_) &&
+         snapshot_io::write(out, dbgclaim_el1_) &&
+         snapshot_io::write(out, dbgprcr_el1_) &&
          snapshot_io::write_array(out, dbgbvr_el1_) &&
          snapshot_io::write_array(out, dbgbcr_el1_) &&
          snapshot_io::write_array(out, dbgwvr_el1_) &&
@@ -499,6 +659,7 @@ bool SystemRegisters::save_state(std::ostream& out) const {
          snapshot_io::write_bool(out, pstate_.z) &&
          snapshot_io::write_bool(out, pstate_.c) &&
          snapshot_io::write_bool(out, pstate_.v) &&
+         snapshot_io::write_bool(out, pstate_.ss) &&
          snapshot_io::write_bool(out, pstate_.il) &&
          snapshot_io::write_bool(out, pstate_.d) &&
          snapshot_io::write_bool(out, pstate_.a) &&
@@ -509,6 +670,7 @@ bool SystemRegisters::save_state(std::ostream& out) const {
 }
 
 bool SystemRegisters::load_state(std::istream& in, std::uint32_t version) {
+  pstate_.ss = false;
   pstate_.il = false;
   return snapshot_io::read(in, sctlr_el1_) &&
          snapshot_io::read(in, cpacr_el1_) &&
@@ -540,6 +702,9 @@ bool SystemRegisters::load_state(std::istream& in, std::uint32_t version) {
          snapshot_io::read(in, contextidr_el1_) &&
          snapshot_io::read(in, osdlr_el1_) &&
          snapshot_io::read(in, oslar_el1_) &&
+         ((version < 18) || snapshot_io::read(in, oseccr_el1_)) &&
+         ((version < 18) || snapshot_io::read(in, dbgclaim_el1_)) &&
+         ((version < 19) || snapshot_io::read(in, dbgprcr_el1_)) &&
          snapshot_io::read_array(in, dbgbvr_el1_) &&
          snapshot_io::read_array(in, dbgbcr_el1_) &&
          snapshot_io::read_array(in, dbgwvr_el1_) &&
@@ -570,6 +735,7 @@ bool SystemRegisters::load_state(std::istream& in, std::uint32_t version) {
          snapshot_io::read_bool(in, pstate_.z) &&
          snapshot_io::read_bool(in, pstate_.c) &&
          snapshot_io::read_bool(in, pstate_.v) &&
+         ((version < 16) || snapshot_io::read_bool(in, pstate_.ss)) &&
          ((version < 15) || snapshot_io::read_bool(in, pstate_.il)) &&
          snapshot_io::read_bool(in, pstate_.d) &&
          snapshot_io::read_bool(in, pstate_.a) &&
@@ -577,8 +743,13 @@ bool SystemRegisters::load_state(std::istream& in, std::uint32_t version) {
          snapshot_io::read_bool(in, pstate_.f) &&
          snapshot_io::read_bool(in, pstate_.pan) &&
          snapshot_io::read(in, pstate_.mode) &&
+         ((version >= 18) || ((oseccr_el1_ = 0), true)) &&
+         ((version >= 18) || ((dbgclaim_el1_ = 0), true)) &&
+         ((version >= 19) || ((dbgprcr_el1_ = 0), true)) &&
          ((sctlr_el1_ = sanitize_sctlr_el1(sctlr_el1_, id_aa64mmfr0_el1_)), true) &&
-         ((spsr_el1_ = sanitize_spsr_el1(spsr_el1_)), true);
+         ((spsr_el1_ = sanitize_spsr_el1(spsr_el1_)), true) &&
+         ((mdscr_el1_ = sanitize_mdscr_el1(mdscr_el1_)), true) &&
+         ((dbgprcr_el1_ = sanitize_dbgprcr_el1(dbgprcr_el1_)), true);
 }
 
 

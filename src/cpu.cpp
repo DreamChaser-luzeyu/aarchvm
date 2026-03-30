@@ -59,6 +59,20 @@ constexpr std::uint16_t kDecodedFlagResult64 = 1u << 7;
 constexpr std::uint16_t kDecodedFlagInvert = 1u << 8;
 constexpr std::uint32_t kTimerVirtPpiIntId = 27u;
 constexpr std::uint32_t kTimerPhysPpiIntId = 30u;
+constexpr std::uint32_t kDebugExceptionIfsc = 0x22u;
+constexpr std::uint64_t kDebugCtrlEnable = 1ull << 0;
+constexpr std::uint64_t kDebugCtrlPrivilegeMask = 0x3ull << 1;
+constexpr std::uint64_t kDebugCtrlTypeMask = 0x3ull << 3;
+constexpr std::uint64_t kDebugCtrlLenMask = 0xFFull << 5;
+constexpr std::uint32_t kDebugCtrlPrivilegeEl1 = 0x1u;
+constexpr std::uint32_t kDebugCtrlPrivilegeEl0 = 0x2u;
+constexpr std::uint32_t kDebugCtrlTypeExecute = 0x0u;
+constexpr std::uint32_t kDebugCtrlTypeLoad = 0x1u;
+constexpr std::uint32_t kDebugCtrlTypeStore = 0x2u;
+constexpr std::uint64_t kMdscrEl1Tdcc = 1ull << 12u;
+constexpr std::uint64_t kMdscrEl1Tda = 1ull << 21u;
+constexpr std::uint64_t kMdscrEl1Txfull = 1ull << 29u;
+constexpr std::uint64_t kMdscrEl1Rxfull = 1ull << 30u;
 constexpr std::uint64_t kSctlrEl1Dze = 1ull << 14u;
 constexpr std::uint64_t kSctlrEl1Uct = 1ull << 15u;
 constexpr std::uint64_t kSctlrEl1Uma = 1ull << 9u;
@@ -1898,6 +1912,9 @@ void Cpu::on_code_write(std::uint64_t va, std::uint64_t pa, std::size_t size) {
 }
 
 void Cpu::data_abort(std::uint64_t va, bool cache_maintenance_or_translation) {
+  if (exception_taken_this_step_) {
+    return;
+  }
   const std::uint32_t iss =
       last_translation_fault_.has_value() ? data_abort_iss(*last_translation_fault_, cache_maintenance_or_translation)
                                           : 0u;
@@ -2053,11 +2070,18 @@ bool Cpu::translate_data_address_fast(std::uint64_t va, AccessType access, std::
 void Cpu::invalidate_ram_page_caches() {
 }
 
-bool Cpu::mmu_read_value(std::uint64_t va, std::size_t size, std::uint64_t* out) {
-  return mmu_read_value(va, size, out, AccessType::Read);
+bool Cpu::mmu_read_value(std::uint64_t va,
+                         std::size_t size,
+                         std::uint64_t* out,
+                         bool check_watchpoints) {
+  return mmu_read_value(va, size, out, AccessType::Read, check_watchpoints);
 }
 
-bool Cpu::mmu_read_value(std::uint64_t va, std::size_t size, std::uint64_t* out, AccessType access) {
+bool Cpu::mmu_read_value(std::uint64_t va,
+                         std::size_t size,
+                         std::uint64_t* out,
+                         AccessType access,
+                         bool check_watchpoints) {
   last_data_fault_va_.reset();
   if (size == 0u || size > sizeof(std::uint64_t)) {
     return false;
@@ -2067,6 +2091,9 @@ bool Cpu::mmu_read_value(std::uint64_t va, std::size_t size, std::uint64_t* out,
     std::uint64_t pa = 0;
     if (!translate_data_address_fast(va, access, &pa)) {
       last_data_fault_va_ = va;
+      return false;
+    }
+    if (check_watchpoints && maybe_take_watchpoint_exception(va, size, access)) {
       return false;
     }
     if (!debug_slow_mode_enabled()) {
@@ -2086,14 +2113,19 @@ bool Cpu::mmu_read_value(std::uint64_t va, std::size_t size, std::uint64_t* out,
   }
 
   std::uint64_t value = 0;
+  std::array<std::uint64_t, sizeof(std::uint64_t)> pas{};
   for (std::size_t i = 0; i < size; ++i) {
-    std::uint64_t pa = 0;
-    if (!translate_data_address_fast(va + i, access, &pa)) {
+    if (!translate_data_address_fast(va + i, access, &pas[i])) {
       last_data_fault_va_ = va + i;
       return false;
     }
+  }
+  if (check_watchpoints && maybe_take_watchpoint_exception(va, size, access)) {
+    return false;
+  }
+  for (std::size_t i = 0; i < size; ++i) {
     std::uint64_t byte = 0;
-    if (!bus_.read(pa, 1u, byte)) {
+    if (!bus_.read(pas[i], 1u, byte)) {
       last_data_fault_va_ = va + i;
       return false;
     }
@@ -2105,11 +2137,18 @@ bool Cpu::mmu_read_value(std::uint64_t va, std::size_t size, std::uint64_t* out,
   return true;
 }
 
-bool Cpu::mmu_write_value(std::uint64_t va, std::uint64_t value, std::size_t size) {
-  return mmu_write_value(va, value, size, AccessType::Write);
+bool Cpu::mmu_write_value(std::uint64_t va,
+                          std::uint64_t value,
+                          std::size_t size,
+                          bool check_watchpoints) {
+  return mmu_write_value(va, value, size, AccessType::Write, check_watchpoints);
 }
 
-bool Cpu::mmu_write_value(std::uint64_t va, std::uint64_t value, std::size_t size, AccessType access) {
+bool Cpu::mmu_write_value(std::uint64_t va,
+                          std::uint64_t value,
+                          std::size_t size,
+                          AccessType access,
+                          bool check_watchpoints) {
   last_data_fault_va_.reset();
   static const std::optional<std::uint64_t> trace_write_va = []() -> std::optional<std::uint64_t> {
     const char* env = std::getenv("AARCHVM_TRACE_WRITE_VA");
@@ -2141,7 +2180,7 @@ bool Cpu::mmu_write_value(std::uint64_t va, std::uint64_t value, std::size_t siz
   const auto log_write_hit = [&](std::uint64_t pa, bool cross_page, const std::array<std::uint64_t, sizeof(std::uint64_t)>* pas) {
     const std::uint64_t current_task = sysregs_.sp_el0();
     std::uint64_t task_stack = 0;
-    const bool have_task_stack = mmu_read_value(current_task + 32u, 8u, &task_stack);
+    const bool have_task_stack = mmu_read_value(current_task + 32u, 8u, &task_stack, false);
     std::cerr << std::dec << "WRITE-HIT va=0x" << std::hex << va
               << " pa=0x" << pa
               << " size=" << std::dec << size
@@ -2171,6 +2210,9 @@ bool Cpu::mmu_write_value(std::uint64_t va, std::uint64_t value, std::size_t siz
     std::uint64_t pa = 0;
     if (!translate_data_address_fast(va, access, &pa)) {
       last_data_fault_va_ = va;
+      return false;
+    }
+    if (check_watchpoints && maybe_take_watchpoint_exception(va, size, access)) {
       return false;
     }
     if ((trace_write_va.has_value() && *trace_write_va >= va && *trace_write_va < (va + size)) ||
@@ -2210,6 +2252,9 @@ bool Cpu::mmu_write_value(std::uint64_t va, std::uint64_t value, std::size_t siz
   if ((trace_write_va.has_value() && *trace_write_va >= va && *trace_write_va < (va + size)) ||
       trace_cross_page_pa) {
     log_write_hit(pas[0], true, &pas);
+  }
+  if (check_watchpoints && maybe_take_watchpoint_exception(va, size, access)) {
+    return false;
   }
   for (std::size_t i = 0; i < size; ++i) {
     const std::uint64_t byte = (value >> (i * 8u)) & 0xFFu;
@@ -2819,6 +2864,9 @@ bool Cpu::exec_decoded_load_store_uimm(const DecodedInsn& decoded) {
       return true;
     }
     if (!mmu_read_value(addr, decoded.aux, &value)) {
+      if (exception_taken_this_step_) {
+        return true;
+      }
       data_abort(addr);
       return true;
     }
@@ -2839,6 +2887,9 @@ bool Cpu::exec_decoded_load_store_uimm(const DecodedInsn& decoded) {
     return true;
   }
   if (!mmu_write_value(addr, value, decoded.aux)) {
+    if (exception_taken_this_step_) {
+      return true;
+    }
     data_abort(addr);
     return true;
   }
@@ -2986,6 +3037,9 @@ bool Cpu::exec_decoded(const DecodedInsn& decoded) {
           return true;
         }
         if (!mmu_read_value(addr, decoded.aux, &value)) {
+          if (exception_taken_this_step_) {
+            return true;
+          }
           data_abort(addr);
           return true;
         }
@@ -3018,6 +3072,9 @@ bool Cpu::exec_decoded(const DecodedInsn& decoded) {
           return true;
         }
         if (!mmu_write_value(addr, value, decoded.aux)) {
+          if (exception_taken_this_step_) {
+            return true;
+          }
           data_abort(addr);
           return true;
         }
@@ -3051,6 +3108,63 @@ void Cpu::save_current_sp_to_bank() {
 
 void Cpu::load_current_sp_from_bank() {
   regs_[31] = sysregs_.current_uses_sp_el0() ? sysregs_.sp_el0() : sysregs_.sp_el1();
+}
+
+bool Cpu::dcc_el0_access_allowed() const {
+  return (sysregs_.mdscr_el1() & kMdscrEl1Tdcc) == 0u;
+}
+
+std::uint64_t Cpu::read_mdccsr_el0() const {
+  return (dcc_rx_full_ ? (1ull << 30) : 0ull) |
+         (dcc_tx_full_ ? (1ull << 29) : 0ull);
+}
+
+std::uint64_t Cpu::read_mdccint_el1() const {
+  return static_cast<std::uint64_t>(dcc_int_enable_ & ((1u << 30) | (1u << 29)));
+}
+
+std::uint64_t Cpu::read_dbgdtr_el0() {
+  const std::uint64_t value =
+      dcc_rx_full_ ? ((static_cast<std::uint64_t>(dcc_tx_data_) << 32) | dcc_rx_data_) : 0u;
+  dcc_rx_full_ = false;
+  return value;
+}
+
+std::uint32_t Cpu::read_dbgdtrrx_el0() {
+  const std::uint32_t value = dcc_rx_full_ ? dcc_rx_data_ : 0u;
+  dcc_rx_full_ = false;
+  return value;
+}
+
+std::uint64_t Cpu::read_osdtrrx_el1() const {
+  return dcc_rx_data_;
+}
+
+std::uint64_t Cpu::read_osdtrtx_el1() const {
+  return dcc_tx_data_;
+}
+
+void Cpu::write_mdccint_el1(std::uint64_t value) {
+  dcc_int_enable_ = static_cast<std::uint32_t>(value) & ((1u << 30) | (1u << 29));
+}
+
+void Cpu::write_dbgdtr_el0(std::uint64_t value) {
+  dcc_rx_data_ = static_cast<std::uint32_t>(value >> 32);
+  dcc_tx_data_ = static_cast<std::uint32_t>(value);
+  dcc_tx_full_ = true;
+}
+
+void Cpu::write_dbgdtrtx_el0(std::uint32_t value) {
+  dcc_tx_data_ = value;
+  dcc_tx_full_ = true;
+}
+
+void Cpu::write_osdtrrx_el1(std::uint64_t value) {
+  dcc_rx_data_ = static_cast<std::uint32_t>(value);
+}
+
+void Cpu::write_osdtrtx_el1(std::uint64_t value) {
+  dcc_tx_data_ = static_cast<std::uint32_t>(value);
 }
 
 std::uint64_t Cpu::shared_timer_steps() const {
@@ -3153,6 +3267,11 @@ void Cpu::reset(std::uint64_t pc) {
   icc_igrpen1_el1_ = 0;
   icc_ap0r_el1_.fill(0);
   icc_ap1r_el1_.fill(0);
+  dcc_rx_data_ = 0;
+  dcc_tx_data_ = 0;
+  dcc_int_enable_ = 0;
+  dcc_rx_full_ = false;
+  dcc_tx_full_ = false;
   clear_exclusive_monitor();
   tlb_flush_all();
   invalidate_decode_all();
@@ -3328,10 +3447,146 @@ bool Cpu::ready_to_run() {
   return irq_wakeup_ready();
 }
 
+bool Cpu::debug_privilege_matches(std::uint64_t ctrl) const {
+  const std::uint32_t privilege = static_cast<std::uint32_t>((ctrl & kDebugCtrlPrivilegeMask) >> 1);
+  if (sysregs_.in_el0()) {
+    return (privilege & kDebugCtrlPrivilegeEl0) != 0u;
+  }
+  if (sysregs_.current_el() == 1u) {
+    return (privilege & kDebugCtrlPrivilegeEl1) != 0u;
+  }
+  return false;
+}
+
+bool Cpu::maybe_take_breakpoint_exception(std::uint64_t fault_pc) {
+  if (!sysregs_.breakpoint_watchpoint_enabled_current()) {
+    return false;
+  }
+  for (std::uint32_t i = 0; i < sysregs_.breakpoint_resource_count(); ++i) {
+    const std::uint64_t ctrl = sysregs_.dbgbcr_el1(i);
+    if ((ctrl & kDebugCtrlEnable) == 0u) {
+      continue;
+    }
+    if (((ctrl & kDebugCtrlTypeMask) >> 3) != kDebugCtrlTypeExecute) {
+      continue;
+    }
+    if ((ctrl & kDebugCtrlLenMask) == 0u || !debug_privilege_matches(ctrl)) {
+      continue;
+    }
+    if ((fault_pc & ~0x3ull) != (sysregs_.dbgbvr_el1(i) & ~0x3ull)) {
+      continue;
+    }
+    enter_sync_exception(fault_pc,
+                         sysregs_.in_el0() ? 0x30u : 0x31u,
+                         kDebugExceptionIfsc,
+                         false,
+                         0u);
+    return true;
+  }
+  return false;
+}
+
+bool Cpu::maybe_take_watchpoint_exception(std::uint64_t va,
+                                          std::size_t size,
+                                          AccessType access) {
+  if (access == AccessType::Fetch || size == 0u || !sysregs_.breakpoint_watchpoint_enabled_current()) {
+    return false;
+  }
+  const bool write = access_is_write(access);
+  for (std::uint32_t i = 0; i < sysregs_.watchpoint_resource_count(); ++i) {
+    const std::uint64_t ctrl = sysregs_.dbgwcr_el1(i);
+    if ((ctrl & kDebugCtrlEnable) == 0u || !debug_privilege_matches(ctrl)) {
+      continue;
+    }
+    const std::uint32_t type = static_cast<std::uint32_t>((ctrl & kDebugCtrlTypeMask) >> 3);
+    const std::uint32_t required = write ? kDebugCtrlTypeStore : kDebugCtrlTypeLoad;
+    if ((type & required) == 0u) {
+      continue;
+    }
+    const std::uint64_t bas = (ctrl & kDebugCtrlLenMask) >> 5;
+    if (bas == 0u) {
+      continue;
+    }
+    const std::uint64_t base = sysregs_.dbgwvr_el1(i) & ~0x7ull;
+    for (std::size_t offset = 0; offset < size; ++offset) {
+      const std::uint64_t byte_va = va + offset;
+      if (byte_va < base || byte_va >= (base + 8u)) {
+        continue;
+      }
+      const std::uint32_t bit = static_cast<std::uint32_t>(byte_va - base);
+      if (((bas >> bit) & 1u) == 0u) {
+        continue;
+      }
+      enter_sync_exception(pc_ - 4u,
+                           sysregs_.in_el0() ? 0x34u : 0x35u,
+                           kDebugExceptionIfsc | (write ? (1u << 6) : 0u),
+                           true,
+                           byte_va);
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Cpu::maybe_take_software_step_before_instruction() {
+  if (!sysregs_.software_step_active_pending()) {
+    return false;
+  }
+  enter_sync_exception(pc_, sysregs_.in_el0() ? 0x32u : 0x33u, kDebugExceptionIfsc, false, 0u);
+  return true;
+}
+
+bool Cpu::is_load_exclusive_instruction(std::uint32_t insn) {
+  const std::uint32_t tag = insn & 0xFFE0FC00u;
+  if (tag == 0x08407C00u || tag == 0x0840FC00u ||
+      tag == 0x48407C00u || tag == 0x4840FC00u ||
+      tag == 0x88407C00u || tag == 0x8840FC00u ||
+      tag == 0xC8407C00u || tag == 0xC840FC00u ||
+      tag == 0x08C0FC00u || tag == 0x48C0FC00u ||
+      tag == 0x88C0FC00u || tag == 0xC8C0FC00u) {
+    return true;
+  }
+
+  const std::uint32_t pair_tag = insn & 0xFFE08000u;
+  return pair_tag == 0x88600000u || pair_tag == 0x88608000u ||
+         pair_tag == 0xC8600000u || pair_tag == 0xC8608000u;
+}
+
+void Cpu::complete_software_step_after_instruction(std::uint64_t next_pc,
+                                                   std::uint32_t insn) {
+  sysregs_.set_software_step_state(false);
+  if (!sysregs_.software_step_active_pending()) {
+    return;
+  }
+
+  std::uint32_t iss = kDebugExceptionIfsc;
+  if (is_load_exclusive_instruction(insn)) {
+    iss |= (1u << 24) | (1u << 6);
+  } else {
+    iss |= (1u << 24);
+  }
+  enter_sync_exception(next_pc, sysregs_.in_el0() ? 0x32u : 0x33u, iss, false, 0u);
+}
+
+std::uint64_t Cpu::captured_pstate_for_sync_exception(std::uint32_t ec) const {
+  std::uint64_t saved = sysregs_.pstate_bits();
+  if (!stepped_instruction_in_flight_) {
+    return saved;
+  }
+
+  constexpr std::uint64_t kSpsrSsBit = 1ull << 21;
+  if (ec == 0x15u) {
+    return saved & ~kSpsrSsBit;
+  }
+  return saved | kSpsrSsBit;
+}
+
 bool Cpu::step() {
   if (halted_) {
     return false;
   }
+  exception_taken_this_step_ = false;
+  stepped_instruction_in_flight_ = false;
 
   if (waiting_for_interrupt_) {
     if (gic_.has_pending(cpu_index_)) {
@@ -3365,6 +3620,10 @@ bool Cpu::step() {
     return true;
   }
 
+  if (maybe_take_software_step_before_instruction()) {
+    return true;
+  }
+
   if (sysregs_.illegal_execution_state()) {
     enter_sync_exception(pc_, 0x0Eu, 0u, false, 0u);
     return true;
@@ -3391,26 +3650,41 @@ bool Cpu::step() {
     }
   }
 
+  const bool stepped_instruction = sysregs_.software_step_active_not_pending();
+  stepped_instruction_in_flight_ = stepped_instruction;
   TranslationResult fetch_result{};
   if (!translate_address(pc_, AccessType::Fetch, &fetch_result, true)) {
     const std::uint32_t iss = last_translation_fault_.has_value() ? fault_status_code(*last_translation_fault_) : 0u;
     enter_sync_exception(pc_, sysregs_.in_el0() ? 0x20u : 0x21u, iss, true, pc_);
+    stepped_instruction_in_flight_ = false;
     return true;
   }
 
   std::uint64_t fetch = 0;
   if (!bus_.read(fetch_result.pa, 4, fetch)) {
     enter_sync_exception(pc_, sysregs_.in_el0() ? 0x20u : 0x21u, 0u, true, pc_);
+    stepped_instruction_in_flight_ = false;
     return true;
   }
 
   const std::uint32_t insn = static_cast<std::uint32_t>(fetch);
   const std::uint64_t this_pc = pc_;
+  if (maybe_take_breakpoint_exception(this_pc)) {
+    stepped_instruction_in_flight_ = false;
+    return true;
+  }
   pc_ += 4;
   ++steps_;
+  const auto finish_instruction = [&](bool result) {
+    stepped_instruction_in_flight_ = false;
+    if (stepped_instruction && !exception_taken_this_step_ && !halted_) {
+      complete_software_step_after_instruction(pc_, insn);
+    }
+    return result;
+  };
 
   if (insn == 0xD503201Fu) {
-    return true; // NOP
+    return finish_instruction(true); // NOP
   }
   if ((insn & 0xFFFFFC1Fu) == 0xD65F0000u) {
     const std::uint32_t rn = (insn >> 5) & 0x1Fu;
@@ -3435,7 +3709,7 @@ bool Cpu::step() {
       std::cerr << " steps=" << std::dec << steps_ << '\n';
     }
     pc_ = target; // RET Xn
-    return true;
+    return finish_instruction(true);
   }
   if ((insn & 0xFFFFFC1Fu) == 0xD61F0000u) {
     const std::uint32_t rn = (insn >> 5) & 0x1Fu;
@@ -3460,7 +3734,7 @@ bool Cpu::step() {
       std::cerr << " steps=" << std::dec << steps_ << '\n';
     }
     pc_ = target; // BR Xn
-    return true;
+    return finish_instruction(true);
   }
   if ((insn & 0xFFFFFC1Fu) == 0xD63F0000u) {
     const std::uint32_t rn = (insn >> 5) & 0x1Fu;
@@ -3486,12 +3760,12 @@ bool Cpu::step() {
       std::cerr << " steps=" << std::dec << steps_ << '\n';
     }
     pc_ = target;
-    return true;
+    return finish_instruction(true);
   }
   if (insn == 0xD69F03E0u) { // ERET
     if (sysregs_.in_el0()) {
       enter_sync_exception(this_pc, 0x00u, 0u, false, 0);
-      return true;
+      return finish_instruction(true);
     }
     save_current_sp_to_bank();
     clear_exclusive_monitor();
@@ -3515,7 +3789,7 @@ bool Cpu::step() {
       }
       --exception_depth_;
     }
-    return true;
+    return finish_instruction(true);
   }
   if ((insn & 0xFFE0001Fu) == 0xD4A00001u ||  // DCPS1 #imm16
       (insn & 0xFFE0001Fu) == 0xD4A00002u ||  // DCPS2 #imm16
@@ -3523,13 +3797,13 @@ bool Cpu::step() {
     // The current model does not implement Debug state, so DCPS<n> is always
     // UNDEFINED in the only architecturally reachable state (Non-debug).
     enter_sync_exception(this_pc, 0x00u, 0u, false, 0u);
-    return true;
+    return finish_instruction(true);
   }
   if (insn == 0xD6BF03E0u) { // DRPS
     // DRPS is a Debug-state-only return path. Without Debug state support,
     // Non-debug execution must observe it as UNDEFINED.
     enter_sync_exception(this_pc, 0x00u, 0u, false, 0u);
-    return true;
+    return finish_instruction(true);
   }
   if ((insn & 0xFFE0001Fu) == 0xD4200000u) {
     if (trace_brk_) {
@@ -3550,97 +3824,97 @@ bool Cpu::step() {
     }
     if (brk_halt_mode_enabled()) {
       halted_ = true;
-      return false;
+      return finish_instruction(false);
     }
     enter_sync_exception(this_pc, 0x3Cu, (insn >> 5) & 0xFFFFu, false, 0);
-    return true;
+    return finish_instruction(true);
   }
   if ((insn & 0xFFE0001Fu) == 0xD4400000u) { // HLT #imm16
     enter_sync_exception(this_pc, 0x00u, 0u, false, 0u);
-    return true;
+    return finish_instruction(true);
   }
   if ((insn & 0xFFE0001Fu) == 0xD4000002u) { // HVC #imm16
     if (sysregs_.in_el0()) {
       enter_sync_exception(this_pc, 0x00u, 0u, false, 0);
-      return true;
+      return finish_instruction(true);
     }
     if (callbacks_.smccc_call && callbacks_.smccc_call(*this, true, static_cast<std::uint16_t>((insn >> 5) & 0xFFFFu))) {
-      return true;
+      return finish_instruction(true);
     }
     enter_sync_exception(this_pc, 0x00u, 0u, false, 0);
-    return true;
+    return finish_instruction(true);
   }
   if ((insn & 0xFFE0001Fu) == 0xD4000003u) { // SMC #imm16
     if (sysregs_.in_el0()) {
       enter_sync_exception(this_pc, 0x00u, 0u, false, 0);
-      return true;
+      return finish_instruction(true);
     }
     if (callbacks_.smccc_call && callbacks_.smccc_call(*this, false, static_cast<std::uint16_t>((insn >> 5) & 0xFFFFu))) {
-      return true;
+      return finish_instruction(true);
     }
     enter_sync_exception(this_pc, 0x00u, 0u, false, 0);
-    return true;
+    return finish_instruction(true);
   }
   if ((insn & 0xFFE0001Fu) == 0xD4000001u) { // SVC #imm16
     enter_sync_exception(this_pc, 0x15u, (insn >> 5) & 0xFFFFu, false, 0);
-    return true;
+    return finish_instruction(true);
   }
 
   if (fp_asimd_traps_enabled_for_current_el() && insn_uses_fp_asimd(insn)) {
     trap_fp_asimd_access();
-    return true;
+    return finish_instruction(true);
   }
 
   if (const DecodedInsn* decoded = lookup_decoded(this_pc, fetch_result.pa, insn); decoded != nullptr) {
       switch (decoded->kind) {
         case DecodedKind::AddSubImm:
           if (exec_decoded_add_sub_imm(*decoded)) {
-            return true;
+            return finish_instruction(true);
           }
           break;
         case DecodedKind::AddSubShifted:
           if (exec_decoded_add_sub_shifted(*decoded)) {
-            return true;
+            return finish_instruction(true);
           }
           break;
         case DecodedKind::LogicalShifted:
           if (exec_decoded_logical_shifted(*decoded)) {
-            return true;
+            return finish_instruction(true);
           }
           break;
         case DecodedKind::LogicalImm:
           if (exec_decoded_logical_imm(*decoded)) {
-            return true;
+            return finish_instruction(true);
           }
           break;
         case DecodedKind::Bitfield:
           if (exec_decoded_bitfield(*decoded)) {
-            return true;
+            return finish_instruction(true);
           }
           break;
         case DecodedKind::LoadStoreUImm:
           if (exec_decoded_load_store_uimm(*decoded)) {
-            return true;
+            return finish_instruction(true);
           }
           break;
         default:
           break;
       }
       if (exec_decoded(*decoded)) {
-        return true;
+        return finish_instruction(true);
       }
   }
   if (exec_branch(insn)) {
-    return true;
+    return finish_instruction(true);
   }
   if (exec_system(insn)) {
-    return true;
+    return finish_instruction(true);
   }
   if (exec_data_processing(insn)) {
-    return true;
+    return finish_instruction(true);
   }
   if (exec_load_store(insn)) {
-    return true;
+    return finish_instruction(true);
   }
 
   if (trace_exceptions_) {
@@ -3651,10 +3925,11 @@ bool Cpu::step() {
               << std::dec << '\n';
   }
   enter_sync_exception(this_pc, 0x00u, 0u, false, 0);
-  return true;
+  return finish_instruction(true);
 }
 
 bool Cpu::try_take_irq() {
+  exception_taken_this_step_ = true;
   const std::uint16_t irq_threshold = irq_delivery_threshold_;
   const std::uint64_t irq_epoch = gic_.state_epoch();
   std::uint32_t intid = 1023u;
@@ -3688,7 +3963,11 @@ bool Cpu::try_take_irq() {
               << " pc=0x" << std::hex << pc_ << '\n';
   }
   ++exception_depth_;
-  sysregs_.exception_enter_irq(pc_);
+  const std::uint64_t saved_pstate = sysregs_.pstate_bits();
+  if (sysregs_.software_step_active_not_pending()) {
+    sysregs_.set_software_step_state(false);
+  }
+  sysregs_.exception_enter_irq(pc_, saved_pstate);
   load_current_sp_from_bank();
   pc_ = sysregs_.vbar_el1() + (from_lower_el ? 0x480u : (from_spx ? 0x280u : 0x80u));
   return true;
@@ -3699,6 +3978,7 @@ void Cpu::enter_sync_exception(std::uint64_t fault_pc,
                                std::uint32_t iss,
                                bool far_valid,
                                std::uint64_t far) {
+  exception_taken_this_step_ = true;
   std::uint64_t return_pc = fault_pc;
   if (ec == 0x15u) {
     // Exception-generating instructions like SVC return to the next instruction.
@@ -3718,6 +3998,11 @@ void Cpu::enter_sync_exception(std::uint64_t fault_pc,
   const bool nested = exception_depth_ != 0;
   const bool from_lower_el = sysregs_.in_el0();
   const bool from_spx = sysregs_.use_sp_elx();
+  const std::uint64_t saved_pstate = captured_pstate_for_sync_exception(ec);
+  if (stepped_instruction_in_flight_ || sysregs_.software_step_active_not_pending()) {
+    sysregs_.set_software_step_state(false);
+  }
+  stepped_instruction_in_flight_ = false;
   save_current_sp_to_bank();
   exception_is_irq_stack_[exception_depth_] = false;
   exception_intid_stack_[exception_depth_] = 0;
@@ -3767,7 +4052,7 @@ void Cpu::enter_sync_exception(std::uint64_t fault_pc,
     std::cerr << std::dec << '\n';
     sync_reported_ = true;
   }
-  sysregs_.exception_enter_sync(return_pc, ec, iss, far_valid, far);
+  sysregs_.exception_enter_sync(return_pc, saved_pstate, ec, iss, far_valid, far);
   load_current_sp_from_bank();
   pc_ = sysregs_.vbar_el1() + (from_lower_el ? 0x400u : (from_spx ? 0x200u : 0x0u));
 }
@@ -4724,6 +5009,10 @@ bool Cpu::exec_system(std::uint32_t insn) {
       return true;
     }
     switch (key) {
+      case sysreg_key(2u, 3u, 0u, 1u, 0u):   // MDCCSR_EL0
+      case sysreg_key(2u, 3u, 0u, 4u, 0u):   // DBGDTR_EL0
+      case sysreg_key(2u, 3u, 0u, 5u, 0u):   // DBGDTRRX_EL0 / DBGDTRTX_EL0
+        return dcc_el0_access_allowed();
       case sysreg_key(3u, 3u, 4u, 2u, 0u):   // NZCV
       case sysreg_key(3u, 3u, 4u, 4u, 0u):   // FPCR
       case sysreg_key(3u, 3u, 4u, 4u, 1u):   // FPSR
@@ -4746,6 +5035,50 @@ bool Cpu::exec_system(std::uint32_t insn) {
       static_cast<std::uint32_t>((sysregs_.id_aa64pfr0_el1() >> 44) & 0xFu);
   const bool have_amuv1 = amu_feature_level >= 1u;
   const bool have_amuv1p1 = amu_feature_level >= 2u;
+
+  const auto is_break_watch_sysreg = [&](std::uint32_t key) -> bool {
+    const std::uint32_t op0 = (key >> 14) & 0x3u;
+    const std::uint32_t op1 = (key >> 11) & 0x7u;
+    const std::uint32_t crn = (key >> 7) & 0xFu;
+    const std::uint32_t crm = (key >> 3) & 0xFu;
+    const std::uint32_t op2 = key & 0x7u;
+    return op0 == 2u && op1 == 0u && crn == 0u && crm < 16u &&
+           (op2 == 4u || op2 == 5u || op2 == 6u || op2 == 7u);
+  };
+
+  const auto software_access_debug_event_should_halt = [&](std::uint32_t key) -> bool {
+    if (!is_break_watch_sysreg(key) || (sysregs_.mdscr_el1() & kMdscrEl1Tda) == 0u) {
+      return false;
+    }
+    std::uint64_t oslsr = 0;
+    if (!sysregs_.read(2u, 0u, 1u, 1u, 4u, oslsr)) {
+      return false;
+    }
+    return (oslsr & (1ull << 1)) == 0u;
+  };
+
+  const auto read_mdscr_el1 = [&]() -> std::uint64_t {
+    std::uint64_t value = sysregs_.mdscr_el1();
+    value &= ~(kMdscrEl1Rxfull | kMdscrEl1Txfull);
+    if (dcc_rx_full_) {
+      value |= kMdscrEl1Rxfull;
+    }
+    if (dcc_tx_full_) {
+      value |= kMdscrEl1Txfull;
+    }
+    return value;
+  };
+
+  const auto write_mdscr_el1 = [&](std::uint64_t value) {
+    std::uint64_t oslsr = 0u;
+    const bool os_lock_active =
+        sysregs_.read(2u, 0u, 1u, 1u, 4u, oslsr) && ((oslsr & (1ull << 1)) != 0u);
+    (void)sysregs_.write(2u, 0u, 0u, 2u, 2u, value);
+    if (os_lock_active) {
+      dcc_rx_full_ = (value & kMdscrEl1Rxfull) != 0u;
+      dcc_tx_full_ = (value & kMdscrEl1Txfull) != 0u;
+    }
+  };
 
   const auto is_amu_v1_sysreg = [&](std::uint32_t key) -> bool {
     const std::uint32_t op0 = (key >> 14) & 0x3u;
@@ -4924,8 +5257,25 @@ bool Cpu::exec_system(std::uint32_t insn) {
       return false;
     }
     if (key == sysreg_key(3u, 0u, 4u, 2u, 0u) ||   // SPSel
+        key == sysreg_key(3u, 0u, 4u, 1u, 0u) ||   // SP_EL0
+        key == sysreg_key(3u, 4u, 4u, 1u, 0u) ||   // SP_EL1
         key == sysreg_key(3u, 0u, 4u, 2u, 2u) ||   // CurrentEL
-        key == sysreg_key(3u, 0u, 4u, 2u, 3u)) {   // PAN
+        key == sysreg_key(3u, 0u, 4u, 2u, 3u) ||   // PAN
+        key == sysreg_key(2u, 0u, 0u, 0u, 2u) ||   // OSDTRRX_EL1
+        key == sysreg_key(2u, 0u, 0u, 2u, 0u) ||   // MDCCINT_EL1
+        key == sysreg_key(2u, 0u, 0u, 2u, 2u) ||   // MDSCR_EL1
+        key == sysreg_key(2u, 0u, 0u, 3u, 2u) ||   // OSDTRTX_EL1
+        key == sysreg_key(2u, 0u, 0u, 6u, 2u) ||   // OSECCR_EL1
+        key == sysreg_key(2u, 0u, 1u, 0u, 0u) ||   // MDRAR_EL1
+        key == sysreg_key(2u, 0u, 1u, 4u, 4u) ||   // DBGPRCR_EL1
+        key == sysreg_key(2u, 0u, 1u, 0u, 4u) ||   // OSLAR_EL1
+        key == sysreg_key(2u, 0u, 1u, 1u, 4u) ||   // OSLSR_EL1
+        key == sysreg_key(2u, 0u, 1u, 3u, 4u) ||   // OSDLR_EL1
+        key == sysreg_key(2u, 0u, 7u, 8u, 6u) ||   // DBGCLAIMSET_EL1
+        key == sysreg_key(2u, 0u, 7u, 9u, 6u) ||   // DBGCLAIMCLR_EL1
+        key == sysreg_key(2u, 0u, 7u, 14u, 6u) ||  // DBGAUTHSTATUS_EL1
+        key == sysreg_key(3u, 3u, 4u, 5u, 0u) ||   // DSPSR_EL0
+        key == sysreg_key(3u, 3u, 4u, 5u, 1u)) {   // DLR_EL0
       return true;
     }
     // FEAT_IDST is not implemented in this model, so direct EL0 reads of the
@@ -5254,6 +5604,10 @@ bool Cpu::exec_system(std::uint32_t insn) {
       enter_sync_exception(pc_ - 4, 0x18u, sysreg_trap_iss(true, op0, op1, crn, crm, op2, rt), false, 0);
       return true;
     }
+    if (software_access_debug_event_should_halt(key)) {
+      halted_ = true;
+      return true;
+    }
 
     if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (12u << 3) | 0u)) { // ICC_IAR1_EL1
       set_reg(rt, (exception_depth_ != 0 && exception_is_irq_stack_[exception_depth_ - 1]) ? exception_intid_stack_[exception_depth_ - 1] : 1023u);
@@ -5265,6 +5619,34 @@ bool Cpu::exec_system(std::uint32_t insn) {
     }
     if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (11u << 3) | 3u)) { // ICC_RPR_EL1
       set_reg(rt, running_priority_ >= 0x100u ? 0xFFu : static_cast<std::uint64_t>(running_priority_ & 0xFFu));
+      return true;
+    }
+    if (key == ((2u << 14) | (3u << 11) | (0u << 7) | (1u << 3) | 0u)) { // MDCCSR_EL0
+      set_reg(rt, read_mdccsr_el0());
+      return true;
+    }
+    if (key == ((2u << 14) | (0u << 11) | (0u << 7) | (2u << 3) | 0u)) { // MDCCINT_EL1
+      set_reg(rt, read_mdccint_el1());
+      return true;
+    }
+    if (key == ((2u << 14) | (0u << 11) | (0u << 7) | (2u << 3) | 2u)) { // MDSCR_EL1
+      set_reg(rt, read_mdscr_el1());
+      return true;
+    }
+    if (key == ((2u << 14) | (3u << 11) | (0u << 7) | (4u << 3) | 0u)) { // DBGDTR_EL0
+      set_reg(rt, read_dbgdtr_el0());
+      return true;
+    }
+    if (key == ((2u << 14) | (3u << 11) | (0u << 7) | (5u << 3) | 0u)) { // DBGDTRRX_EL0
+      set_reg(rt, read_dbgdtrrx_el0());
+      return true;
+    }
+    if (key == ((2u << 14) | (0u << 11) | (0u << 7) | (0u << 3) | 2u)) { // OSDTRRX_EL1
+      set_reg(rt, read_osdtrrx_el1());
+      return true;
+    }
+    if (key == ((2u << 14) | (0u << 11) | (0u << 7) | (3u << 3) | 2u)) { // OSDTRTX_EL1
+      set_reg(rt, read_osdtrtx_el1());
       return true;
     }
     if (key == ((3u << 14) | (0u << 11) | (4u << 7) | (6u << 3) | 0u)) { // ICC_PMR_EL1
@@ -5329,12 +5711,14 @@ bool Cpu::exec_system(std::uint32_t insn) {
       return true;
     }
     if (key == ((3u << 14) | (0u << 11) | (4u << 7) | (1u << 3) | 0u)) { // SP_EL0
-      set_reg(rt, sysregs_.current_uses_sp_el0() ? regs_[31] : sysregs_.sp_el0());
+      if (sysregs_.current_uses_sp_el0()) {
+        return false;
+      }
+      set_reg(rt, sysregs_.sp_el0());
       return true;
     }
     if (key == ((3u << 14) | (4u << 11) | (4u << 7) | (1u << 3) | 0u)) { // SP_EL1
-      set_reg(rt, (!sysregs_.current_uses_sp_el0()) ? regs_[31] : sysregs_.sp_el1());
-      return true;
+      return false;
     }
 
     std::uint64_t value = 0;
@@ -5364,6 +5748,10 @@ bool Cpu::exec_system(std::uint32_t insn) {
       enter_sync_exception(pc_ - 4, 0x18u, sysreg_trap_iss(false, op0, op1, crn, crm, op2, rt), false, 0);
       return true;
     }
+    if (software_access_debug_event_should_halt(key)) {
+      halted_ = true;
+      return true;
+    }
 
     if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (12u << 3) | 1u)) { // ICC_EOIR1_EL1
       if (exception_depth_ != 0) {
@@ -5378,6 +5766,36 @@ bool Cpu::exec_system(std::uint32_t insn) {
           }
         }
       }
+      return true;
+    }
+    if (key == ((3u << 14) | (0u << 11) | (4u << 7) | (2u << 3) | 0u)) { // SPSel
+      save_current_sp_to_bank();
+      sysregs_.set_spsel(reg(rt));
+      load_current_sp_from_bank();
+      return true;
+    }
+    if (key == ((2u << 14) | (3u << 11) | (0u << 7) | (4u << 3) | 0u)) { // DBGDTR_EL0
+      write_dbgdtr_el0(reg(rt));
+      return true;
+    }
+    if (key == ((2u << 14) | (3u << 11) | (0u << 7) | (5u << 3) | 0u)) { // DBGDTRTX_EL0
+      write_dbgdtrtx_el0(static_cast<std::uint32_t>(reg(rt)));
+      return true;
+    }
+    if (key == ((2u << 14) | (0u << 11) | (0u << 7) | (2u << 3) | 0u)) { // MDCCINT_EL1
+      write_mdccint_el1(reg(rt));
+      return true;
+    }
+    if (key == ((2u << 14) | (0u << 11) | (0u << 7) | (2u << 3) | 2u)) { // MDSCR_EL1
+      write_mdscr_el1(reg(rt));
+      return true;
+    }
+    if (key == ((2u << 14) | (0u << 11) | (0u << 7) | (0u << 3) | 2u)) { // OSDTRRX_EL1
+      write_osdtrrx_el1(reg(rt));
+      return true;
+    }
+    if (key == ((2u << 14) | (0u << 11) | (0u << 7) | (3u << 3) | 2u)) { // OSDTRTX_EL1
+      write_osdtrtx_el1(reg(rt));
       return true;
     }
     if (key == ((3u << 14) | (0u << 11) | (4u << 7) | (6u << 3) | 0u)) { // ICC_PMR_EL1
@@ -5472,18 +5890,14 @@ bool Cpu::exec_system(std::uint32_t insn) {
       return true;
     }
     if (key == ((3u << 14) | (0u << 11) | (4u << 7) | (1u << 3) | 0u)) { // SP_EL0
-      sysregs_.set_sp_el0(reg(rt));
       if (sysregs_.current_uses_sp_el0()) {
-        regs_[31] = reg(rt);
+        return false;
       }
+      sysregs_.set_sp_el0(reg(rt));
       return true;
     }
     if (key == ((3u << 14) | (4u << 11) | (4u << 7) | (1u << 3) | 0u)) { // SP_EL1
-      sysregs_.set_sp_el1(reg(rt));
-      if (!sysregs_.current_uses_sp_el0()) {
-        regs_[31] = reg(rt);
-      }
-      return true;
+      return false;
     }
 
     const bool ok = sysregs_.write(op0, op1, crn, crm, op2, reg(rt));
@@ -9754,6 +10168,9 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       }
       pas[i] = pa;
     }
+    if (maybe_take_watchpoint_exception(addr, total_size, AccessType::Write)) {
+      return false;
+    }
 
     for (std::size_t i = 0; i < total_size; ++i) {
       const std::uint64_t value = (i < elem_size)
@@ -9782,6 +10199,9 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       return std::nullopt;
     }
     auto value = raw_mmu_read(va, size);
+    if (!value.has_value() && this->exception_taken_this_step_) {
+      sync_exception_taken = true;
+    }
     access_failed |= !value.has_value();
     return value;
   };
@@ -9796,6 +10216,9 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       return false;
     }
     const bool ok = raw_mmu_write(va, value, size);
+    if (!ok && this->exception_taken_this_step_) {
+      sync_exception_taken = true;
+    }
     access_failed |= !ok;
     return ok;
   };
@@ -9810,6 +10233,9 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       return std::nullopt;
     }
     auto value = raw_mmu_read(va, size);
+    if (!value.has_value() && this->exception_taken_this_step_) {
+      sync_exception_taken = true;
+    }
     access_failed |= !value.has_value();
     return value;
   };
@@ -9824,6 +10250,9 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       return false;
     }
     const bool ok = raw_mmu_write(va, value, size);
+    if (!ok && this->exception_taken_this_step_) {
+      sync_exception_taken = true;
+    }
     access_failed |= !ok;
     return ok;
   };
@@ -10945,6 +11374,9 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     const auto old_lo = mmu_strict_read(addr, elem_size);
     const auto old_hi = mmu_strict_read(addr + elem_size, elem_size);
     if (!old_lo.has_value() || !old_hi.has_value()) {
+      if (sync_exception_taken) {
+        return true;
+      }
       data_abort(addr);
       return true;
     }
@@ -10956,6 +11388,9 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     const std::uint64_t desired_hi = ((elem_size == 8u) ? reg(rt_pair + 1u) : static_cast<std::uint64_t>(reg32(rt_pair + 1u))) & mask;
     if (old_lo_value == compare_lo && old_hi_value == compare_hi) {
       if (!raw_mmu_write_pair_atomic(addr, desired_lo, desired_hi, elem_size)) {
+        if (this->exception_taken_this_step_) {
+          return true;
+        }
         data_abort(addr);
         return true;
       }
@@ -10981,6 +11416,9 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       const std::uint64_t addr = sp_or_reg(rn);
       const auto old = mmu_strict_read(addr, size);
       if (!old.has_value()) {
+        if (sync_exception_taken) {
+          return true;
+        }
         data_abort(addr);
         return true;
       }
@@ -11016,6 +11454,9 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
         const std::uint64_t addr = sp_or_reg(rn);
         const auto old = mmu_strict_read(addr, size);
         if (!old.has_value()) {
+          if (sync_exception_taken) {
+            return true;
+          }
           data_abort(addr);
           return true;
         }
@@ -11075,6 +11516,9 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       if (is_load) {
         const auto value = mmu_strict_read(addr, size);
         if (!value.has_value()) {
+          if (sync_exception_taken) {
+            return true;
+          }
           data_abort(addr);
           return true;
         }
@@ -11122,6 +11566,9 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
         const auto v1 = mmu_strict_read(addr, elem_size);
         const auto v2 = mmu_strict_read(addr + elem_size, elem_size);
         if (!v1.has_value() || !v2.has_value()) {
+          if (sync_exception_taken) {
+            return true;
+          }
           data_abort(addr);
           return true;
         }
@@ -11156,6 +11603,9 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
       const std::uint64_t first = (elem_size == 8u) ? reg(rt) : static_cast<std::uint64_t>(reg32(rt));
       const std::uint64_t second = (elem_size == 8u) ? reg(rt2) : static_cast<std::uint64_t>(reg32(rt2));
       if (!raw_mmu_write_pair_atomic(addr, first, second, elem_size)) {
+        if (this->exception_taken_this_step_) {
+          return true;
+        }
         data_abort(addr);
         return true;
       }
@@ -12338,6 +12788,11 @@ bool Cpu::save_state(std::ostream& out) const {
       !snapshot_io::write(out, icc_igrpen1_el1_) ||
       !snapshot_io::write_array(out, icc_ap0r_el1_) ||
       !snapshot_io::write_array(out, icc_ap1r_el1_) ||
+      !snapshot_io::write(out, dcc_rx_data_) ||
+      !snapshot_io::write(out, dcc_tx_data_) ||
+      !snapshot_io::write(out, dcc_int_enable_) ||
+      !snapshot_io::write_bool(out, dcc_rx_full_) ||
+      !snapshot_io::write_bool(out, dcc_tx_full_) ||
       !snapshot_io::write_bool(out, exclusive_valid_) ||
       !snapshot_io::write(out, exclusive_addr_) ||
       !snapshot_io::write(out, exclusive_size_) ||
@@ -12502,8 +12957,25 @@ bool Cpu::load_state(std::istream& in, std::uint32_t version) {
       !snapshot_io::read(in, icc_bpr1_el1_) ||
       !snapshot_io::read(in, icc_igrpen1_el1_) ||
       !snapshot_io::read_array(in, icc_ap0r_el1_) ||
-      !snapshot_io::read_array(in, icc_ap1r_el1_) ||
-      !snapshot_io::read_bool(in, exclusive_valid_) ||
+      !snapshot_io::read_array(in, icc_ap1r_el1_)) {
+    return false;
+  }
+  if (version >= 17) {
+    if (!snapshot_io::read(in, dcc_rx_data_) ||
+        !snapshot_io::read(in, dcc_tx_data_) ||
+        !((version >= 20) ? snapshot_io::read(in, dcc_int_enable_) : ((dcc_int_enable_ = 0), true)) ||
+        !snapshot_io::read_bool(in, dcc_rx_full_) ||
+        !snapshot_io::read_bool(in, dcc_tx_full_)) {
+      return false;
+    }
+  } else {
+    dcc_rx_data_ = 0;
+    dcc_tx_data_ = 0;
+    dcc_int_enable_ = 0;
+    dcc_rx_full_ = false;
+    dcc_tx_full_ = false;
+  }
+  if (!snapshot_io::read_bool(in, exclusive_valid_) ||
       !snapshot_io::read(in, exclusive_addr_) ||
       !snapshot_io::read(in, exclusive_size_)) {
     return false;

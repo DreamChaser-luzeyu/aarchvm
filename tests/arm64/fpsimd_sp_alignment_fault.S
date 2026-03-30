@@ -24,7 +24,6 @@ _start:
     add  x20, x20, #0x80
     adr  x21, saved_handler_sp
     str  x20, [x21]
-    msr  sp_el1, x20
     mov  sp, x20
 
     adr  x0, store_source

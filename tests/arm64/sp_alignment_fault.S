@@ -20,7 +20,6 @@ _start:
     add  x20, x20, #0x80
     adr  x21, saved_handler_sp
     str  x20, [x21]
-    msr  sp_el1, x20
     mov  sp, x20
 
     // Case 1: EL1t uses SP_EL0, SA must fault before the load executes.

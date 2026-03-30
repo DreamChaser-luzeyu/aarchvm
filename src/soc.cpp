@@ -1304,7 +1304,7 @@ bool SoC::save_snapshot(const std::string& path) const {
     return false;
   }
   static constexpr char kMagic[8] = {'A', 'A', 'R', 'C', 'H', 'S', 'N', 'P'};
-  static constexpr std::uint32_t kVersion = 15;
+  static constexpr std::uint32_t kVersion = 20;
   const std::uint32_t snapshot_cpu_count = static_cast<std::uint32_t>(cpus_.size());
   out.write(kMagic, sizeof(kMagic));
   if (!out ||
@@ -1371,7 +1371,8 @@ bool SoC::load_snapshot(const std::string& path) {
       magic[4] != 'H' || magic[5] != 'S' || magic[6] != 'N' || magic[7] != 'P' ||
       (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 &&
       version != 7 && version != 8 && version != 9 && version != 10 && version != 11 && version != 12 &&
-       version != 13 && version != 14 && version != 15) ||
+      version != 13 && version != 14 && version != 15 && version != 16 && version != 17 &&
+      version != 18 && version != 19 && version != 20) ||
       boot_ram_base != kBootRamBase || boot_ram_size != kBootRamSize ||
       sdram_base != kSdramBase || sdram_size != kSdramSize ||
       !snapshot_io::read(in, timer_tick_scale_)) {

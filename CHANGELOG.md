@@ -1,3 +1,73 @@
+# 修改日志 2026-03-30 00:35
+
+## 本轮修改
+
+- 继续按“Armv8-A 程序可见正确性收尾计划”收 debug / DCC 这条线，补上了一个之前还留着的程序可见一致性缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+- 修正 `MDSCR_EL1[30:29]` 与 DCC live 状态脱节的问题：
+  - `MRS MDSCR_EL1` 现在会把 `RXfull/TXfull` 与 CPU 内部 DCC 状态统一，不再读到过期的保存值。
+  - `OS Lock` 锁定时，`MSR MDSCR_EL1` 对 `RXfull/TXfull` 的 save/restore 写入现在会同步更新 DCC full 标志，因此 `MDCCSR_EL0` 与后续 `MRS MDSCR_EL1` 看到的是同一份状态。
+  - `OS Lock` 解锁后，对这两个 full 位的 direct write 继续保持只读语义，不会错误清掉 live DCC 状态。
+- 新增正式裸机回归：
+  - [tests/arm64/debug_mdscr_dcc_flags.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/debug_mdscr_dcc_flags.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - 覆盖两类关键边界：
+    - `OS Lock` 锁定态下，`MDSCR_EL1` save/restore 写入 `TXfull/RXfull` 后，`MDCCSR_EL0` 与 `MDSCR_EL1` 要同步可见。
+    - `OS Lock` 解锁态下，`DBGDTRTX_EL0` 产生的 live `TXfull` 必须能被 `MRS MDSCR_EL1` 观察到，且 direct `MSR MDSCR_EL1` 不能错误清掉它。
+- 更新：
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+
+## 本轮测试
+
+- `timeout 300s ./tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/debug_mdscr_dcc_flags.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- `MDSCR_EL1` 和 DCC/EDSCR 的这一小块不再各管各的，`MDCCSR_EL0`、`DBGDTRTX_EL0`、`MRS/MSR MDSCR_EL1` 在 `TXfull/RXfull` 上现在是统一的 guest 可见状态。
+
+# 修改日志 2026-03-29 21:04
+
+## 本轮修改
+
+- 继续沿着“异常 / 系统寄存器 / trap 语义收尾”审计 `debug / DCC` 这条线，补上此前确实缺失的三类 self-hosted debug sysreg 最小语义：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [include/aarchvm/cpu.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/cpu.hpp)
+  - [src/soc.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/soc.cpp)
+- 新增 `MDCCINT_EL1` 最小实现：
+  - 读写现在不再错误落成 `UNDEFINED`；
+  - 仅保留架构定义的 `RX/TX` 使能位，其他位 `RES0`；
+  - 由于这是新增 CPU 快照状态，snapshot 版本从 `19` 升到 `20`，并兼容旧版 `19` 快照加载时把该寄存器复位为 `0`。
+- 新增 `OSDTRRX_EL1 / OSDTRTX_EL1` 最小实现：
+  - 它们现在作为 `DTRRX/DTRTX` 的 side-effect-free save/restore 视图存在；
+  - `MRS/MSR OSDTRRX_EL1` 只读写 `DTRRX` 的低 32 位，不改变 `RXfull`；
+  - `MRS/MSR OSDTRTX_EL1` 只读写 `DTRTX` 的低 32 位，不改变 `TXfull`；
+  - EL0 下对 `MDCCINT_EL1`、`OSDTRRX_EL1`、`OSDTRTX_EL1` 的访问现明确为 `UNDEFINED`，而不是落成 system access trap。
+- 新增正式裸机回归：
+  - [tests/arm64/debug_dcc_sysregs_minimal.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/debug_dcc_sysregs_minimal.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - 覆盖 `MDCCINT_EL1` 的 `RES0`-masked `RW`、`OSDTRRX_EL1 / OSDTRTX_EL1` 的 side-effect-free 行为、以及这些 sysreg 在 EL0 下的 `UNDEFINED` 边界。
+- 更新：
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+
+## 本轮测试
+
+- `timeout 300s ./tests/arm64/build_tests.sh`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/debug_dcc_sysregs_minimal.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- `DCC` 这组当前模型已声明存在的 debug sysreg 又收掉了一块真实缺口：`MDCCINT_EL1`、`OSDTRRX_EL1`、`OSDTRTX_EL1` 现在至少在程序可见层面不再是错误的 `UNDEFINED`。
+- 这轮之后，`debug/system register` 的剩余工作更集中在“是否还存在别的已声明 present 但未实现、或 trap/undef/no-op 边界仍不对的 self-hosted debug sysreg”这条线上。
+
 # 修改日志 2026-03-29 17:26
 
 ## 本轮修改
@@ -5262,3 +5332,116 @@
   - 标量 misaligned load / pair load fault。
   - `LDAR/STLR/LDXR/LSE atomic` misaligned fault。
   - 普通 `SIMD&FP` `LDR/STR Q` misaligned fault。
+
+# 修改日志 2026-03-29 18:34
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮收的是一组彼此相关的 `SP` / `SPSel` / special sysreg 程序可见语义缺口：
+  - [src/system_registers.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/system_registers.cpp) 现在按当前 `EL` 与 `PSTATE.SP` 收紧 direct `MRS/MSR SP_EL0`、`MRS/MSR SP_EL1` 的可见性。
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 修正了 direct `SP_EL0/SP_EL1` 的 special-case 语义：
+    - `SP_EL0` 在 `EL1t` 下不再被错误当作当前 `SP` 读写。
+    - `SP_EL1` 在当前仅实现 `EL0/EL1` 的模型里不再被错误宽放行。
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 补齐了 register-form `MSR SPSel, Xt` 的 bank 切换语义，避免它和 immediate-form `MSR SPSel, #imm` 行为不一致。
+  - [include/aarchvm/cpu.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/cpu.hpp) 把通用 datapath 对 `SP` 的写回统一改为走 `set_sp()`，使普通 `mov/add/sub/... -> SP` 与当前活跃 `SP` bank 始终保持同步，避免 `regs_[31]` 和 `SP_EL0/SP_EL1` 脱节。
+- 新增并接入了一个新的裸机回归：
+  - [tests/arm64/sp_special_sysreg_access.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/sp_special_sysreg_access.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - 该回归显式覆盖：
+    - `EL1h` 下 direct `MRS/MSR SP_EL0` 正常；
+    - `EL1t` 下 direct `MRS/MSR SP_EL0` 必须 `UNDEFINED`；
+    - `EL1` 下 direct `MRS/MSR SP_EL1` 在当前模型里必须 `UNDEFINED`；
+    - `MSR SPSel, Xt` 切换前后的 `SP_EL0/SP_EL1/current SP` bank 同步。
+- 修正了两处旧测试中“原先依赖模拟器宽放行、但不符合架构”的初始化方式：
+  - [tests/arm64/sp_alignment_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/sp_alignment_fault.S)
+  - [tests/arm64/fpsimd_sp_alignment_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_sp_alignment_fault.S)
+  - 旧写法用 `MSR SP_EL1, Xt` 在 `EL1` 直接初始化 handler 栈；在本轮把 `SP_EL1` 语义收紧到架构要求后，这两处测试改为通过当前 `SP` 路径 `mov sp, ...` 初始化 `EL1h` 栈。
+
+## 本轮测试
+
+- 定向构建与验证：
+  - `timeout 600s cmake --build build -j`
+  - `timeout 300s ./tests/arm64/build_tests.sh`
+  - `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/sp_special_sysreg_access.bin -load 0x0 -entry 0x0 -steps 800000`
+  - `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/sp_alignment_fault.bin -load 0x0 -entry 0x0 -steps 300000`
+  - `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_sp_alignment_fault.bin -load 0x0 -entry 0x0 -steps 800000`
+- 裸机完整回归：
+  - `timeout 5400s ./tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮确认并收口了一类真实的程序可见问题：同一个架构状态转换如果存在多条编码入口，就必须共用同一套 `SP bank` / `PSTATE.SP` 同步逻辑，否则会出现“单条指令测试能过，但换一种编码或进异常后状态坏掉”的隐蔽错误。
+- 目前这组 `SP_EL0/SP_EL1/SPSel/current SP` 相关 direct accessor 与 bank 切换路径已经被新的裸机回归和 Linux UMP/SMP 回归共同覆盖。
+- 但这还不足以宣称“Armv8-A 程序可见最小集已完整收口”：
+  - 仍需继续系统审查 `FP/AdvSIMD` 细节、SMP 同步原语与内存模型、MMU/TLB/fault 一致性，以及更系统的差分验证/长期 Linux 压力回归。
+
+# 修改日志 2026-03-29 23:13
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮收的是 AArch64 self-hosted debug 里 `OS Lock / OS Double Lock` 对 debug exception 生成的程序可见语义：
+  - [include/aarchvm/system_registers.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/system_registers.hpp)
+  - [src/system_registers.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/system_registers.cpp)
+  - 现在 `hardware breakpoint`、`watchpoint`、`software step` 的异常生成都会同时受 `OSLAR_EL1` 与 `OSDLR_EL1`/`DBGPRCR_EL1.CORENPDRQ` 共同约束；
+  - `BRK` instruction exception 仍保持不受 `OS Lock` / `OS Double Lock` 屏蔽，和 Arm ARM 的这条边界一致。
+- 同轮顺手修复了一个真实但非架构语义的回归问题：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - `Cpu::load_state()` 中 `dcc_int_enable_` 的快照恢复条件此前写反，导致新版本快照在读到该字段后直接失败；现已改正。
+- 新增并接入了专门的 debug lock 裸机回归：
+  - [tests/arm64/debug_lock_exception_gating.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/debug_lock_exception_gating.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - 覆盖项包括：
+    - `OS Lock` 屏蔽 EL1 hardware breakpoint；
+    - `OS Double Lock` 屏蔽 EL1 watchpoint；
+    - `CORENPDRQ=1` 关闭 `DoubleLockStatus()` 后 breakpoint 恢复生效；
+    - `OS Lock` 屏蔽 software step；
+    - `BRK` 不受上述 lock 影响。
+- 修正了两处旧 debug 测试的前置条件，使它们不再依赖此前错误的“复位态 lock 不生效”行为：
+  - [tests/arm64/debug_break_watch_basic.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/debug_break_watch_basic.S)
+  - [tests/arm64/software_step_basic.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/software_step_basic.S)
+  - 这两处现在都会在测试开始时显式清除 `OSLAR_EL1` / `OSDLR_EL1` / `DBGPRCR_EL1`，使测试只验证目标语义本身。
+
+## 本轮测试
+
+- 定向验证：
+  - `timeout 60s ./build/aarchvm -bin tests/arm64/out/snapshot_resume.bin -load 0x0 -entry 0x0 -steps 2000 -snapshot-save out/tmp-test.snap`
+  - `timeout 60s ./build/aarchvm -snapshot-load out/tmp-test.snap -steps 10000`
+  - `timeout 60s env AARCHVM_BRK_MODE=trap ./build/aarchvm -bin tests/arm64/out/debug_lock_exception_gating.bin -load 0x0 -entry 0x0 -steps 1200000`
+- 裸机完整回归：
+  - `timeout 5400s ./tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮把 `debug / system / trap` 线里一个明确的程序可见缺口补上了：此前模型会在 `OS Lock` 或 `OS Double Lock` 生效时，仍错误生成 non-BRK 类 debug exception；现在这条行为已经被实现并被单测锁住。
+- 目前还不能宣称“Armv8-A 程序可见最小集已完整收口”。在当前代码状态下，我认为剩余最值得继续审的仍然是：
+  - `FP/AdvSIMD` 细节，尤其 `FPCR/FPSR` 与 NaN/subnormal/flags 传播的一致性尾差；
+  - `SMP` 下同步原语、barrier、exclusive/LSE 与异常/fault 交错时的边界；
+  - `MMU/TLB/fault` 在更复杂 Linux 压力和差分验证下是否还会暴露新的尾差。
+# 修改日志 2026-03-30 21:15
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮收的是 `MDSCR_EL1.TDA` 对 breakpoint/watchpoint debug sysreg 访问的最小程序可见语义。
+- 修改：
+  - 在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 的 `exec_system()` 中补上了 `software access debug event` 的最小建模：
+    - 对本来会成功的 `DBGBVR/DBGBCR/DBGWVR/DBGWCR` 读写访问；
+    - 当 `MDSCR_EL1.TDA=1` 且 `OS Lock` 已解锁时；
+    - 不再静默成功，而是进入当前模型的 halting 路径。
+  - 这里没有把它伪装成别的同步异常；当前模型仍未实现完整 halting debug state，因此采用现有 `halted_` 机制来表达“软件访问触发 halting debug event”这一程序可见结果。
+- 新增并接入裸机回归：
+  - [tests/arm64/debug_software_access_halt_read.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/debug_software_access_halt_read.S)
+  - [tests/arm64/debug_software_access_halt_write.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/debug_software_access_halt_write.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 新测试覆盖：
+  - `OS Lock` 保持锁定时，`TDA` 只作为 `EDSCR.TDA` 的 save/restore 影子位，不应影响直接 debug sysreg 访问；
+  - `OS Lock` 解锁后，同样的 `DBGBCR/DBGWCR` 访问会触发 halting 行为；
+  - 分别覆盖读路径与写路径。

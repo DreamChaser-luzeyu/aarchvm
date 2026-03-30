@@ -59,6 +59,54 @@ after_msr_pan_imm:
     cmp  x12, x13
     b.ne fail4
 
+    adr  x3, el0_mrs_sp_el0
+    msr  elr_el1, x3
+    msr  spsr_el1, xzr
+    eret
+
+after_mrs_sp_el0:
+    adr  x11, trap_count
+    ldr  x12, [x11]
+    movz x13, #5
+    cmp  x12, x13
+    b.ne fail5
+
+    adr  x3, el0_msr_sp_el0
+    msr  elr_el1, x3
+    msr  spsr_el1, xzr
+    eret
+
+after_msr_sp_el0:
+    adr  x11, trap_count
+    ldr  x12, [x11]
+    movz x13, #6
+    cmp  x12, x13
+    b.ne fail6
+
+    adr  x3, el0_mrs_sp_el1
+    msr  elr_el1, x3
+    msr  spsr_el1, xzr
+    eret
+
+after_mrs_sp_el1:
+    adr  x11, trap_count
+    ldr  x12, [x11]
+    movz x13, #7
+    cmp  x12, x13
+    b.ne fail7
+
+    adr  x3, el0_msr_sp_el1
+    msr  elr_el1, x3
+    msr  spsr_el1, xzr
+    eret
+
+after_msr_sp_el1:
+    adr  x11, trap_count
+    ldr  x12, [x11]
+    movz x13, #8
+    cmp  x12, x13
+    b.ne fail8
+
     movz x0, #'S'
     str  x0, [x1]
     movz x0, #'\n'
@@ -76,6 +124,18 @@ fail3:
     b out
 fail4:
     movz x0, #'4'
+    b out
+fail5:
+    movz x0, #'5'
+    b out
+fail6:
+    movz x0, #'6'
+    b out
+fail7:
+    movz x0, #'7'
+    b out
+fail8:
+    movz x0, #'8'
     b out
 
 out:
@@ -112,6 +172,42 @@ el0_msr_pan_imm_insn:
     msr  pan, #1
     svc  #0x14
 
+el0_mrs_sp_el0:
+    movz x0, #0x1111
+    movk x0, #0x2222, lsl #16
+    movk x0, #0x3333, lsl #32
+    movk x0, #0x4444, lsl #48
+el0_mrs_sp_el0_insn:
+    mrs  x0, sp_el0
+    svc  #0x15
+
+el0_msr_sp_el0:
+    movz x0, #0xaaaa
+    movk x0, #0xbbbb, lsl #16
+    movk x0, #0xcccc, lsl #32
+    movk x0, #0xdddd, lsl #48
+el0_msr_sp_el0_insn:
+    msr  sp_el0, x0
+    svc  #0x16
+
+el0_mrs_sp_el1:
+    movz x0, #0x0102
+    movk x0, #0x0304, lsl #16
+    movk x0, #0x0506, lsl #32
+    movk x0, #0x0708, lsl #48
+el0_mrs_sp_el1_insn:
+    mrs  x0, sp_el1
+    svc  #0x17
+
+el0_msr_sp_el1:
+    movz x0, #0xdead
+    movk x0, #0xbeef, lsl #16
+    movk x0, #0x1357, lsl #32
+    movk x0, #0x2468, lsl #48
+el0_msr_sp_el1_insn:
+    msr  sp_el1, x0
+    svc  #0x18
+
     .balign 2048
 vectors:
     .space 0x400
@@ -136,6 +232,18 @@ lower_sync_handler:
     adr  x23, el0_msr_pan_imm_insn
     cmp  x22, x23
     b.eq undef_msr_pan_imm
+    adr  x23, el0_mrs_sp_el0_insn
+    cmp  x22, x23
+    b.eq undef_mrs_sp_el0
+    adr  x23, el0_msr_sp_el0_insn
+    cmp  x22, x23
+    b.eq undef_msr_sp_el0
+    adr  x23, el0_mrs_sp_el1_insn
+    cmp  x22, x23
+    b.eq undef_mrs_sp_el1
+    adr  x23, el0_msr_sp_el1_insn
+    cmp  x22, x23
+    b.eq undef_msr_sp_el1
     b handler_fail
 
 undef_mrs_spsel:
@@ -176,6 +284,46 @@ undef_msr_pan_imm:
     movz x26, #4
     str  x26, [x25]
     adr  x27, after_msr_pan_imm
+    b return_to_el1
+
+undef_mrs_sp_el0:
+    movz x24, #0x1111
+    movk x24, #0x2222, lsl #16
+    movk x24, #0x3333, lsl #32
+    movk x24, #0x4444, lsl #48
+    cmp  x0, x24
+    b.ne handler_fail
+    adr  x25, trap_count
+    movz x26, #5
+    str  x26, [x25]
+    adr  x27, after_mrs_sp_el0
+    b return_to_el1
+
+undef_msr_sp_el0:
+    adr  x25, trap_count
+    movz x26, #6
+    str  x26, [x25]
+    adr  x27, after_msr_sp_el0
+    b return_to_el1
+
+undef_mrs_sp_el1:
+    movz x24, #0x0102
+    movk x24, #0x0304, lsl #16
+    movk x24, #0x0506, lsl #32
+    movk x24, #0x0708, lsl #48
+    cmp  x0, x24
+    b.ne handler_fail
+    adr  x25, trap_count
+    movz x26, #7
+    str  x26, [x25]
+    adr  x27, after_mrs_sp_el1
+    b return_to_el1
+
+undef_msr_sp_el1:
+    adr  x25, trap_count
+    movz x26, #8
+    str  x26, [x25]
+    adr  x27, after_msr_sp_el1
 
 return_to_el1:
     movz x28, #0x5                // EL1h

@@ -309,10 +309,24 @@ private:
   [[nodiscard]] bool translate_data_address_fast(std::uint64_t va, bool write, std::uint64_t* out_pa);
   [[nodiscard]] bool translate_data_address_fast(std::uint64_t va, AccessType access, std::uint64_t* out_pa);
   void invalidate_ram_page_caches();
-  [[nodiscard]] bool mmu_read_value(std::uint64_t va, std::size_t size, std::uint64_t* out);
-  [[nodiscard]] bool mmu_read_value(std::uint64_t va, std::size_t size, std::uint64_t* out, AccessType access);
-  [[nodiscard]] bool mmu_write_value(std::uint64_t va, std::uint64_t value, std::size_t size);
-  [[nodiscard]] bool mmu_write_value(std::uint64_t va, std::uint64_t value, std::size_t size, AccessType access);
+  [[nodiscard]] bool mmu_read_value(std::uint64_t va,
+                                    std::size_t size,
+                                    std::uint64_t* out,
+                                    bool check_watchpoints = true);
+  [[nodiscard]] bool mmu_read_value(std::uint64_t va,
+                                    std::size_t size,
+                                    std::uint64_t* out,
+                                    AccessType access,
+                                    bool check_watchpoints = true);
+  [[nodiscard]] bool mmu_write_value(std::uint64_t va,
+                                     std::uint64_t value,
+                                     std::size_t size,
+                                     bool check_watchpoints = true);
+  [[nodiscard]] bool mmu_write_value(std::uint64_t va,
+                                     std::uint64_t value,
+                                     std::size_t size,
+                                     AccessType access,
+                                     bool check_watchpoints = true);
   void clear_exclusive_monitor();
   [[nodiscard]] bool capture_exclusive_phys_addrs(std::uint64_t va,
                                                   std::size_t size,
@@ -343,6 +357,27 @@ private:
   void parse_pc_watch_list();
   void save_current_sp_to_bank();
   void load_current_sp_from_bank();
+  [[nodiscard]] bool dcc_el0_access_allowed() const;
+  [[nodiscard]] std::uint64_t read_mdccsr_el0() const;
+  [[nodiscard]] std::uint64_t read_mdccint_el1() const;
+  [[nodiscard]] std::uint64_t read_dbgdtr_el0();
+  [[nodiscard]] std::uint32_t read_dbgdtrrx_el0();
+  [[nodiscard]] std::uint64_t read_osdtrrx_el1() const;
+  [[nodiscard]] std::uint64_t read_osdtrtx_el1() const;
+  void write_mdccint_el1(std::uint64_t value);
+  void write_dbgdtr_el0(std::uint64_t value);
+  void write_dbgdtrtx_el0(std::uint32_t value);
+  void write_osdtrrx_el1(std::uint64_t value);
+  void write_osdtrtx_el1(std::uint64_t value);
+  [[nodiscard]] bool maybe_take_breakpoint_exception(std::uint64_t fault_pc);
+  [[nodiscard]] bool maybe_take_watchpoint_exception(std::uint64_t va,
+                                                     std::size_t size,
+                                                     AccessType access);
+  [[nodiscard]] bool debug_privilege_matches(std::uint64_t ctrl) const;
+  [[nodiscard]] bool maybe_take_software_step_before_instruction();
+  void complete_software_step_after_instruction(std::uint64_t next_pc, std::uint32_t insn);
+  [[nodiscard]] std::uint64_t captured_pstate_for_sync_exception(std::uint32_t ec) const;
+  [[nodiscard]] static bool is_load_exclusive_instruction(std::uint32_t insn);
   [[nodiscard]] std::uint64_t shared_timer_steps() const;
   void refresh_local_timer_irq_lines();
   [[nodiscard]] std::uint16_t compute_irq_threshold() const {
@@ -384,7 +419,7 @@ private:
   }
   void set_sp_or_reg(std::uint32_t idx, std::uint64_t value, bool is_32bit) {
     if (idx == 31) {
-      regs_[31] = is_32bit ? static_cast<std::uint32_t>(value) : value;
+      set_sp(is_32bit ? static_cast<std::uint32_t>(value) : value);
       return;
     }
     if (is_32bit) {
@@ -448,6 +483,11 @@ private:
   std::uint64_t icc_igrpen1_el1_ = 0;
   std::array<std::uint64_t, 4> icc_ap0r_el1_{};
   std::array<std::uint64_t, 4> icc_ap1r_el1_{};
+  std::uint32_t dcc_rx_data_ = 0;
+  std::uint32_t dcc_tx_data_ = 0;
+  std::uint32_t dcc_int_enable_ = 0;
+  bool dcc_rx_full_ = false;
+  bool dcc_tx_full_ = false;
   bool exclusive_valid_ = false;
   std::uint64_t exclusive_addr_ = 0;
   std::uint8_t exclusive_size_ = 0;
@@ -466,6 +506,8 @@ private:
   std::uint16_t irq_query_threshold_ = 0;
   std::uint16_t irq_delivery_threshold_ = 0xFF;
   bool irq_query_negative_valid_ = false;
+  bool exception_taken_this_step_ = false;
+  bool stepped_instruction_in_flight_ = false;
   bool halted_ = false;
   bool predecode_enabled_ = true;
   std::size_t cpu_index_ = 0;

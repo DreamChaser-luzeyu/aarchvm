@@ -55,11 +55,20 @@
 - [x] 已收口一组“应为 `UNDEFINED` 却被误分类成 EL0 system access trap”的 system-encoding / sysreg 边界，包括若干 absent feature 指令族。
 - [x] 已对齐 `ID_AA64PFR0_EL1.GIC` 与当前 `ICC_*` system register 可见性，避免对外声明与实现矛盾。
 - [x] 已收口 debug sysreg 资源数量边界，使 `ID_AA64DFR0_EL1` 的资源声明与 `DBGBVR<n>/DBGWVR<n>` 等可见性一致。
+- [x] 已按 `OS Lock` / `OS Double Lock` / `CORENPDRQ` 收口 self-hosted debug 异常生成条件，确保除 `BRK` 外，hardware breakpoint、watchpoint、software step 在锁定时都被正确抑制，而 `BRK` 保持始终可见。
+- [x] 已新增 `debug_lock_exception_gating` 裸机回归覆盖上述 debug lock 语义，并修正 `debug_break_watch_basic`、`software_step_basic` 的测试前置条件，使其显式解锁 debug lock，不再依赖旧的错误宽放行行为。
+- [x] 已为 `MDSCR_EL1.TDA` 补上最小 software-access debug event 行为：对本来会成功的 `DBGBVR/DBGBCR/DBGWVR/DBGWCR` 访问，在 `OS Lock` 解锁且 `TDA=1` 时进入 halting 行为；并补 `debug_software_access_halt_read/write` 裸机回归覆盖“锁着不触发、解锁后 halt”的读写路径。
+- [x] 已收口 `MDSCR_EL1[30:29] <-> EDSCR/MDCCSR_EL0` 这组 DCC full-flag 联动：`OS Lock` 锁定时通过 `MSR MDSCR_EL1` 的 save/restore 写入会同步更新 `TXfull/RXfull`，解锁后 `MRS MDSCR_EL1` 会只读反映 live 的 DCC 状态；并补 `debug_mdscr_dcc_flags` 裸机回归覆盖锁定态 save/restore 与解锁态 live 反映。
 - [x] 已收口 `AT S1E1R/W` 与 `PSTATE.PAN` / `FEAT_PAN2` 的边界，避免 plain `AT` 错误受 PAN 影响，并确保 `AT S1E1RP/WP` 在 `FEAT_PAN2` absent 时表现为 `UNDEFINED`。
 - [x] 已对齐 `ID_AA64MMFR0_EL1` 的 granule 声明与当前 `4KB`-only 页表实现，避免把未实现的 `16KB granule` 错误宣称为存在。
 - [x] 已收口 `ID_AA64MMFR0_EL1.BigEnd/BigEndEL0` 与 `SCTLR_EL1.EE/E0E` 的固定值语义，避免在 mixed-endian absent 时仍把 `EE/E0E` 读回为可配置位。
 - [x] 已收口 `SPSR_EL1` 在“AArch64-only + 当前 absent feature 集”下的 `RES0` / 固定位语义，避免 guest 通过 `MSR SPSR_EL1` 把 `UAO/DIT/TCO/SSBS/BTYPE/ALLINT/PM/PPEND/EXLOCK/PACM/UINJ` 等当前未实现位读回成 1。
-- [x] 已修正 `MSR SPSel` 的程序可见切换语义，确保切换 `PSTATE.SP` 时同步保存当前 `SP` bank 并装载目标 `SP_EL0/SP_EL1`。
+- [x] 已收口 `SPSel` / `SP_EL0` / `SP_EL1` 这一组 special-purpose stack pointer accessor 的程序可见语义：
+  - `MSR SPSel, #imm` 与 `MSR SPSel, Xt` 现在都会在 CPU 侧同步保存/恢复当前 `SP` bank；
+  - 通用 datapath 对 `SP` 的写回现在会同步当前活跃 bank，避免 `regs_[31]` 与 `SP_EL0/SP_EL1` 脱节；
+  - direct `MRS/MSR SP_EL0` 在 `EL1t` 下按架构表现为 `UNDEFINED`；
+  - direct `MRS/MSR SP_EL1` 在当前仅实现 `EL0/EL1` 的模型里不再被错误宽放行；
+  - 已补裸机回归覆盖这些边界，并把旧的 `SP` alignment 测试从架构上不成立的 `MSR SP_EL1, Xt` 初始化改回 `mov sp, ...`。
 - [x] 已修正“同一条 load/store 指令在 helper 已经取同步异常后仍继续发起后续访存或再次 `data_abort()`”的问题，避免双重异常和错误的异常覆盖。
 - [x] 已收口 `FEAT_PAuth absent` 下 hint-space 与 integer / direct `PAuth` encoding 的语义边界，确保前者为 `NOP`、后者为 `UNDEFINED`，并修正 direct integer encodings 被 generic integer decode 误吞的问题。
 - [x] 已收口 `PACM` 在 `!FEAT_PAuth_LR` 下的语义，确保它作为 hint-space 指令表现为 `NOP` 而不是 `UNDEFINED`，并补裸机单测覆盖 EL1 / EL0 两种执行路径。
@@ -68,6 +77,7 @@
 - [x] 已补 `RETAASPPC/RETABSPPC` immediate-return 形式的正式裸机回归，确认当前 `!FEAT_PAuth_LR` 模型下它们稳定表现为 `UNDEFINED`，且不会被其它分支类解码误吞。
 - [x] 已补 `RMIF/SETF8/SETF16` 的正式裸机回归，确认当前 `!FEAT_FlagM` 模型下它们在 EL1/EL0 都稳定表现为 `UNDEFINED`，且 `FAR_EL1` 保持当前未定义指令异常形态。
 - [x] 已补 `DGH/ESB/TSB/GCSB/CLRBHB/BTI/CHKFEAT/STSHH` 的 hint-space absent-feature 裸机回归，确认当前 feature 声明下它们稳定表现为 `NOP`，且 `CHKFEAT X16` 保持输入值不变。
+- [x] 已补 `MDCCINT_EL1` 以及 `OSDTRRX_EL1 / OSDTRTX_EL1` 的最小程序可见语义：`MDCCINT_EL1` 现为 `RX/TX` 两个位的 `RES0`-masked `RW`，`OSDTR*` 现作为 side-effect-free 的 DCC save/restore 视图访问 `DTRRX/DTRTX`，并补裸机回归覆盖 EL1 读写、`TXfull/RXfull` 不被意外改变，以及 EL0 下这些 sysreg 为 `UNDEFINED` 而非 trap。
 
 ### 3. SMP 内存模型与同步原语收尾
 
