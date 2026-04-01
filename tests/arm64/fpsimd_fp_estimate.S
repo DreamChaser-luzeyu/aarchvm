@@ -51,7 +51,7 @@ _start:
     adr  x1, exp_frecpe_tiny
     bl   check4
     mrs  x2, fpsr
-    mov  x3, #(1 << 4)
+    mov  x3, #0x14
     cmp  x2, x3
     b.ne fail4
 

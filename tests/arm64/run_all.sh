@@ -228,6 +228,7 @@ test "$(./build/aarchvm -bin tests/arm64/out/el0_hvc_smc_undef.bin -load 0x0 -en
 test "$(./build/aarchvm -bin tests/arm64/out/el1_hvc_smc_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'J'
 test "$(./build/aarchvm -bin tests/arm64/out/pc_alignment_fault.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'P'
 test "$(./build/aarchvm -bin tests/arm64/out/sp_special_sysreg_access.bin -load 0x0 -entry 0x0 -steps 800000 | tr -d '\r\n')" = 'R'
+test "$(./build/aarchvm -bin tests/arm64/out/sysreg_xzr_semantics.bin -load 0x0 -entry 0x0 -steps 400000 | tr -d '\r\n')" = 'Z'
 run_expect_trap brk_exception.bin 600000 B
 run_expect_trap hlt_undef.bin 600000 H
 test "$(./build/aarchvm -bin tests/arm64/out/pacm_absent_nop.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'M'
@@ -288,7 +289,10 @@ run_expect fcmp_e.bin 200000 W
 run_expect fp_scalar_convert.bin 200000 W
 run_expect fp_fcvtzu_scalar.bin 200000 U
 run_expect fp_fcvt_flags.bin 200000 Z
+run_expect fp_fcvtn_flags.bin 300000 N
+run_expect fp_frecpe_flags.bin 300000 Y
 run_expect fp_fcvt_rounding_scalar.bin 300000 R
+run_expect fp_fcvt_special_scalar.bin 300000 S
 run_expect fp_int_to_fp_rounding.bin 300000 I
 run_expect fp_compare_flags.bin 200000 Q
 run_expect fp_scalar_compare_flags.bin 200000 K
@@ -355,6 +359,7 @@ run_expect fpsimd_ld1_multi_alignment.bin 500000 J
 run_expect fpsimd_sp_alignment_fault.bin 500000 Z
 run_expect id_aa64_feature_regs.bin 200000 I
 run_expect mmu_el0_ap_fault.bin 4000000 U
+run_expect mmu_el0_uxn_fetch_abort.bin 4000000 u
 run_expect mmu_pan_user_access.bin 4000000 N
 run_expect mmu_ldtr_sttr_pan.bin 4000000 U
 run_expect mmu_tlb_asid_scope.bin 4000000 A

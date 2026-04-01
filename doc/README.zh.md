@@ -316,6 +316,7 @@ mkdir -p out/initramfs-full-root/{dev,proc,sys,tmp,run,root,mnt,etc}
 - `-stop-on-uart <text>`：UART 输出命中特定字符串时立即停止
 - `-decode <fast|slow>`：切换解码执行路径，默认使用快路径
 - `-fb-sdl <on|off>`：显式打开或关闭 SDL framebuffer 窗口
+- `-arch-timer-mode <step|host>`：选择架构定时器时间源。`step` 保持当前用于回归/性能测试的确定性 guest-step 计时；`host` 让 `CNTVCT/CNTPCT` 跟随宿主机 monotonic 时钟，更适合交互式 Linux 使用
 
 行为控制环境变量：
 - `AARCHVM_BRK_MODE=trap|halt`：控制 A64 `BRK` 的处理方式。默认值是 `trap`，即按架构要求产生 Breakpoint Instruction exception。`halt` 保留历史上的裸机测试停机语义，使 `BRK` 立即终止模拟器；`tests/arm64/run_all.sh` 会导出这个模式，以兼容现有裸机回归。
@@ -323,6 +324,7 @@ mkdir -p out/initramfs-full-root/{dev,proc,sys,tmp,run,root,mnt,etc}
 - `AARCHVM_DTB_PATH=<file>` / `AARCHVM_DTB_ADDR=<addr>`：不经命令行显式传参时，使用环境变量方式注入 DTB。
 - `AARCHVM_UART_TX_MATCH=<text>` + `AARCHVM_UART_TX_REPLY=<text>`：宿主机侧的一次性 UART 提示符匹配/自动回复组合，可用于脚本化 U-Boot 引导，同时保留交互式 stdin 路径。
 - `AARCHVM_FB_SDL=0|1`：当未显式传 `-fb-sdl` 时，用环境变量控制 SDL framebuffer 默认开关。
+- `AARCHVM_ARCH_TIMER_MODE=step|host`：`-arch-timer-mode` 的环境变量形式。手工交互 Linux 时建议用 `host`，使 guest 的 `CLOCK_REALTIME/CLOCK_MONOTONIC` 以宿主机速度流逝。
 
 交互式串口快捷键：
 - 当 stdin 是终端时，可按 `Ctrl+A`，再按 `x`，立即终止模拟器
@@ -375,6 +377,7 @@ mkdir -p out/initramfs-full-root/{dev,proc,sys,tmp,run,root,mnt,etc}
 ```
 
 该脚本会从 `out/linux-usertests-shell-v1.snap` 恢复，适合在已经生成快照后快速进入 BusyBox 串口 shell。
+它默认会传 `-arch-timer-mode host`，因此交互式 Linux shell 看到的是宿主机节奏的架构定时器，而不是回归专用的确定性 step 计时模型。
 
 如果是在宿主机终端上直接交互，可使用 QEMU 风格的串口退出序列 `Ctrl+A`，再按 `x` 来退出。
 
@@ -427,6 +430,7 @@ console=ttyAMA0,115200 console=tty1 earlycon=pl011,0x09000000 rdinit=/init initr
 - SDL 窗口中的键盘输入通过 PL050 PS/2 键盘送入 Linux
 
 `run_gui_tty1.sh` 负责完整冷启动 GUI 路径，并默认在结束时保存一个快照；`run_gui_tty1_from_snapshot.sh` 则是在该快照已经存在时的快速恢复入口。
+这两个 GUI 脚本也默认启用 `-arch-timer-mode host`，以便 framebuffer shell 在手工使用时拥有正常的时间流速。
 
 ## 测试入口
 
@@ -463,9 +467,10 @@ console=ttyAMA0,115200 console=tty1 earlycon=pl011,0x09000000 rdinit=/init initr
 - `AARCHVM_UART_RX_SCRIPT`：按步数向 UART 注入输入字节，供自动化串口测试使用。
 - `AARCHVM_PS2_RX_SCRIPT`：按步数向 PS/2 键盘设备注入输入字节，供 KMI/键盘路径测试使用。
 - `AARCHVM_BUS_FASTPATH=1`：启用总线快路径。
-- `AARCHVM_TIMER_SCALE=<n>`：调整虚拟计时推进比例，加速 Linux 启动与测试。
+- `AARCHVM_TIMER_SCALE=<n>`：调整确定性 guest-step 架构定时器的推进比例，用于加速回归/性能路径。
+- `AARCHVM_ARCH_TIMER_MODE=step|host`：在确定性 guest-step 定时器与宿主 monotonic 定时器之间切换。
 - `AARCHVM_SCHED_MODE=event|legacy`：选择 SoC 外层调度器。当前默认是 `event`，也是现有 SMP/Linux timer 路径下语义正确的模式。`legacy` 保留旧的固定步数 fallback，适合调试或做 A/B 对比，但它会明显推迟 SMP 近期限时器递送，不应视作行为等价模式。
-- 当前主线脚本在单核和 SMP 回归上都统一使用 `AARCHVM_TIMER_SCALE=1`。更大的倍率仍可用于本地实验，但在 SMP 下它们曾多次把 guest 虚拟时间推得过快，从而放大 Linux 看门狗 / RCU 敏感性，因此应视作调参项，而不是默认回归配置。
+- 当前自动化脚本保持 `-arch-timer-mode step` 且 `AARCHVM_TIMER_SCALE=1`，以获得可重复的回归/性能基线；`run_interactive.sh`、`run_gui_tty1.sh`、`run_gui_tty1_from_snapshot.sh` 这类手工恢复脚本则默认切到 `host` 模式。
 - `AARCHVM_STDIN_RX_GAP=<steps>`：对来自非交互式 stdin 的 UART 输入做步数节流，适合脚本化串口会话与批量命令注入。
 - `AARCHVM_DEBUG_SLOW=1`：强制启用保守的调试慢路径，关闭指令预解码、SoC 总线 fast path，以及 CPU 对 RAM 的直读直写快路径，便于在不依赖这些宿主机侧优化捷径的情况下复查回归。
 - `AARCHVM_PRINT_SUMMARY=1`：打印最终全局步数，并在 SMP 下额外打印每个 CPU 的摘要；当前快照构建/验证脚本会用它来提取提示符所在步数。

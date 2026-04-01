@@ -316,6 +316,7 @@ Common options:
 - `-stop-on-uart <text>`: stop immediately when UART output matches a string
 - `-decode <fast|slow>`: switch decode execution path, default is the fast path
 - `-fb-sdl <on|off>`: explicitly enable or disable the SDL framebuffer window
+- `-arch-timer-mode <step|host>`: choose the architectural timer source. `step` keeps the deterministic guest-step counter used by regression/perf flows; `host` makes `CNTVCT/CNTPCT` follow the host monotonic clock for interactive Linux timing
 
 Behavior-control environment variables:
 - `AARCHVM_BRK_MODE=trap|halt`: control how the emulator handles A64 `BRK`. The default is `trap`, which follows the architected Breakpoint Instruction exception model. `halt` keeps the historical bare-metal test behavior where `BRK` immediately stops the emulator; `tests/arm64/run_all.sh` exports this mode for legacy stop semantics.
@@ -323,6 +324,7 @@ Behavior-control environment variables:
 - `AARCHVM_DTB_PATH=<file>` / `AARCHVM_DTB_ADDR=<addr>`: environment-variable DTB injection path, used when the DTB is not passed explicitly on the command line.
 - `AARCHVM_UART_TX_MATCH=<text>` + `AARCHVM_UART_TX_REPLY=<text>`: one-shot host-side UART prompt matcher / auto-reply pair. This is useful for scripted U-Boot hand-off without permanently replacing interactive stdin.
 - `AARCHVM_FB_SDL=0|1`: default SDL framebuffer enable switch when `-fb-sdl` is not specified.
+- `AARCHVM_ARCH_TIMER_MODE=step|host`: environment-variable form of `-arch-timer-mode`. Use `host` for interactive Linux sessions when you want guest `CLOCK_REALTIME/CLOCK_MONOTONIC` to run at host speed.
 
 Interactive serial shortcut:
 - when stdin is a TTY, press `Ctrl+A`, then `x` to stop the emulator immediately
@@ -375,6 +377,7 @@ This is the recommended reproducible path for regression and performance runs.
 ```
 
 This restores `out/linux-usertests-shell-v1.snap` and is the fastest way to get back into the BusyBox serial shell once the snapshot has already been created.
+It defaults to `-arch-timer-mode host`, so the Linux shell sees a host-paced architectural timer instead of the deterministic regression timer model.
 
 When running interactively on the host terminal, you can exit with the QEMU-style serial escape `Ctrl+A`, then `x`.
 
@@ -427,6 +430,7 @@ Meaning:
 - deliver SDL window keyboard input through the PL050 PS/2 keyboard device
 
 `run_gui_tty1.sh` is the cold-boot GUI path and saves a snapshot at the end by default. `run_gui_tty1_from_snapshot.sh` is the matching fast-restore helper once that snapshot already exists.
+Both GUI helpers default to `-arch-timer-mode host` for the same reason as `run_interactive.sh`: the framebuffer shell should see normal wall-clock progression during manual use.
 
 ## Test Entry Points
 
@@ -463,9 +467,10 @@ The current implementation supports these commonly used mechanisms:
 - `AARCHVM_UART_RX_SCRIPT`: inject bytes into UART at selected step counts for automated serial tests.
 - `AARCHVM_PS2_RX_SCRIPT`: inject bytes into the PS/2 keyboard device at selected step counts for KMI / keyboard testing.
 - `AARCHVM_BUS_FASTPATH=1`: enable the bus fast path.
-- `AARCHVM_TIMER_SCALE=<n>`: scale virtual timer progression to accelerate Linux boot and regression runs.
+- `AARCHVM_TIMER_SCALE=<n>`: scale the guest-step architectural timer progression used by deterministic regression/perf paths.
+- `AARCHVM_ARCH_TIMER_MODE=step|host`: select between deterministic guest-step timer mode and host-monotonic timer mode.
 - `AARCHVM_SCHED_MODE=event|legacy`: choose the SoC outer scheduler. `event` is the default and is the semantically correct mode for the current SMP/Linux timer paths. `legacy` keeps the older fixed-step fallback and is useful for debugging or A/B measurement, but it can delay near-term SMP timer delivery and should not be treated as behavior-equivalent.
-- The current mainline scripts use `AARCHVM_TIMER_SCALE=1` for both single-core and SMP regression flows. Larger values can still be useful for local experiments, but on SMP they have historically made guest virtual time advance aggressively enough to trigger Linux watchdog / RCU sensitivity, so they should be treated as tuning knobs rather than default regression settings.
+- The current automation scripts keep `-arch-timer-mode step` and `AARCHVM_TIMER_SCALE=1` for reproducible regression/perf behavior. The manual restore helpers (`run_interactive.sh`, `run_gui_tty1.sh`, `run_gui_tty1_from_snapshot.sh`) switch to host timer mode by default.
 - `AARCHVM_STDIN_RX_GAP=<steps>`: pace bytes from non-interactive stdin before they reach UART, useful for scripted serial sessions and bulk command injection.
 - `AARCHVM_DEBUG_SLOW=1`: force a conservative debug execution mode. This disables instruction predecode, disables the SoC bus fast path, and disables the CPU RAM direct read/write fast path so regressions can be checked without those host-side shortcuts.
 - `AARCHVM_PRINT_SUMMARY=1`: print the final global step count and, in SMP mode, a per-CPU summary. The snapshot build / verify scripts use this to derive prompt-step checkpoints.

@@ -59,7 +59,10 @@ build_asm_prog fcmp_e
 build_asm_prog fp_scalar_convert
 build_asm_prog fp_fcvtzu_scalar
 build_asm_prog fp_fcvt_flags
+build_asm_prog fp_fcvtn_flags
+build_asm_prog fp_frecpe_flags
 build_asm_prog fp_fcvt_rounding_scalar
+build_asm_prog fp_fcvt_special_scalar
 build_asm_prog fp_int_to_fp_rounding
 build_asm_prog fp_compare_flags
 build_asm_prog fp_scalar_compare_flags
@@ -149,6 +152,7 @@ build_asm_prog el1_hvc_smc_undef
 build_asm_prog brk_exception
 build_asm_prog hlt_undef
 build_asm_prog pc_alignment_fault
+build_asm_prog sysreg_xzr_semantics
 build_asm_prog pacm_absent_nop
 build_asm_prog ldraa_ldrab_absent_undef
 build_asm_prog ls64_absent_undef
@@ -217,6 +221,7 @@ build_asm_prog mmu_dc_ivac_perm_fault
 build_asm_prog mmu_dc_zva_fault
 build_asm_prog mmu_dc_zva_el0_perm_fault
 build_asm_prog mmu_ic_ivau_el0_perm_fault
+build_asm_prog mmu_el0_uxn_fetch_abort
 build_asm_prog mmu_xn_fetch_abort
 build_asm_prog mmu_cross_page_load
 build_asm_prog mmu_cross_page_store

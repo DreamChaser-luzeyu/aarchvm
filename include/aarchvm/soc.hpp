@@ -39,6 +39,7 @@ public:
   bool load_block_image(const std::vector<std::uint8_t>& bytes);
   void set_framebuffer_sdl_enabled(bool enabled);
   void set_secondary_boot_mode(SecondaryBootMode mode) { secondary_boot_mode_ = mode; }
+  void set_arch_timer_mode(GenericTimer::ClockMode mode);
   void reset(std::uint64_t entry_pc);
   void set_predecode_enabled(bool enabled);
   void set_sp(std::uint64_t sp);
@@ -214,6 +215,7 @@ private:
   std::vector<bool> cpu_powered_on_;
   SecondaryBootMode secondary_boot_mode_ = SecondaryBootMode::AllStart;
   SchedulerMode scheduler_mode_ = SchedulerMode::EventDriven;
+  GenericTimer::ClockMode arch_timer_mode_ = GenericTimer::ClockMode::GuestStep;
   std::uint64_t timer_tick_scale_ = 1;
   std::uint64_t global_steps_ = 0;
   std::uint64_t guest_time_fp_ = 0;

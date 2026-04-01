@@ -5,8 +5,8 @@ ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 FASTPATH="${AARCHVM_BUS_FASTPATH:-1}"
-# tty1/fbcon on SMP needs a slower virtual timer under the current instruction-count time model.
 TIMER_SCALE="${AARCHVM_TIMER_SCALE:-10}"
+ARCH_TIMER_MODE="${AARCHVM_ARCH_TIMER_MODE:-host}"
 STEPS="${AARCHVM_GUI_TTY1_STEPS:-300000000000}"
 UBOOT_DELAY_SEC="${AARCHVM_UBOOT_COMMAND_DELAY_SEC:-3}"
 PROMPT_DELAY_SEC="${AARCHVM_UBOOT_PROMPT_DELAY_SEC:-1}"
@@ -40,9 +40,11 @@ EOC
 AARCHVM_CMD=(
   ./build/aarchvm
   -snapshot-load "$SNAPSHOT"
+  -arch-timer-mode "$ARCH_TIMER_MODE"
   -steps "$STEPS"
 )
 print_cmd 'AARCHVM gui tty1 command:' "${AARCHVM_CMD[@]}"
+printf 'arch timer mode: %s\n' "$ARCH_TIMER_MODE"
 printf 'U-Boot scripted input:\n%s\n' "$UBOOT_BOOT_CMDS"
 
 AARCHVM_BUS_FASTPATH="$FASTPATH" \

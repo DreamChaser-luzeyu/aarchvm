@@ -45,6 +45,9 @@ aarch64-linux-gnu-gcc -O2 -static -Wall -Wextra -march=armv8-a -mno-outline-atom
 aarch64-linux-gnu-gcc -O2 -static -Wall -Wextra -march=armv8-a -mno-outline-atomics -fno-tree-vectorize -fno-tree-slp-vectorize \
   -o out/rtc_smoke tests/linux/rtc_smoke.c
 
+aarch64-linux-gnu-gcc -O2 -static -Wall -Wextra -march=armv8-a -mno-outline-atomics -fno-tree-vectorize -fno-tree-slp-vectorize \
+  -o out/time_rate_smoke tests/linux/time_rate_smoke.c
+
 if [[ ! -d out/initramfs-full-root ]]; then
   echo "missing out/initramfs-full-root; build the full busybox rootfs first" >&2
   exit 1
@@ -66,6 +69,7 @@ cp out/read_tty_spin_affine out/initramfs-usertests-root/bin/read_tty_spin_affin
 cp out/pthread_sync_stress out/initramfs-usertests-root/bin/pthread_sync_stress
 cp out/mprotect_exec_stress out/initramfs-usertests-root/bin/mprotect_exec_stress
 cp out/rtc_smoke out/initramfs-usertests-root/bin/rtc_smoke
+cp out/time_rate_smoke out/initramfs-usertests-root/bin/time_rate_smoke
 
 cat > out/initramfs-usertests-root/init <<'EOS'
 #!/bin/sh
@@ -233,6 +237,7 @@ chmod 0755 \
   out/initramfs-usertests-root/bin/pthread_sync_stress \
   out/initramfs-usertests-root/bin/mprotect_exec_stress \
   out/initramfs-usertests-root/bin/rtc_smoke \
+  out/initramfs-usertests-root/bin/time_rate_smoke \
   out/initramfs-usertests-root/bin/run_dmesg_stress_check \
   out/initramfs-usertests-root/bin/run_usertests \
   out/initramfs-usertests-root/bin/run_functional_suite \

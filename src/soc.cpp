@@ -58,6 +58,14 @@ std::optional<bool> env_scheduler_mode_is_legacy() {
   return std::nullopt;
 }
 
+std::optional<GenericTimer::ClockMode> env_arch_timer_mode() {
+  const char* mode_env = std::getenv("AARCHVM_ARCH_TIMER_MODE");
+  if (mode_env == nullptr || *mode_env == '\0') {
+    return std::nullopt;
+  }
+  return GenericTimer::parse_clock_mode(mode_env);
+}
+
 std::uint64_t host_monotonic_ns() {
   const auto now = std::chrono::steady_clock::now().time_since_epoch();
   return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
@@ -208,6 +216,9 @@ SoC::SoC(std::size_t cpu_count)
   if (const auto scale = env_timer_scale(); scale.has_value()) {
     timer_tick_scale_ = *scale;
   }
+  if (const auto mode = env_arch_timer_mode(); mode.has_value()) {
+    arch_timer_mode_ = *mode;
+  }
   if (const auto legacy = env_scheduler_mode_is_legacy(); legacy.has_value()) {
     scheduler_mode_ = *legacy ? SchedulerMode::Legacy : SchedulerMode::EventDriven;
   } else {
@@ -221,6 +232,7 @@ SoC::SoC(std::size_t cpu_count)
   kmi_->set_state_change_observer([this]() { invalidate_device_schedule(); });
   timer_->set_state_change_observer([this]() { invalidate_device_schedule(); });
   timer_->set_cycles_per_step(timer_tick_scale_);
+  timer_->set_clock_mode(arch_timer_mode_, guest_time_ticks());
 
   for (std::size_t i = 0; i < cpus_.size(); ++i) {
     cpus_[i]->reset(kBootRamBase);
@@ -463,6 +475,12 @@ void SoC::set_framebuffer_sdl_enabled(bool enabled) {
   }
 }
 
+void SoC::set_arch_timer_mode(GenericTimer::ClockMode mode) {
+  arch_timer_mode_ = mode;
+  timer_->set_clock_mode(arch_timer_mode_, guest_time_ticks());
+  invalidate_device_schedule();
+}
+
 void SoC::reset(std::uint64_t entry_pc) {
   for (std::size_t i = 0; i < cpus_.size(); ++i) {
     cpus_[i]->reset(entry_pc);
@@ -474,7 +492,7 @@ void SoC::reset(std::uint64_t entry_pc) {
   global_steps_ = 0;
   guest_time_fp_ = 0;
   timer_->set_cycles_per_step(timer_tick_scale_);
-  timer_->rebase_to_steps(guest_time_ticks());
+  timer_->set_clock_mode(arch_timer_mode_, guest_time_ticks());
   perf_mailbox_->reset_state();
   reset_perf_measurement_state();
   stop_on_uart_window_.clear();
@@ -690,6 +708,13 @@ std::size_t SoC::runnable_cpu_count() {
 }
 
 std::optional<SoC::ScheduledDeviceEvent> SoC::next_device_event(std::uint64_t guest_tick) const {
+  if (timer_->uses_host_clock()) {
+    auto& self = *const_cast<SoC*>(this);
+    self.device_schedule_valid_ = true;
+    self.device_schedule_dirty_ = false;
+    self.next_device_event_.reset();
+    return std::nullopt;
+  }
   if (device_schedule_valid_ && !device_schedule_dirty_) {
     if (!next_device_event_.has_value() || next_device_event_->guest_tick >= guest_tick) {
       return next_device_event_;
@@ -840,6 +865,9 @@ bool SoC::run(std::size_t max_steps) {
     next_device_event_.reset();
   };
   const auto event_due_now = [&](std::uint64_t guest_ticks) {
+    if (timer_->uses_host_clock()) {
+      return true;
+    }
     if (!device_sync_valid_ || device_schedule_dirty_) {
       return true;
     }
@@ -848,6 +876,9 @@ bool SoC::run(std::size_t max_steps) {
   };
   const auto deadline_driven_window_needed = [&]() {
     constexpr std::uint64_t kShortDeadlineWindow = 256;
+    if (timer_->uses_host_clock()) {
+      return true;
+    }
     if (scheduler_mode_ == SchedulerMode::Legacy) {
       return false;
     }
@@ -880,6 +911,10 @@ bool SoC::run(std::size_t max_steps) {
     return (event->guest_tick - guest_ticks) <= kShortDeadlineWindow;
   };
   const auto maybe_sync_devices = [&]() {
+    if (timer_->uses_host_clock()) {
+      sync_devices(true);
+      return;
+    }
     if (scheduler_mode_ == SchedulerMode::Legacy) {
       sync_devices(true);
       return;
@@ -894,6 +929,9 @@ bool SoC::run(std::size_t max_steps) {
     }
   };
   const auto fast_forward_to_next_guest_event = [&]() {
+    if (timer_->uses_host_clock()) {
+      return false;
+    }
     if (scheduler_mode_ == SchedulerMode::Legacy) {
       return false;
     }
@@ -911,8 +949,12 @@ bool SoC::run(std::size_t max_steps) {
                                       std::size_t cpu_divisor,
                                       bool deadline_sensitive,
                                       std::uint64_t guest_ticks) {
+    static constexpr std::size_t kHostTimerSyncChunk = 2048;
     static constexpr std::size_t kMaxLegacyInternalChunk = 65536;
     std::size_t chunk = std::max<std::size_t>(1, (budget + cpu_divisor - 1u) / cpu_divisor);
+    if (timer_->uses_host_clock()) {
+      return std::max<std::size_t>(1, std::min<std::size_t>(chunk, kHostTimerSyncChunk));
+    }
     if (scheduler_mode_ == SchedulerMode::Legacy) {
       return std::max<std::size_t>(1, std::min<std::size_t>(chunk, kMaxLegacyInternalChunk));
     }
@@ -1528,6 +1570,7 @@ bool SoC::load_snapshot(const std::string& path) {
   }
   timer_->set_cycles_per_step(timer_tick_scale_);
   timer_->rebase_to_steps(guest_time_ticks());
+  timer_->set_clock_mode(arch_timer_mode_, guest_time_ticks());
   reset_perf_measurement_state();
   if (version >= 11 && restored_perf_session.active) {
     perf_session_.active = true;

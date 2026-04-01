@@ -46,6 +46,7 @@ struct Options {
   bool predecode_enabled = true;
   bool framebuffer_sdl = true;
   bool framebuffer_sdl_specified = false;
+  std::optional<aarchvm::GenericTimer::ClockMode> arch_timer_mode;
 };
 
 std::uint64_t parse_u64(const std::string& text) {
@@ -166,7 +167,8 @@ void print_usage(const char* argv0) {
       << "[-load <addr>] [-entry <pc>] [-steps <n>] [-sp <addr>] [-smp <n>] [-smp-mode <all|psci>] "
       << "[-dtb <file>] [-dtb-addr <addr>] [-segment <file@addr>]... "
       << "[-snapshot-load <file>] [-snapshot-save <file>] [-drive <image.bin>] \n"
-      << "[-stop-on-uart <text>] [-decode <fast|slow>] [-fb-sdl <on|off>]\n";
+      << "[-stop-on-uart <text>] [-decode <fast|slow>] [-fb-sdl <on|off>] "
+      << "[-arch-timer-mode <step|host>]\n";
 }
 
 std::optional<Options> parse_args(int argc, char** argv) {
@@ -247,6 +249,12 @@ std::optional<Options> parse_args(int argc, char** argv) {
         opt.framebuffer_sdl = false;
       } else {
         std::cerr << "Invalid -fb-sdl value (expected on or off): " << val << '\n';
+        return std::nullopt;
+      }
+    } else if (key == "-arch-timer-mode") {
+      opt.arch_timer_mode = aarchvm::GenericTimer::parse_clock_mode(val);
+      if (!opt.arch_timer_mode.has_value()) {
+        std::cerr << "Invalid -arch-timer-mode value (expected step or host): " << val << '\n';
         return std::nullopt;
       }
     } else if (key == "-segment") {
@@ -436,6 +444,9 @@ int main(int argc, char** argv) {
   soc.set_secondary_boot_mode(opt.secondary_boot_mode);
   if (opt.framebuffer_sdl_specified) {
     soc.set_framebuffer_sdl_enabled(opt.framebuffer_sdl);
+  }
+  if (opt.arch_timer_mode.has_value()) {
+    soc.set_arch_timer_mode(*opt.arch_timer_mode);
   }
   soc.set_predecode_enabled(debug_slow_mode ? false : opt.predecode_enabled);
   if (opt.stop_on_uart_pattern.has_value()) {

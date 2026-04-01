@@ -1092,7 +1092,7 @@ std::uint32_t fp64_to_fp32_bits(std::uint64_t bits, std::uint32_t fpcr_mode, std
   }
 
   const auto overflow_result = [&]() -> std::uint32_t {
-    fpsr_bits |= kFpsrIxc;
+    fpsr_bits |= kFpsrOfc | kFpsrIxc;
     const bool to_inf =
         (fpcr_mode & 0x3u) == 0u ||
         ((fpcr_mode & 0x3u) == 1u && !sign) ||
@@ -1127,12 +1127,12 @@ std::uint32_t fp64_to_fp32_bits(std::uint64_t bits, std::uint32_t fpcr_mode, std
   std::uint64_t rounded = fp_round_shift_right(significand, sub_shift, fpcr_mode, sign, inexact);
   if (rounded >= (1ull << 23u)) {
     if (inexact) {
-      fpsr_bits |= kFpsrIxc;
+      fpsr_bits |= kFpsrUfc | kFpsrIxc;
     }
     return sign_bit | 0x00800000u;
   }
   if (inexact) {
-    fpsr_bits |= kFpsrIxc;
+    fpsr_bits |= kFpsrUfc | kFpsrIxc;
   }
   const std::uint32_t result_bits = sign_bit | static_cast<std::uint32_t>(rounded);
   return fp_flush_output_denormal_bits(result_bits, fpcr_mode, fpsr_bits);
@@ -1191,7 +1191,7 @@ std::uint32_t fp64_to_fp32_bits_round_to_odd(std::uint64_t bits,
   }
 
   const auto overflow_result = [&]() -> std::uint32_t {
-    fpsr_bits |= kFpsrIxc;
+    fpsr_bits |= kFpsrOfc | kFpsrIxc;
     return sign_bit | 0x7F7FFFFFu;
   };
 
@@ -1238,7 +1238,7 @@ std::uint32_t fp64_to_fp32_bits_round_to_odd(std::uint64_t bits,
   const std::uint32_t sub_shift = 29u + static_cast<std::uint32_t>(-126 - exponent);
   const std::uint64_t rounded = round_shift_right_odd(significand, sub_shift, inexact);
   if (inexact) {
-    fpsr_bits |= kFpsrIxc;
+    fpsr_bits |= kFpsrUfc | kFpsrIxc;
   }
   const std::uint32_t result_bits = sign_bit | static_cast<std::uint32_t>(rounded);
   return fp_flush_output_denormal_bits(result_bits, fpcr_mode, fpsr_bits);
@@ -1311,12 +1311,12 @@ UIntT fp_recip_estimate_bits(UIntT bits, std::uint32_t fpcr_mode, std::uint64_t&
 
   if constexpr (sizeof(UIntT) == 4u) {
     if (exp == 0u && frac < (1u << 21u)) {
-      fpsr_bits |= kFpsrIxc;
+      fpsr_bits |= kFpsrOfc | kFpsrIxc;
       return fp_round_overflow_to_inf(fpcr_mode, sign) ? fp_inf_bits<UIntT>(sign) : fp_max_normal_bits<UIntT>(sign);
     }
   } else {
     if (exp == 0u && frac < (1ull << 50u)) {
-      fpsr_bits |= kFpsrIxc;
+      fpsr_bits |= kFpsrOfc | kFpsrIxc;
       return fp_round_overflow_to_inf(fpcr_mode, sign) ? fp_inf_bits<UIntT>(sign) : fp_max_normal_bits<UIntT>(sign);
     }
   }

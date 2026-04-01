@@ -3,6 +3,7 @@
 #include "aarchvm/snapshot_io.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <istream>
@@ -38,7 +39,38 @@ void trace_timer(const char* tag,
             << std::dec << '\n';
 }
 
+std::uint64_t host_monotonic_ns() {
+  const auto now = std::chrono::steady_clock::now().time_since_epoch();
+  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+}
+
+std::uint64_t ns_to_cycles(std::uint64_t elapsed_ns, std::uint64_t freq_hz) {
+  const std::uint64_t whole_seconds = elapsed_ns / 1000000000ull;
+  const std::uint64_t rem_ns = elapsed_ns % 1000000000ull;
+  return whole_seconds * freq_hz + ((rem_ns * freq_hz) / 1000000000ull);
+}
+
 } // namespace
+
+std::optional<GenericTimer::ClockMode> GenericTimer::parse_clock_mode(std::string_view text) {
+  if (text == "step") {
+    return ClockMode::GuestStep;
+  }
+  if (text == "host") {
+    return ClockMode::HostMonotonic;
+  }
+  return std::nullopt;
+}
+
+const char* GenericTimer::clock_mode_name(ClockMode mode) {
+  switch (mode) {
+    case ClockMode::GuestStep:
+      return "step";
+    case ClockMode::HostMonotonic:
+      return "host";
+  }
+  return "step";
+}
 
 void GenericTimer::set_cpu_count(std::size_t cpu_count) {
   cpu_count_ = std::max<std::size_t>(1, cpu_count);
@@ -58,8 +90,10 @@ std::uint64_t GenericTimer::read(std::uint64_t offset, std::size_t size) {
     return 0;
   }
 
+  const std::uint64_t current = counter_at_steps(step_anchor_);
+
   if (offset == 0x00) {
-    return counter_;
+    return current;
   }
   if (offset == 0x08) {
     return compare_;
@@ -101,16 +135,38 @@ void GenericTimer::write(std::uint64_t offset, std::uint64_t value, std::size_t 
 
 void GenericTimer::tick(std::uint64_t cycles) {
   counter_ += cycles;
+  if (clock_mode_ == ClockMode::HostMonotonic) {
+    host_anchor_ns_ = host_monotonic_ns();
+  }
   update_irq_state();
 }
 
+void GenericTimer::set_clock_mode(ClockMode mode, std::uint64_t steps) {
+  counter_ = counter_at_steps(steps);
+  step_anchor_ = steps;
+  host_anchor_ns_ = host_monotonic_ns();
+  clock_mode_ = mode;
+  update_irq_state();
+  if (state_change_observer_) {
+    state_change_observer_();
+  }
+}
+
 std::uint64_t GenericTimer::counter_at_steps(std::uint64_t steps) const {
+  if (clock_mode_ == ClockMode::HostMonotonic) {
+    const std::uint64_t now_ns = host_monotonic_ns();
+    const std::uint64_t elapsed_ns = now_ns >= host_anchor_ns_ ? (now_ns - host_anchor_ns_) : 0u;
+    return counter_ + ns_to_cycles(elapsed_ns, 100000000ull);
+  }
   return counter_ + (steps - step_anchor_) * cycles_per_step_;
 }
 
 void GenericTimer::sync_to_steps(std::uint64_t steps) {
   counter_ = counter_at_steps(steps);
   step_anchor_ = steps;
+  if (clock_mode_ == ClockMode::HostMonotonic) {
+    host_anchor_ns_ = host_monotonic_ns();
+  }
   update_irq_state();
 }
 
@@ -164,6 +220,9 @@ void GenericTimer::update_channel_irq(TimerChannel& channel, std::uint64_t curre
 }
 
 std::uint64_t GenericTimer::steps_until_irq(std::uint64_t steps, std::uint64_t max_steps) const {
+  if (clock_mode_ == ClockMode::HostMonotonic) {
+    return max_steps;
+  }
   std::uint64_t best = max_steps;
   for (std::size_t cpu = 0; cpu < cpu_states_.size(); ++cpu) {
     best = std::min(best, steps_until_irq(cpu, steps, best));
@@ -177,6 +236,9 @@ std::uint64_t GenericTimer::steps_until_irq(std::uint64_t steps, std::uint64_t m
 std::uint64_t GenericTimer::steps_until_irq(std::size_t cpu_index,
                                             std::uint64_t steps,
                                             std::uint64_t max_steps) const {
+  if (clock_mode_ == ClockMode::HostMonotonic) {
+    return max_steps;
+  }
   if (max_steps == 0u) {
     return 0u;
   }
@@ -364,6 +426,8 @@ bool GenericTimer::load_state(std::istream& in, std::uint32_t version) {
   cycles_per_step_ = 1;
   cpu_count_ = 1;
   cpu_states_.assign(1, CpuState{});
+  clock_mode_ = ClockMode::GuestStep;
+  host_anchor_ns_ = host_monotonic_ns();
 
   if (!snapshot_io::read(in, counter_) ||
       !snapshot_io::read(in, compare_) ||

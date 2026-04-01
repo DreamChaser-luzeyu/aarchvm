@@ -9,6 +9,7 @@ It currently boots U-Boot, hands off to Linux, reaches interactive BusyBox shell
 - Interpreter-based AArch64 full-system emulation, with validated single-core Linux bring-up and a validated 2-core Linux SMP shell / functional regression path
 - Linux boot path validated through U-Boot -> Linux `Image` -> BusyBox shell
 - Minimal MMU/TLB, Generic Timer, synchronous exception, PSCI, and GICv3 paths sufficient for the current Linux bring-up
+- Dual-mode architectural timer: deterministic guest-step mode for regression/perf, plus optional host-synced monotonic mode for interactive Linux timing
 - PL011 UART console
 - Host-backed PL031 RTC wall-clock device usable by Linux `rtc-pl031`
 - Host-side UART prompt matching with one-shot auto-reply, so U-Boot boot scripts can be automated without replacing interactive stdin

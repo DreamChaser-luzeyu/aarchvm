@@ -5,8 +5,8 @@ ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 FASTPATH="${AARCHVM_BUS_FASTPATH:-1}"
-# tty1/fbcon on SMP needs a slower virtual timer under the current instruction-count time model.
 TIMER_SCALE="${AARCHVM_TIMER_SCALE:-1}"
+ARCH_TIMER_MODE="${AARCHVM_ARCH_TIMER_MODE:-host}"
 STEPS="${AARCHVM_GUI_TTY1_STEPS:-300000000000}"
 INITRD="${AARCHVM_GUI_TTY1_INITRD:-out/initramfs-usertests.cpio.gz}"
 LINUX_DTB="${AARCHVM_LINUX_DTB:-dts/aarchvm-linux-smp.dtb}"
@@ -49,12 +49,14 @@ AARCHVM_CMD=(
   -segment linux-6.12.76/build-aarchvm/arch/arm64/boot/Image@0x40400000
   -segment "$INITRD"@0x46000000
   -fb-sdl on
+  -arch-timer-mode "$ARCH_TIMER_MODE"
   -steps "$STEPS"
   -snapshot-save "$SNAPSHOT"
 )
 
 echo "-----------"
 print_cmd 'AARCHVM gui tty1 command:' "${AARCHVM_CMD[@]}"
+printf 'arch timer mode: %s\n' "$ARCH_TIMER_MODE"
 printf 'U-Boot auto-reply match:\n%s\n' "$UART_MATCH"
 printf 'U-Boot auto-reply text:\n%s\n' "$UBOOT_BOOT_CMDS"
 echo "-----------"

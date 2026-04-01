@@ -6,12 +6,22 @@
 #include <cstdint>
 #include <functional>
 #include <iosfwd>
+#include <optional>
+#include <string_view>
 #include <vector>
 
 namespace aarchvm {
 
 class GenericTimer final : public Device {
 public:
+  enum class ClockMode : std::uint8_t {
+    GuestStep,
+    HostMonotonic,
+  };
+
+  [[nodiscard]] static std::optional<ClockMode> parse_clock_mode(std::string_view text);
+  [[nodiscard]] static const char* clock_mode_name(ClockMode mode);
+
   std::uint64_t read(std::uint64_t offset, std::size_t size) override;
   void write(std::uint64_t offset, std::uint64_t value, std::size_t size) override;
 
@@ -21,6 +31,9 @@ public:
   void tick(std::uint64_t cycles);
   void set_cycles_per_step(std::uint64_t value) { cycles_per_step_ = value; }
   void rebase_to_steps(std::uint64_t steps) { step_anchor_ = steps; }
+  void set_clock_mode(ClockMode mode, std::uint64_t steps);
+  [[nodiscard]] ClockMode clock_mode() const { return clock_mode_; }
+  [[nodiscard]] bool uses_host_clock() const { return clock_mode_ == ClockMode::HostMonotonic; }
   void set_state_change_observer(std::function<void()> observer) { state_change_observer_ = std::move(observer); }
   void sync_to_steps(std::uint64_t steps);
   [[nodiscard]] std::uint64_t counter() const { return counter_; }
@@ -87,6 +100,8 @@ private:
   std::uint64_t counter_ = 0;
   std::uint64_t step_anchor_ = 0;
   std::uint64_t cycles_per_step_ = 1;
+  ClockMode clock_mode_ = ClockMode::GuestStep;
+  std::uint64_t host_anchor_ns_ = 0;
 
   std::uint64_t compare_ = 0;
   bool enabled_ = false;

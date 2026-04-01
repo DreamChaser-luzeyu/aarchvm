@@ -1,3 +1,135 @@
+# 修改日志 2026-04-01 20:43
+
+## 本轮修改
+
+- 继续沿着“异常 / 系统寄存器 / trap 语义收尾”审 `MRS/MSR` 的 corner case；这轮没有改模拟器执行逻辑，而是把一个此前靠代码阅读确认、但还没被正式回归锁住的 system-register 细节补成了裸机回归：
+  - [tests/arm64/sysreg_xzr_semantics.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/sysreg_xzr_semantics.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 新增正式裸机回归 `sysreg_xzr_semantics`，显式锁定 system register 指令里 `Rt==31 -> XZR/WZR` 的程序可见语义：
+  - `MRS XZR, <sysreg>` 必须丢弃结果，不能把结果误写到当前 `SP`；
+  - `MSR <sysreg>, XZR` 必须写入 0，不能把当前 `SP` 当成源寄存器值；
+  - 同时覆盖 generic sysreg 路径（`TPIDR_EL0`）和 special sysreg 路径（`SP_EL0`）。
+
+## 本轮测试
+
+- `timeout 1800s ./tests/arm64/build_tests.sh`
+- `timeout 120s ./build/aarchvm -bin tests/arm64/out/sysreg_xzr_semantics.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮先把一个真实且容易回归坏掉的 system-register 角落正式钉进了回归；代码阅读确认当前实现是正确的。
+- 但我仍不能自信宣称“Armv8-A 程序可见最小集已完整收口”，接下来仍要继续审 `ESR/FAR/PAR/ISS`、剩余 trap/undef/no-op 边界，以及 MMU/SMP 里尚未彻底钉死的程序可见角落。
+
+# 修改日志 2026-04-01 20:31
+
+## 本轮修改
+
+- 继续沿着“浮点 / AdvSIMD 程序可见语义收尾”审 `FCVT*` 的特殊值与 `FZ` 边界；这轮没有改模拟器执行逻辑，而是把一组此前只在临时探针里核过、但还没被正式回归锁死的 scalar `FP -> int` 语义补成了裸机回归：
+  - [tests/arm64/fp_fcvt_special_scalar.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_fcvt_special_scalar.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 新增正式裸机回归 `fp_fcvt_special_scalar`，显式锁定以下 guest 可见边界：
+  - `FCVT*` 对 `qNaN/sNaN` 的 invalid 结果与 `FPSR.IOC`；
+  - `FCVT*` 对 `+Inf/-Inf` 的 signed/unsigned 饱和值与 `FPSR.IOC`；
+  - `-0.6/-0.5` 这类最容易把“inexact”与“invalid”混淆的近零负数边界；
+  - `FPCR.FZ=1` 下 subnormal 输入做 `FCVTZS/FCVTNU` 时的 `FPSR.IDC` 行为；
+  - `W` / `X` 目的寄存器的 scalar 路径。
+
+## 本轮测试
+
+- `timeout 1800s ./tests/arm64/build_tests.sh`
+- `timeout 120s ./build/aarchvm -bin tests/arm64/out/fp_fcvt_special_scalar.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮没有坐实新的执行语义 bug，但把 `FCVT*` scalar 路径一组高风险特殊值边界正式锁进了回归。
+- 结合这轮补强后，`FRINT* / FCVT* / FCVTN / FCVTXN / FRECPE` 这一批近期最可疑的 FP/AdvSIMD 边界已经有了更系统的正式覆盖。
+- 但我仍不能自信宣称“Armv8-A 程序可见最小集已完整收口”；当前更值得继续审的仍是：
+  - `FP/AdvSIMD` 里尚未完全穷尽的 `NaN/payload/default-NaN` 传播一致性；
+  - `trap / undef / no-op` 判定边界里仍未系统收口的剩余 system/debug 指令；
+  - `SMP` 下 barrier、exclusive/LSE、`TLBI/IC IVAU` 跨核传播与 Linux 压力路径。
+
+# 修改日志 2026-04-01 20:02
+
+## 本轮修改
+
+- 继续沿着“浮点 / AdvSIMD 程序可见语义收尾”审 `estimate` 家族里的 `FPSR` 尾差；这轮包含一处真实的 guest 可见语义修复，并新增一条正式裸机回归：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fp_frecpe_flags.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_frecpe_flags.S)
+  - [tests/arm64/fpsimd_fp_estimate.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fp_estimate.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 修正了 `FRECPE` 对“倒数估计会溢出到 `Inf` 的极小 subnormal”缺少 `FPSR.OFC` 的问题：
+  - 旧实现里，`fp_recip_estimate_bits()` 在 `single`/`double` 的 overflow-subnormal fast path 只会置 `FPSR.IXC`；
+  - 但 guest 可见语义应为 `FPSR.OFC|IXC`，因为这是一次真正的 overflow-to-infinity / overflow-to-max-finite 结果，而不只是普通 inexact；
+  - 这会让数值自检、差分验证以及依赖 `FPSR` 的运行时看到错误 flags。
+- 新增正式裸机回归 `fp_frecpe_flags`：
+  - 覆盖 smallest positive `single` subnormal、smallest positive `double` subnormal，以及 smallest negative `single` subnormal；
+  - 显式锁定结果位型和 `FPSR=0x14`；
+  - 同时把既有 [fpsimd_fp_estimate.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fp_estimate.S) 里 `src_frecpe_tiny=0x00010000` 的旧错误期望从 `IXC` 收正为 `OFC|IXC`。
+
+## 本轮测试
+
+- `timeout 120s ./build/aarchvm -bin tests/arm64/out/fp_frecpe_flags.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_fp_estimate.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮已经坐实并修正了 `FRECPE` estimate family 的一处真实 `FPSR` 语义缺口。
+- 当前整套裸机回归、Linux UMP 回归、Linux SMP 回归都通过。
+- 但我仍不能自信宣称“Armv8-A 程序可见最小集已完整收口”。当前剩余最值得继续审的仍然是：
+  - `FP/AdvSIMD` 中尚未系统穷尽的 `NaN/subnormal/default-NaN/payload` 传播一致性；
+  - `SMP` 下 exclusive/LSE、barrier、`TLBI/IC IVAU` 的跨核传播边界；
+  - `MMU/fault` 与 Linux 压力路径的 system-level 差分验证。
+
+# 修改日志 2026-04-01 22:31
+
+## 本轮修改
+
+- 继续沿着“浮点 / AdvSIMD 程序可见语义收尾”审 `double -> float` narrowing 的 `FPSR` 尾差；这轮包含一处真实的 guest 可见语义修复，并新增一条正式裸机回归：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fp_fcvtn_flags.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_fcvtn_flags.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 修正了 `FCVTN/FCVTXN` 的 narrowing exception flags 缺口：
+  - 旧实现里，`fp64_to_fp32_bits()` 与 `fp64_to_fp32_bits_round_to_odd()` 在 `double -> float` narrowing overflow 时只会置 `FPSR.IXC`，漏掉了 architecturally visible 的 `FPSR.OFC`；
+  - 同时，在 tiny/inexact 的 underflow 路径上，旧实现也只会留下 `IXC`，漏掉 `FPSR.UFC`；
+  - 这会让 guest 在 `FCVTN` / `FCVTXN` 上读到错误的 `FPSR`，尤其会影响数值自检、libm / 编译器生成代码和差分验证；
+  - 现在 regular `FCVTN` 与 round-to-odd `FCVTXN` 都会在 overflow 时置 `OFC|IXC`，在 underflow/tiny inexact 时置 `UFC|IXC`。
+- 新增正式裸机回归 `fp_fcvtn_flags`：
+  - 覆盖 `FCVTN` overflow、`FCVTN` underflow-to-min-normal、`FCVTN` exact min-subnormal；
+  - 覆盖 `FCVTXN` overflow、`FCVTXN` tiny underflow-to-odd-subnormal 与一个 exact case；
+  - 显式锁定结果位型与 `FPSR` 位图，避免后续再把这组 narrowing flags 弄回只有 `IXC` 的宽松实现。
+
+## 本轮测试
+
+- `timeout 120s qemu-aarch64 ./out/fcvt_round_probe`
+- `timeout 120s qemu-aarch64 ./out/fcvtn_ofc_probe`
+- `timeout 120s qemu-aarch64 ./out/fcvtxn_flags_probe`
+- `timeout 120s qemu-aarch64 ./out/fcvtn_underflow_probe`
+
+## 当前结论
+
+- 这轮已经坐实并修正了 `FCVTN/FCVTXN` narrowing 的一处真实 `FPSR` 语义缺口。
+- 但我仍不能自信宣称“Armv8-A 程序可见最小集已完整收口”。当前剩余最值得继续审的仍然是：
+  - `FP/AdvSIMD` 其它 `NaN/subnormal/default-NaN/flags` 组合边界；
+  - `SMP` 下 exclusive/LSE、barrier、`TLBI/IC IVAU` 的跨核传播；
+  - `MMU/fault` 与快路径/预解码在复杂 Linux 压力下的尾差。
+
 # 修改日志 2026-04-01 13:48
 
 ## 本轮修改
@@ -6192,3 +6324,93 @@
 - 当前 RTC 仍是第一阶段实现：
   - 已具备 Linux 可见的 wall-clock / set-time / snapshot 基础闭环；
   - 尚未接入 GIC alarm IRQ，也还没有 `frozen/mock` 等确定性时钟模式。
+
+# 修改日志 2026-04-01 19:13
+
+## 本轮修改
+
+- 为架构 timer 增加了双模式支持：
+  - 默认 `step` 模式保持原有基于 guest step 的确定性计时语义；
+  - 新增 `host` 模式，使 `CNTVCT/CNTPCT` 跟随宿主机 monotonic 时钟推进。
+- 相关实现已接入：
+  - [include/aarchvm/generic_timer.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/generic_timer.hpp)
+  - [src/generic_timer.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/generic_timer.cpp)
+  - [include/aarchvm/soc.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/soc.hpp)
+  - [src/soc.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/soc.cpp)
+  - [src/main.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/main.cpp)
+- 命令行与环境控制新增：
+  - `-arch-timer-mode <step|host>`
+  - `AARCHVM_ARCH_TIMER_MODE=step|host`
+- SoC 主循环在 `host` 模式下改为使用更短的同步窗口，避免 timer IRQ 在长 chunk 中被明显拖后，从而让交互式 Linux 的时间流速恢复正常。
+- 交互脚本默认切到 `host` 模式，而自动化回归保持 `step` 模式不变：
+  - [tests/linux/run_interactive.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/run_interactive.sh)
+  - [tests/linux/run_gui_tty1.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/run_gui_tty1.sh)
+  - [tests/linux/run_gui_tty1_from_snapshot.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/run_gui_tty1_from_snapshot.sh)
+- 新增 Linux 用户态时间流速冒烟程序，并并入统一 initramfs：
+  - [tests/linux/time_rate_smoke.c](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/time_rate_smoke.c)
+  - [tests/linux/build_usertests_rootfs.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/build_usertests_rootfs.sh)
+- 同步更新文档：
+  - [README.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/README.md)
+  - [doc/README.en.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/README.en.md)
+  - [doc/README.zh.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/README.zh.md)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+
+## 本轮测试
+
+- 编译：
+  - `timeout 1800s cmake --build build -j`
+- initramfs / snapshot：
+  - `timeout 1800s ./tests/linux/build_usertests_rootfs.sh`
+  - `timeout 1800s ./tests/linux/build_linux_shell_snapshot.sh`
+- host 模式定向验证：
+  - `printf '/bin/time_rate_smoke\n' | AARCHVM_BUS_FASTPATH=1 AARCHVM_TIMER_SCALE=1 timeout 180s ./build/aarchvm -snapshot-load out/linux-usertests-shell-v1.snap -arch-timer-mode host -fb-sdl off -steps 600000000 -stop-on-uart 'TIME-RATE-SMOKE PASS'`
+- 裸机完整回归：
+  - `timeout 5400s ./tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 问题根因不是 RTC，而是 Linux 启动后实际持续使用的架构 timer 仍按 guest step 推进，因此系统时间会跟着模拟执行速度跑快/跑慢。
+- 这轮已经把“可重复回归”与“交互式时间正确性”拆开：
+  - 自动化与性能基线继续使用 `step` 模式；
+  - 手工交互和 GUI 恢复默认改为 `host` 模式。
+- `time_rate_smoke` 在 `host` 模式下已验证：
+  - `CLOCK_REALTIME` 约 `2004ms`
+  - `CLOCK_MONOTONIC` 约 `2004ms`
+  - RTC 增量 `2s`
+  - 三者已重新对齐到宿主机节奏。
+
+# 修改日志 2026-04-01 21:05
+
+## 本轮修改
+
+- 继续沿 Armv8-A 程序可见异常语义做审计，确认 `Rt==31` 的 system-register 访问语义无需修正，当前实现已经正确把它当作 `XZR/WZR` 处理，而非 `SP`。
+- 新增裸机回归 [tests/arm64/sysreg_xzr_semantics.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/sysreg_xzr_semantics.S)，把以下边界正式锁进回归：
+  - `MRS XZR, <sysreg>` 必须丢弃结果且不能污染当前 `SP`
+  - `MSR <sysreg>, XZR` 必须以零为源值而不是错误读取 `SP`
+  - 覆盖 generic sysreg 路径 `TPIDR_EL0` 与 special sysreg 路径 `SP_EL0`
+- 新增裸机回归 [tests/arm64/mmu_el0_uxn_fetch_abort.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_el0_uxn_fetch_abort.S)，补上此前缺失的 lower-EL instruction-abort 强断言覆盖：
+  - `EL0` 下对 `UXN` 页取指必须上报 `EC=0x20`
+  - `IL=1`、`WnR=0`、`IFSC=permission fault level 3`
+  - `FAR_EL1` 与 `ELR_EL1` 都必须指向 faulting EL0 PC
+- 两个新增回归都已接入：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+
+## 本轮测试
+
+- `timeout 1800s ./tests/arm64/build_tests.sh`
+- `timeout 120s ./build/aarchvm -bin tests/arm64/out/sysreg_xzr_semantics.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 120s ./build/aarchvm -bin tests/arm64/out/mmu_el0_uxn_fetch_abort.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮仍未发现新的执行语义 bug，但又补齐了一块此前没有强断言锁住的异常面：`EL0` lower-EL instruction abort。
+- 目前异常/系统寄存器/MMU 这条线的剩余风险已明显收缩到更细碎的 syndrome 角落、SMP 内存模型和更长时程 Linux 压力交互，而不再是明显缺失的基础异常分类。

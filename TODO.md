@@ -37,6 +37,9 @@
 - [x] 已修正 `CPACR/CPTR` 下 `FP/AdvSIMD` trap 识别漏掉 whole-register structured register post-index 的问题，确保 `[Xn|SP], Xm` 形式也先走 `EC=0x07` trap，并补裸机单测验证 trap 优先于写回。
 - [x] 已收口当前已实现的饱和 AdvSIMD 整数指令 `SQADD/UQADD/SQXTN/UQXTN` 的 `FPSR.QC` 程序可见语义，并把 `FPSR` 读写掩码收回到当前 AArch64-only 模型真正实现的 architected 位，避免 `QC/IDC/IOC..IXC` 之外的保留位被错误读回。
 - [x] 已收口当前 AArch64-only 模型的 `FPCR` direct read/write 掩码：把 `!FEAT_AFP` 下的 `NEP/AH/FIZ`、`!FEAT_FP16` 下的 `FZ16`、`!FEAT_EBF16` 下的 `EBF`，以及当前未实现 trapped FP exception 时本应 `RAZ/WI` 的 `IDE/IXE/UFE/OFE/DZE/IOE` 从 guest 可见状态中移除，并新增裸机回归锁定这组可见位。
+- [x] 已修正 `FCVTN/FCVTXN` 的 narrowing exception flags 尾差：`double -> float` overflow 现在会按程序可见语义置 `FPSR.OFC|IXC`，underflow/tiny inexact 现在会置 `FPSR.UFC|IXC`，并新增裸机回归分别锁定 regular `FCVTN` 与 round-to-odd `FCVTXN` 的 overflow / underflow / exact-subnormal 边界。
+- [x] 已修正 `FRECPE` 对“倒数估计会溢出到 `Inf` 的极小 subnormal”只置 `FPSR.IXC` 的尾差；当前 scalar/vector `single/double` 共享 helper 会按程序可见语义置 `FPSR.OFC|IXC`，并新增裸机回归锁定 smallest-subnormal 的正/负 `single` 与 `double` 边界，同时把既有 `fpsimd_fp_estimate` 中 `tiny` case 的旧错误期望一并收正。
+- [x] 已新增 `fp_fcvt_special_scalar` 正式裸机回归，锁定 scalar `FCVT*` 在 `qNaN/sNaN/±Inf`、`-0.6/-0.5` 近零负数，以及 `FPCR.FZ=1` 下 subnormal-to-int 的程序可见结果与 `FPSR`（`IOC/IXC/IDC`）组合，覆盖 signed/unsigned 与 `W/X` 目的寄存器边界。
 
 ### 2. 异常 / 系统寄存器 / trap 语义收尾
 
@@ -78,6 +81,7 @@
 - [x] 已收口 `AT S1E1R/W` 与 `PSTATE.PAN` / `FEAT_PAN2` 的边界，避免 plain `AT` 错误受 PAN 影响，并通过 `at_pan2_absent_undef` 正式裸机回归锁定 `AT S1E1RP/WP` 在 `FEAT_PAN2` absent 时应表现为 `UNDEFINED`，且不应修改 `PAR_EL1` 或源寄存器。
 - [x] 已新增 `at_s1e0_el0_undef` 正式裸机回归，把 `EL0` 执行 `AT S1E0R/W` 的程序可见负向语义锁进回归：当前模型下两者都应报 `UNDEFINED`，并显式检查 `ESR_EL1.EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`，同时断言 `PAR_EL1` 与源寄存器保持不变，避免后续 system decode 调整把这组 `AT` 指令误宽放行或留下隐藏副作用。
 - [x] 已新增 `wfxt_absent_undef` 正式裸机回归，把当前 `!FEAT_WFxT` 模型下 `WFET/WFIT` 的负向语义单独锁进回归：覆盖 EL1/EL0 两级的 `UNDEFINED` 分类、`ESR_EL1.EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`，并断言超时寄存器参数不被修改，以及 EL0 异常保存的 `NZCV/DAIF/PAN/M/IL` 符合源 `PSTATE`。
+- [x] 已新增 `mmu_el0_uxn_fetch_abort` 正式裸机回归，把此前缺失的“EL0 指令取指 permission fault” 锁进异常语义覆盖：显式检查 `ESR_EL1.EC=0x20`、`IL=1`、`WnR=0`、`IFSC=permission fault level 3`，以及 `FAR_EL1/ELR_EL1` 都指向 faulting EL0 PC，避免 lower-EL fetch abort 被误编码成 same-EL 或 data-abort 形态。
 - [x] 已对齐 `ID_AA64MMFR0_EL1` 的 granule 声明与当前 `4KB`-only 页表实现，避免把未实现的 `16KB granule` 错误宣称为存在。
 - [x] 已收口 `ID_AA64MMFR0_EL1.BigEnd/BigEndEL0` 与 `SCTLR_EL1.EE/E0E` 的固定值语义，避免在 mixed-endian absent 时仍把 `EE/E0E` 读回为可配置位。
 - [x] 已收口 `SPSR_EL1` 在“AArch64-only + 当前 absent feature 集”下的 `RES0` / 固定位语义，避免 guest 通过 `MSR SPSR_EL1` 把 `UAO/DIT/TCO/SSBS/BTYPE/ALLINT/PM/PPEND/EXLOCK/PACM/UINJ` 等当前未实现位读回成 1。
@@ -99,6 +103,7 @@
 - [x] 已补 `RMIF/SETF8/SETF16` 的正式裸机回归，确认当前 `!FEAT_FlagM` 模型下它们在 EL1/EL0 都稳定表现为 `UNDEFINED`，且 `FAR_EL1` 保持当前未定义指令异常形态。
 - [x] 已补 `DGH/ESB/TSB/GCSB/CLRBHB/BTI/CHKFEAT/STSHH` 的 hint-space absent-feature 裸机回归，确认当前 feature 声明下它们稳定表现为 `NOP`，且 `CHKFEAT X16` 保持输入值不变。
 - [x] 已补 `MDCCINT_EL1` 以及 `OSDTRRX_EL1 / OSDTRTX_EL1` 的最小程序可见语义：`MDCCINT_EL1` 现为 `RX/TX` 两个位的 `RES0`-masked `RW`，`OSDTR*` 现作为 side-effect-free 的 DCC save/restore 视图访问 `DTRRX/DTRTX`，并补裸机回归覆盖 EL1 读写、`TXfull/RXfull` 不被意外改变，以及 EL0 下这些 sysreg 为 `UNDEFINED` 而非 trap。
+- [x] 已新增 `sysreg_xzr_semantics` 正式裸机回归，锁定 system register 指令里 `Rt==31` 的 `XZR/WZR` 语义：`MRS XZR, <sysreg>` 不应改当前 `SP`，`MSR <sysreg>, XZR` 应写入 0 而不是把当前 `SP` 当作源操作数，覆盖 generic `TPIDR_EL0` 与 special `SP_EL0` 两条路径。
 
 ### 3. SMP 内存模型与同步原语收尾
 
@@ -1281,6 +1286,18 @@
 - [ ] 明确这个抽象层只服务 RTC / host-deadline 设备：
   - 不反向改写 `GenericTimer`
   - 不把整个 SoC 的 guest 时间推进机制改成 wall clock 驱动
+
+#### 2.4 交互式架构 timer host 模式
+
+目标：
+- 在不破坏当前回归/性能可重复性的前提下，让交互式 Linux 场景中的 `CLOCK_REALTIME/CLOCK_MONOTONIC` 以宿主机节奏推进。
+
+任务：
+- [x] 保留默认 `step` 架构 timer 模式，继续服务现有回归与性能基线。
+- [x] 为 `GenericTimer` 增加可选 `host` 模式，使 `CNTVCT/CNTPCT` 改为跟随宿主机 monotonic 时钟推进。
+- [x] 在 SoC 主循环里为 `host` 模式使用更短的设备同步窗口，避免本地 timer IRQ 因长 chunk 被明显拖后。
+- [x] 为交互/GUI 恢复脚本默认启用 `host` 模式，同时保持自动化回归脚本继续使用 `step` 模式。
+- [x] 增加 Linux 用户态 `time_rate_smoke`，用 RTC 对比 `CLOCK_REALTIME/CLOCK_MONOTONIC` 的流速，验证交互模式下时间不再明显跑飞。
 
 ### 3. 快照与恢复语义
 
