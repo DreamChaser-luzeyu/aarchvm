@@ -105,7 +105,8 @@ _start:
     subs xzr, x12, #0x19
     b.ne fail
 
-    tlbi vae1, x30
+    lsr  x16, x30, #12
+    tlbi vae1, x16
     dsb  sy
     isb
 

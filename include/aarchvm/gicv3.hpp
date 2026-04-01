@@ -33,6 +33,8 @@ public:
   void send_sgi(std::size_t source_cpu, std::uint64_t value);
   [[nodiscard]] bool has_pending(std::size_t cpu_index) const;
   [[nodiscard]] bool has_pending(std::size_t cpu_index, std::uint8_t pmr) const;
+  [[nodiscard]] bool highest_pending(std::size_t cpu_index, std::uint32_t& intid) const;
+  [[nodiscard]] bool highest_pending(std::size_t cpu_index, std::uint8_t pmr, std::uint32_t& intid) const;
   [[nodiscard]] bool acknowledge(std::size_t cpu_index, std::uint32_t& intid);
   [[nodiscard]] bool acknowledge(std::size_t cpu_index, std::uint8_t pmr, std::uint32_t& intid);
   void eoi(std::size_t cpu_index, std::uint32_t intid);

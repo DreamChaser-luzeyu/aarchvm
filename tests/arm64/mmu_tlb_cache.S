@@ -109,7 +109,8 @@ _start:
     b.ne fail
 
     // Per-VA invalidate then should see 0x22
-    tlbi vae1, x30
+    lsr  x14, x30, #12
+    tlbi vae1, x14
     dsb sy
     isb
     ldr  x12, [x30]

@@ -2017,7 +2017,7 @@ bool Cpu::translate_data_address_fast(std::uint64_t va, AccessType access, std::
   const std::uint64_t page = (va >> 12) & tlb_page_mask();
   const std::uint64_t off = va & 0xFFFull;
   const TlbEntry* hit = nullptr;
-  if (tlb_last_data_.valid && tlb_last_data_.va_page == page && tlb_last_data_.asid == asid) {
+  if (tlb_last_data_.valid && tlb_last_data_.va_page == page && tlb_entry_matches_asid(tlb_last_data_, asid)) {
     hit = &tlb_last_data_;
   } else {
     ++perf_counters_.tlb_lookups;
@@ -3168,6 +3168,85 @@ void Cpu::write_osdtrtx_el1(std::uint64_t value) {
   dcc_tx_data_ = static_cast<std::uint32_t>(value);
 }
 
+std::uint64_t Cpu::read_icc_iar1_el1() {
+  if (exception_depth_ != 0 && exception_is_irq_stack_[exception_depth_ - 1]) {
+    return exception_intid_stack_[exception_depth_ - 1];
+  }
+  if (icc_igrpen1_el1_ == 0 || manual_irq_depth_ >= manual_irq_intid_stack_.size()) {
+    return 1023u;
+  }
+
+  std::uint32_t intid = 1023u;
+  if (!gic_.acknowledge(cpu_index_, static_cast<std::uint8_t>(irq_delivery_threshold_ & 0xFFu), intid)) {
+    irq_query_epoch_ = gic_.state_epoch();
+    irq_query_threshold_ = irq_delivery_threshold_;
+    irq_query_negative_valid_ = true;
+    return 1023u;
+  }
+  irq_query_negative_valid_ = false;
+  manual_irq_intid_stack_[manual_irq_depth_] = intid;
+  manual_irq_prev_prio_stack_[manual_irq_depth_] = running_priority_;
+  manual_irq_prio_dropped_stack_[manual_irq_depth_] = false;
+  ++manual_irq_depth_;
+  running_priority_ = gic_.priority(cpu_index_, intid);
+  refresh_irq_threshold_cache();
+  return intid;
+}
+
+std::uint64_t Cpu::read_icc_hppir1_el1() const {
+  if (icc_igrpen1_el1_ == 0) {
+    return 1023u;
+  }
+  std::uint32_t intid = 1023u;
+  if (!gic_.highest_pending(cpu_index_, static_cast<std::uint8_t>(irq_delivery_threshold_ & 0xFFu), intid)) {
+    return 1023u;
+  }
+  return intid;
+}
+
+void Cpu::icc_priority_drop(std::uint32_t intid) {
+  if (exception_depth_ != 0) {
+    const std::uint32_t idx = exception_depth_ - 1;
+    if (exception_is_irq_stack_[idx] && exception_intid_stack_[idx] == intid) {
+      running_priority_ = exception_prev_prio_stack_[idx];
+      refresh_irq_threshold_cache();
+      exception_prio_dropped_stack_[idx] = true;
+      const bool eoi_drop_dir = ((icc_ctlr_el1_ >> 1) & 0x1u) != 0u;
+      if (!eoi_drop_dir) {
+        gic_.eoi(cpu_index_, intid);
+      }
+      return;
+    }
+  }
+
+  if (manual_irq_depth_ == 0) {
+    return;
+  }
+  const std::uint32_t idx = manual_irq_depth_ - 1;
+  if (manual_irq_intid_stack_[idx] != intid) {
+    return;
+  }
+  running_priority_ = manual_irq_prev_prio_stack_[idx];
+  refresh_irq_threshold_cache();
+  manual_irq_prio_dropped_stack_[idx] = true;
+  const bool eoi_drop_dir = ((icc_ctlr_el1_ >> 1) & 0x1u) != 0u;
+  if (!eoi_drop_dir) {
+    gic_.eoi(cpu_index_, intid);
+    --manual_irq_depth_;
+  }
+}
+
+void Cpu::icc_deactivate(std::uint32_t intid) {
+  gic_.eoi(cpu_index_, intid);
+  if (manual_irq_depth_ == 0) {
+    return;
+  }
+  const std::uint32_t idx = manual_irq_depth_ - 1;
+  if (manual_irq_intid_stack_[idx] == intid && manual_irq_prio_dropped_stack_[idx]) {
+    --manual_irq_depth_;
+  }
+}
+
 std::uint64_t Cpu::shared_timer_steps() const {
   return callbacks_.time_steps ? callbacks_.time_steps() : steps_;
 }
@@ -3239,6 +3318,10 @@ void Cpu::reset(std::uint64_t pc) {
   exception_intid_stack_.fill(0);
   exception_prev_prio_stack_.fill(0x100);
   exception_prio_dropped_stack_.fill(false);
+  manual_irq_depth_ = 0;
+  manual_irq_intid_stack_.fill(0);
+  manual_irq_prev_prio_stack_.fill(0x100);
+  manual_irq_prio_dropped_stack_.fill(false);
   sync_reported_ = false;
   trace_exceptions_ = (std::getenv("AARCHVM_TRACE_EXC") != nullptr);
   trace_all_exceptions_ = (std::getenv("AARCHVM_TRACE_ALL_EXC") != nullptr);
@@ -3306,14 +3389,14 @@ void Cpu::notify_tlbi_vmalle1() {
 }
 
 void Cpu::notify_tlbi_vae1(std::uint64_t operand, bool all_asids) {
+  const std::uint64_t va_page = tlbi_operand_va_page(operand);
   if (all_asids) {
     ++perf_counters_.tlb_flush_va;
-    tlb_invalidate_page((operand >> 12) & tlb_page_mask(), 0u, false);
-    tlb_invalidate_page(operand & tlb_page_mask(), 0u, false);
+    tlb_invalidate_page(va_page, 0u, false);
   } else {
     tlb_flush_va(operand);
   }
-  invalidate_decode_va(operand, 1u);
+  invalidate_decode_va_page(tlbi_operand_va_base(operand));
 }
 
 void Cpu::notify_tlbi_aside1(std::uint16_t asid) {
@@ -3625,6 +3708,14 @@ bool Cpu::step() {
     return true;
   }
 
+  // In AArch64 state the PC must remain word-aligned. This fault has higher
+  // priority than Illegal Execution state, so check it before consulting
+  // PSTATE.IL.
+  if ((pc_ & 0x3u) != 0u) {
+    enter_sync_exception(pc_, 0x22u, 0u, true, pc_);
+    return true;
+  }
+
   if (sysregs_.illegal_execution_state()) {
     enter_sync_exception(pc_, 0x0Eu, 0u, false, 0u);
     return true;
@@ -3787,6 +3878,7 @@ bool Cpu::step() {
       if (exception_is_irq_stack_[idx] && !exception_prio_dropped_stack_[idx]) {
         running_priority_ = exception_prev_prio_stack_[idx];
         refresh_irq_threshold_cache();
+        gic_.eoi(cpu_index_, exception_intid_stack_[idx]);
       }
       --exception_depth_;
     }
@@ -4072,9 +4164,10 @@ bool Cpu::translate_address(std::uint64_t va,
     out_result->pa = va;
     out_result->asid = current_translation_asid(false);
     out_result->level = 3;
-    out_result->attr_index = 0;
-    out_result->mair_attr = 0;
-    out_result->writable = true;
+      out_result->attr_index = 0;
+      out_result->mair_attr = 0;
+      out_result->global_entry = true;
+      out_result->writable = true;
     out_result->user_accessible = true;
     out_result->executable = true;
     out_result->pxn = false;
@@ -4093,7 +4186,7 @@ bool Cpu::translate_address(std::uint64_t va,
   if (use_tlb) {
     const TlbEntry* hit = nullptr;
     TlbEntry* hot = (access == AccessType::Fetch) ? &tlb_last_fetch_ : &tlb_last_data_;
-    if (hot->valid && hot->va_page == page && hot->asid == asid) {
+    if (hot->valid && hot->va_page == page && tlb_entry_matches_asid(*hot, asid)) {
       hit = hot;
     } else {
       ++perf_counters_.tlb_lookups;
@@ -4109,6 +4202,7 @@ bool Cpu::translate_address(std::uint64_t va,
       out_result->level = hit->level;
       out_result->attr_index = hit->attr_index;
       out_result->mair_attr = hit->mair_attr;
+      out_result->global_entry = hit->global_entry;
       out_result->writable = hit->writable;
       out_result->user_accessible = hit->user_accessible;
       out_result->executable = hit->executable;
@@ -4152,9 +4246,10 @@ bool Cpu::translate_cache_maintenance_address(std::uint64_t va,
     out_result->pa = va;
     out_result->asid = current_translation_asid(false);
     out_result->level = 3;
-    out_result->attr_index = 0;
-    out_result->mair_attr = 0;
-    out_result->writable = true;
+      out_result->attr_index = 0;
+      out_result->mair_attr = 0;
+      out_result->global_entry = true;
+      out_result->writable = true;
     out_result->user_accessible = true;
     out_result->executable = true;
     out_result->pxn = false;
@@ -4173,7 +4268,7 @@ bool Cpu::translate_cache_maintenance_address(std::uint64_t va,
   if (use_tlb) {
     const TlbEntry* hit = nullptr;
     TlbEntry* hot = &tlb_last_data_;
-    if (hot->valid && hot->va_page == page && hot->asid == asid) {
+    if (hot->valid && hot->va_page == page && tlb_entry_matches_asid(*hot, asid)) {
       hit = hot;
     } else {
       ++perf_counters_.tlb_lookups;
@@ -4189,6 +4284,7 @@ bool Cpu::translate_cache_maintenance_address(std::uint64_t va,
       out_result->level = hit->level;
       out_result->attr_index = hit->attr_index;
       out_result->mair_attr = hit->mair_attr;
+      out_result->global_entry = hit->global_entry;
       out_result->writable = hit->writable;
       out_result->user_accessible = hit->user_accessible;
       out_result->executable = hit->executable;
@@ -4392,6 +4488,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
       }
 
       const bool af = ((desc >> 10) & 0x1u) != 0;
+      const bool global_entry = ((desc >> 11) & 0x1u) == 0;
       const std::uint8_t ap = static_cast<std::uint8_t>((desc >> 6) & 0x3u);
       const bool leaf_ro = (ap & 0x2u) != 0;
       const bool user_accessible = !inherited.user_no_access && ((ap & 0x1u) != 0);
@@ -4415,6 +4512,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
       out_result->level = static_cast<std::uint8_t>(level);
       out_result->attr_index = attr_index;
       out_result->mair_attr = mair_attr;
+      out_result->global_entry = global_entry;
       out_result->writable = !(inherited.write_protect || (leaf_ro && !dbm));
       out_result->user_accessible = user_accessible;
       out_result->pxn = pxn || inherited.pxn;
@@ -4465,6 +4563,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
     }
 
     const bool af = ((desc >> 10) & 0x1u) != 0;
+    const bool global_entry = ((desc >> 11) & 0x1u) == 0;
     const std::uint8_t ap = static_cast<std::uint8_t>((desc >> 6) & 0x3u);
     const bool leaf_ro = (ap & 0x2u) != 0;
     const bool user_accessible = !inherited.user_no_access && ((ap & 0x1u) != 0);
@@ -4491,6 +4590,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
     out_result->level = static_cast<std::uint8_t>(level);
     out_result->attr_index = attr_index;
     out_result->mair_attr = mair_attr;
+    out_result->global_entry = global_entry;
     out_result->writable = !(inherited.write_protect || (leaf_ro && !dbm));
     out_result->user_accessible = user_accessible;
     out_result->pxn = pxn || inherited.pxn;
@@ -4635,24 +4735,20 @@ std::uint16_t Cpu::current_translation_asid(bool va_upper) const {
 }
 
 std::uint16_t Cpu::tlbi_operand_asid(std::uint64_t operand) const {
-  const std::uint16_t high = static_cast<std::uint16_t>((operand >> 48) & mmu_asid_mask());
-  if (high != 0) {
-    return high;
-  }
-  return static_cast<std::uint16_t>(operand & mmu_asid_mask());
+  return static_cast<std::uint16_t>((operand >> 48) & mmu_asid_mask());
 }
 
 void Cpu::tlb_flush_asid(std::uint16_t asid) {
   asid &= mmu_asid_mask();
-  if (tlb_last_fetch_.valid && tlb_last_fetch_.asid == asid) {
+  if (tlb_last_fetch_.valid && !tlb_last_fetch_.global_entry && tlb_last_fetch_.asid == asid) {
     tlb_last_fetch_.valid = false;
   }
-  if (tlb_last_data_.valid && tlb_last_data_.asid == asid) {
+  if (tlb_last_data_.valid && !tlb_last_data_.global_entry && tlb_last_data_.asid == asid) {
     tlb_last_data_.valid = false;
   }
   for (auto& set : tlb_entries_) {
     for (auto& entry : set) {
-      if (entry.valid && entry.asid == asid) {
+      if (entry.valid && !entry.global_entry && entry.asid == asid) {
         entry.valid = false;
       }
     }
@@ -4669,6 +4765,7 @@ void Cpu::tlb_insert(std::uint64_t va_page, const TranslationResult& result) {
   entry.level = result.level;
   entry.attr_index = result.attr_index;
   entry.mair_attr = result.mair_attr;
+  entry.global_entry = result.global_entry;
   entry.writable = result.writable;
   entry.user_accessible = result.user_accessible;
   entry.executable = result.executable;
@@ -4687,7 +4784,10 @@ void Cpu::tlb_insert_entry(std::uint64_t va_page, const TlbEntry& entry) {
   }
   auto& set = tlb_entries_[tlb_set_index(va_page)];
   for (TlbEntry& slot : set) {
-    if (slot.valid && slot.va_page == va_page && slot.asid == entry.asid) {
+    if (slot.valid &&
+        slot.va_page == va_page &&
+        slot.global_entry == entry.global_entry &&
+        (slot.global_entry || slot.asid == entry.asid)) {
       TlbEntry updated = entry;
       updated.valid = true;
       updated.va_page = va_page;
@@ -4714,27 +4814,30 @@ void Cpu::tlb_insert_entry(std::uint64_t va_page, const TlbEntry& entry) {
 
 void Cpu::tlb_invalidate_page(std::uint64_t va_page, std::uint16_t asid, bool match_asid) {
   asid &= mmu_asid_mask();
-  if (tlb_last_fetch_.valid && tlb_last_fetch_.va_page == va_page && (!match_asid || tlb_last_fetch_.asid == asid)) {
+  if (tlb_last_fetch_.valid &&
+      tlb_last_fetch_.va_page == va_page &&
+      (!match_asid || tlb_entry_matches_asid(tlb_last_fetch_, asid))) {
     tlb_last_fetch_.valid = false;
   }
-  if (tlb_last_data_.valid && tlb_last_data_.va_page == va_page && (!match_asid || tlb_last_data_.asid == asid)) {
+  if (tlb_last_data_.valid &&
+      tlb_last_data_.va_page == va_page &&
+      (!match_asid || tlb_entry_matches_asid(tlb_last_data_, asid))) {
     tlb_last_data_.valid = false;
   }
   auto& set = tlb_entries_[tlb_set_index(va_page)];
   for (TlbEntry& entry : set) {
-    if (entry.valid && entry.va_page == va_page && (!match_asid || entry.asid == asid)) {
+    if (entry.valid &&
+        entry.va_page == va_page &&
+        (!match_asid || tlb_entry_matches_asid(entry, asid))) {
       entry.valid = false;
     }
   }
 }
 
-void Cpu::tlb_flush_va(std::uint64_t va) {
+void Cpu::tlb_flush_va(std::uint64_t operand) {
   ++perf_counters_.tlb_flush_va;
-  const std::uint16_t asid = tlbi_operand_asid(va);
-  // Linux feeds TLBI-by-VA operands in architected VA>>12 form, while some
-  // local tests historically passed raw VAs. Accept both encodings here.
-  tlb_invalidate_page((va >> 12) & tlb_page_mask(), asid, true);
-  tlb_invalidate_page(va & tlb_page_mask(), asid, true);
+  const std::uint16_t asid = tlbi_operand_asid(operand);
+  tlb_invalidate_page(tlbi_operand_va_page(operand), asid, true);
 }
 
 std::uint64_t Cpu::q_reg_lane(std::uint32_t idx, std::size_t lane) const {
@@ -4817,18 +4920,17 @@ bool Cpu::exec_system(std::uint32_t insn) {
     };
     switch ((insn >> 5) & 0x7Fu) {
     case 0x02u: // WFE
+      if (sysregs_.in_el0() && (sysregs_.sctlr_el1() & kSctlrEl1NTwe) == 0u) {
+        return trap_wfx(0x1u);
+      }
       if (event_register_) {
         event_register_ = false;
-      } else if (sysregs_.in_el0() && (sysregs_.sctlr_el1() & kSctlrEl1NTwe) == 0u) {
-        return trap_wfx(0x1u);
       } else {
         waiting_for_event_ = true;
       }
       return true;
     case 0x03u: // WFI
-      if (sysregs_.in_el0() &&
-          (sysregs_.sctlr_el1() & kSctlrEl1NTwi) == 0u &&
-          !gic_.has_pending(cpu_index_)) {
+      if (sysregs_.in_el0() && (sysregs_.sctlr_el1() & kSctlrEl1NTwi) == 0u) {
         return trap_wfx(0x0u);
       }
       waiting_for_interrupt_ = true;
@@ -5312,14 +5414,14 @@ bool Cpu::exec_system(std::uint32_t insn) {
     const std::uint32_t rt = insn & 0x1Fu;
     const std::uint64_t operand = reg(rt);
     const bool all_asids = (insn & 0x80u) != 0;
+    const std::uint64_t va_page = tlbi_operand_va_page(operand);
     if (all_asids) {
       ++perf_counters_.tlb_flush_va;
-      tlb_invalidate_page((operand >> 12) & tlb_page_mask(), 0u, false);
-      tlb_invalidate_page(operand & tlb_page_mask(), 0u, false);
+      tlb_invalidate_page(va_page, 0u, false);
     } else {
       tlb_flush_va(operand);
     }
-    invalidate_decode_va(operand, 1u);
+    invalidate_decode_va_page(tlbi_operand_va_base(operand));
     if (callbacks_.tlbi_vae1_broadcast) {
       callbacks_.tlbi_vae1_broadcast(*this, operand, all_asids);
     }
@@ -5486,6 +5588,14 @@ bool Cpu::exec_system(std::uint32_t insn) {
     return true;
   }
 
+  // DC CSW, Xt
+  if ((insn & 0xFFFFFFE0u) == 0xD5087A40u) {
+    if (sysregs_.in_el0()) {
+      return undefined_current_instruction();
+    }
+    return true;
+  }
+
   // DC CISW, Xt
   if ((insn & 0xFFFFFFE0u) == 0xD5087E40u) {
     if (sysregs_.in_el0()) {
@@ -5611,11 +5721,11 @@ bool Cpu::exec_system(std::uint32_t insn) {
     }
 
     if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (12u << 3) | 0u)) { // ICC_IAR1_EL1
-      set_reg(rt, (exception_depth_ != 0 && exception_is_irq_stack_[exception_depth_ - 1]) ? exception_intid_stack_[exception_depth_ - 1] : 1023u);
+      set_reg(rt, read_icc_iar1_el1());
       return true;
     }
     if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (12u << 3) | 2u)) { // ICC_HPPIR1_EL1
-      set_reg(rt, (exception_depth_ != 0 && exception_is_irq_stack_[exception_depth_ - 1]) ? exception_intid_stack_[exception_depth_ - 1] : 1023u);
+      set_reg(rt, read_icc_hppir1_el1());
       return true;
     }
     if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (11u << 3) | 3u)) { // ICC_RPR_EL1
@@ -5711,6 +5821,19 @@ bool Cpu::exec_system(std::uint32_t insn) {
       set_reg(rt, timer_.read_cntp_tval_el0(cpu_index_, shared_timer_steps()));
       return true;
     }
+    if (key == ((3u << 14) | (3u << 11) | (0u << 7) | (0u << 3) | 7u)) { // DCZID_EL0
+      std::uint64_t value = 0;
+      if (!sysregs_.read(op0, op1, crn, crm, op2, value)) {
+        return false;
+      }
+      // When SCTLR_EL1.DZE is clear, EL0 still reads DCZID_EL0 but observes
+      // DZP=1 to indicate that DC ZVA is not supported from EL0.
+      if (sysregs_.in_el0() && (sysregs_.sctlr_el1() & kSctlrEl1Dze) == 0u) {
+        value |= 1ull << 4;
+      }
+      set_reg(rt, value);
+      return true;
+    }
     if (key == ((3u << 14) | (0u << 11) | (4u << 7) | (1u << 3) | 0u)) { // SP_EL0
       if (sysregs_.current_uses_sp_el0()) {
         return false;
@@ -5755,18 +5878,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
     }
 
     if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (12u << 3) | 1u)) { // ICC_EOIR1_EL1
-      if (exception_depth_ != 0) {
-        const std::uint32_t idx = exception_depth_ - 1;
-        if (exception_is_irq_stack_[idx] && exception_intid_stack_[idx] == static_cast<std::uint32_t>(reg(rt))) {
-          running_priority_ = exception_prev_prio_stack_[idx];
-          refresh_irq_threshold_cache();
-          exception_prio_dropped_stack_[idx] = true;
-          const bool eoi_drop_dir = ((icc_ctlr_el1_ >> 1) & 0x1u) != 0u;
-          if (!eoi_drop_dir) {
-            gic_.eoi(cpu_index_, exception_intid_stack_[idx]);
-          }
-        }
-      }
+      icc_priority_drop(static_cast<std::uint32_t>(reg(rt)));
       return true;
     }
     if (key == ((3u << 14) | (0u << 11) | (4u << 7) | (2u << 3) | 0u)) { // SPSel
@@ -5857,7 +5969,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
       return true;
     }
     if (key == ((3u << 14) | (0u << 11) | (12u << 7) | (11u << 3) | 1u)) { // ICC_DIR_EL1
-      gic_.eoi(cpu_index_, static_cast<std::uint32_t>(reg(rt)));
+      icc_deactivate(static_cast<std::uint32_t>(reg(rt)));
       return true;
     }
     if (key == ((3u << 14) | (3u << 11) | (14u << 7) | (3u << 3) | 1u)) { // CNTV_CTL_EL0
@@ -11594,6 +11706,37 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     }
   }
 
+  // FEAT_LRCPC is absent in the current model. LDAPR W/X/B/H live in the
+  // generic load/store decode space, and the W/B/H encodings otherwise alias
+  // LDURSW/LDURSB/LDURSH. Keep the whole base family architecturally
+  // UNDEFINED instead of letting the overlapping unscaled-load handlers
+  // perform guest-visible memory accesses.
+  {
+    const std::uint32_t tag = insn & 0xFFE0FC00u;
+    if (tag == 0x38A0C000u ||  // LDAPRB Wt, [Xn]
+        tag == 0x78A0C000u ||  // LDAPRH Wt, [Xn]
+        tag == 0xB8A0C000u ||  // LDAPR Wt, [Xn]
+        tag == 0xF8A0C000u) {  // LDAPR Xt, [Xn]
+      enter_sync_exception(pc_ - 4u, 0x00u, 0u, false, 0u);
+      return true;
+    }
+  }
+
+  // FEAT_LS64 / FEAT_LS64_V / FEAT_LS64_ACCDATA are absent in the current
+  // model. LD64B/ST64B/ST64BV/ST64BV0 live in generic load/store decode
+  // space; without an explicit intercept they alias unrelated unscaled
+  // load/store handlers such as STUR Xt.
+  {
+    const std::uint32_t tag = insn & 0xFFE0FC00u;
+    if (tag == 0xF820D000u ||  // LD64B Xt, [Xn]
+        tag == 0xF8209000u ||  // ST64B Xt, [Xn]
+        tag == 0xF820B000u ||  // ST64BV Xstatus, Xt, [Xn]
+        tag == 0xF820A000u) {  // ST64BV0 Xstatus, Xt, [Xn]
+      enter_sync_exception(pc_ - 4u, 0x00u, 0u, false, 0u);
+      return true;
+    }
+  }
+
   // LDXP / LDAXP / STXP / STLXP (32/64-bit pair exclusive).
   {
     const std::uint32_t tag = insn & 0xFFE08000u;
@@ -12805,6 +12948,7 @@ bool Cpu::save_state(std::ostream& out) const {
            snapshot_io::write(out, entry.level) &&
            snapshot_io::write(out, entry.attr_index) &&
            snapshot_io::write(out, entry.mair_attr) &&
+           snapshot_io::write_bool(out, entry.global_entry) &&
            snapshot_io::write_bool(out, entry.writable) &&
            snapshot_io::write_bool(out, entry.user_accessible) &&
            snapshot_io::write_bool(out, entry.executable) &&
@@ -12832,6 +12976,10 @@ bool Cpu::save_state(std::ostream& out) const {
       !snapshot_io::write_array(out, exception_intid_stack_) ||
       !snapshot_io::write_array(out, exception_prev_prio_stack_) ||
       !snapshot_io::write_array(out, exception_prio_dropped_stack_) ||
+      !snapshot_io::write(out, manual_irq_depth_) ||
+      !snapshot_io::write_array(out, manual_irq_intid_stack_) ||
+      !snapshot_io::write_array(out, manual_irq_prev_prio_stack_) ||
+      !snapshot_io::write_array(out, manual_irq_prio_dropped_stack_) ||
       !snapshot_io::write_bool(out, sync_reported_) ||
       !snapshot_io::write_bool(out, waiting_for_interrupt_) ||
       !snapshot_io::write_bool(out, waiting_for_event_) ||
@@ -12907,6 +13055,7 @@ bool Cpu::load_state(std::istream& in, std::uint32_t version) {
     }
     if (version >= 7) {
       if (!snapshot_io::read(in, entry.asid) || !snapshot_io::read(in, entry.level) || !snapshot_io::read(in, entry.attr_index) || !snapshot_io::read(in, entry.mair_attr) ||
+          !((version >= 22) ? snapshot_io::read_bool(in, entry.global_entry) : ((entry.global_entry = false), true)) ||
           !snapshot_io::read_bool(in, entry.writable) || !snapshot_io::read_bool(in, entry.user_accessible) || !snapshot_io::read_bool(in, entry.executable) || !snapshot_io::read_bool(in, entry.pxn) ||
           !snapshot_io::read_bool(in, entry.uxn) || !snapshot_io::read(in, memory_type) || !snapshot_io::read(in, leaf_shareability) ||
           !snapshot_io::read(in, walk_inner) || !snapshot_io::read(in, walk_outer) || !snapshot_io::read(in, walk_shareability) ||
@@ -12923,6 +13072,9 @@ bool Cpu::load_state(std::istream& in, std::uint32_t version) {
     if (version < 7) {
       entry.asid = 0;
       entry.user_accessible = false;
+    }
+    if (version < 22) {
+      entry.global_entry = false;
     }
     entry.memory_type = static_cast<MemoryType>(memory_type);
     entry.leaf_shareability = static_cast<Shareability>(leaf_shareability);
@@ -12948,6 +13100,10 @@ bool Cpu::load_state(std::istream& in, std::uint32_t version) {
   exception_intid_stack_.fill(0);
   exception_prev_prio_stack_.fill(0x100);
   exception_prio_dropped_stack_.fill(false);
+  manual_irq_depth_ = 0;
+  manual_irq_intid_stack_.fill(0);
+  manual_irq_prev_prio_stack_.fill(0x100);
+  manual_irq_prio_dropped_stack_.fill(false);
   if (!sysregs_.load_state(in, version) ||
       !snapshot_io::read(in, exception_depth_) ||
       exception_depth_ > exception_is_irq_stack_.size()) {
@@ -12991,6 +13147,20 @@ bool Cpu::load_state(std::istream& in, std::uint32_t version) {
       exception_prev_prio_stack_.fill(0x100);
       exception_prio_dropped_stack_.fill(false);
     }
+  }
+  if (version >= 21) {
+    if (!snapshot_io::read(in, manual_irq_depth_) ||
+        manual_irq_depth_ > manual_irq_intid_stack_.size() ||
+        !snapshot_io::read_array(in, manual_irq_intid_stack_) ||
+        !snapshot_io::read_array(in, manual_irq_prev_prio_stack_) ||
+        !snapshot_io::read_array(in, manual_irq_prio_dropped_stack_)) {
+      return false;
+    }
+  } else {
+    manual_irq_depth_ = 0;
+    manual_irq_intid_stack_.fill(0);
+    manual_irq_prev_prio_stack_.fill(0x100);
+    manual_irq_prio_dropped_stack_.fill(false);
   }
   if (!snapshot_io::read_bool(in, sync_reported_) ||
       !snapshot_io::read_bool(in, waiting_for_interrupt_) ||

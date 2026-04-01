@@ -18,6 +18,8 @@ _start:
     movz x16, #0
     movk x16, #0x0800, lsl #16
     str  w16, [x15, #0x100]
+    movz w16, #0x40
+    strb w16, [x15, #0x41b]
 
     movz x2, #0x80
     msr  icc_pmr_el1, x2

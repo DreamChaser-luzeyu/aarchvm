@@ -55,13 +55,29 @@
 
 当前进展：
 - [x] 已收口一组“应为 `UNDEFINED` 却被误分类成 EL0 system access trap”的 system-encoding / sysreg 边界，包括若干 absent feature 指令族。
+- [x] 已把 `CPACR_EL1` 的 guest 可见位收回到当前模型真正声明支持的 `FPEN[21:20]`，避免把 `TTA/SMEN/ZEN/E0POE/TAM/TCPAC` 等 absent-feature 位错误读回为 1，并新增裸机回归锁定 direct `MRS/MSR` 可见值。
+- [x] 已把 `VBAR_EL1` 的 `RES0` 低位语义收口到 bits `[10:0]==0`，并新增裸机回归同时锁定 direct read-back 与真实 `SVC` 异常向量落点，避免 misaligned `VBAR` 在 guest 侧继续可见。
+- [x] 已收口 `EL0 WFE/WFI` 在 `SCTLR_EL1.nTWE/nTWI=0` 下的 trap 优先级，修正此前“先消费 event register / 先观察 pending IRQ、后决定 trap”的错误顺序，并补裸机回归覆盖 `event-register-set` 与 `pending-IRQ` 这两个此前未锁住的边界。
+- [x] 已新增 `cpacr_fp_sysreg_trap` 裸机回归，覆盖 direct `MRS/MSR FPCR/FPSR` 在 `CPACR_EL1.FPEN=00/01/10/11` 下的 EL1/EL0 trap/allow 语义，确保 special-purpose `FPCR/FPSR` 访问稳定走 `EC=0x07` 的 `FP/ASIMD access trap` 语义，而不是被 generic sysreg 路径误分类。
+- [x] 已新增 `sysreg_trap_iss_rt_fields` 裸机回归，把 `EC=0x18` system-access trap 的 `ISS` 细节从“只看 EC 对不对”收紧到显式锁定 `Rt`、read/write bit、`op0/op1/CRn/CRm/op2` 编码与 `FAR_EL1==0`，覆盖 `MRS CTR_EL0`、`MSR TCR_EL1`、`IC IVAU`、`DC ZVA` 这四类 EL0 trap。
+- [x] 已把 `illegal_state_return` 裸机回归扩成三类 `ERET` 尾状态边界：保留的 AArch64 `SPSR.M`、合法返回但 `SPSR.IL=1`、以及返回到不支持的 AArch32 state；并显式锁定异常后保存下来的 `NZCV/DAIF/PAN/IL/M`，避免 `ERET/SPSR/PSTATE` 只“看起来能跑”但状态仍有尾差。
+- [x] 已补 `PC alignment fault` 的最小程序可见语义：当前 CPU 主循环现在会在 AArch64 取指前真正检查 `PC[1:0]`，并保证它优先于 `Illegal Execution state`；新增裸机回归覆盖 `EL1 BR -> misaligned PC`，以及“`ERET` 返回到 `IL=1 + misaligned PC` 时仍应先报 `EC=0x22`”这条优先级边界。
+- [x] 已把 `el0_eret_undef` 从“只看 EL0 执行 `ERET` 会不会进 `EC=0`”收紧到同时验证 `ESR_EL1.IL=1`、`ISS=0`、`FAR_EL1=0`，以及保存到 `SPSR_EL1` 里的 EL0 源 `NZCV/DAIF/PAN/M/IL`，补齐 `ERET` 家族另一条关键 trap 边界。
+- [x] 已把 `sync_exception_regs`、`svc_sysreg_minimal`、`software_step_basic` 补成正式强断言回归，分别锁定 same-EL instruction abort、`SVC`、software-step/`BRK` 路径上的 `ESR_EL1/ELR_EL1/FAR_EL1`、live `DAIF`、以及 `SPSR_EL1` 保存的 `NZCV/DAIF/PAN/SS/IL/M`。
+- [x] 已新增 `mmu_at_par_formats` 裸机回归，把 `AT -> PAR_EL1` 的关键程序可见格式固定进正式回归：成功态锁定 `bit11=RES1`、Device 与 Normal Non-cacheable 的 `SH=0b10`，fault 态锁定 `F`、`RES1 bit11`、`S/PTW=0` 与 `FST` 编码。
+- [x] 已把 `el0_cache_ops_privilege` 与 `el0_tlbi_cache_undef` 从“只看会不会进异常”收紧到显式锁定 `EL0 cache/TLBI/AT` 这组边界里 `UNDEFINED` 与 `system-access trap` 的分类、`IL=1`、`ISS=0` 与 `FAR_EL1=0`，避免 `TLBI from EL0` 之类路径被错误宽放行或误报成 `EC=0x18`。
+- [x] 已补 base cache maintenance by set/way 家族里此前漏掉的 `DC CSW, Xt` 解码，并新增 `dc_csw_privilege` 裸机回归锁定其程序可见边界：`EL1` 下正常执行、`EL0` 下保持 `UNDEFINED`，且异常时显式检查 `ESR_EL1.IL=1`、`ISS=0`、`FAR_EL1=0` 与保存到 `SPSR_EL1` 的源 `NZCV/DAIF/PAN/M`。
+- [x] 已把 `brk_exception`、`hlt_undef`、`el0_hvc_smc_undef`、`el1_hvc_smc_undef` 这组 exception-generating 指令回归继续收紧，统一验证 `IL/ISS/FAR` 与 `SPSR_EL1` 中保存的源 `NZCV/DAIF/PAN/M`，把 `BRK/HLT/HVC/SMC` 从 smoke 提升为正式异常语义回归。
+- [x] 已补 `ICC_HPPIR1_EL1/ICC_IAR1_EL1/ICC_EOIR1_EL1/ICC_DIR_EL1` 在“非 IRQ 异常上下文”下的最小程序可见语义：同步异常或普通 EL1 代码里现在也能手动查询最高优先级 pending IRQ、完成 acknowledge / priority drop / deactivate，`GIC` 侧会按优先级而不是纯 `INTID` 顺序选中断，并新增 `gic_sysreg_manual_ack` 裸机回归与 snapshot 状态持久化覆盖这一路径。
 - [x] 已对齐 `ID_AA64PFR0_EL1.GIC` 与当前 `ICC_*` system register 可见性，避免对外声明与实现矛盾。
 - [x] 已收口 debug sysreg 资源数量边界，使 `ID_AA64DFR0_EL1` 的资源声明与 `DBGBVR<n>/DBGWVR<n>` 等可见性一致。
 - [x] 已按 `OS Lock` / `OS Double Lock` / `CORENPDRQ` 收口 self-hosted debug 异常生成条件，确保除 `BRK` 外，hardware breakpoint、watchpoint、software step 在锁定时都被正确抑制，而 `BRK` 保持始终可见。
 - [x] 已新增 `debug_lock_exception_gating` 裸机回归覆盖上述 debug lock 语义，并修正 `debug_break_watch_basic`、`software_step_basic` 的测试前置条件，使其显式解锁 debug lock，不再依赖旧的错误宽放行行为。
 - [x] 已为 `MDSCR_EL1.TDA` 补上最小 software-access debug event 行为：对本来会成功的 `DBGBVR/DBGBCR/DBGWVR/DBGWCR` 访问，在 `OS Lock` 解锁且 `TDA=1` 时进入 halting 行为；并补 `debug_software_access_halt_read/write` 裸机回归覆盖“锁着不触发、解锁后 halt”的读写路径。
 - [x] 已收口 `MDSCR_EL1[30:29] <-> EDSCR/MDCCSR_EL0` 这组 DCC full-flag 联动：`OS Lock` 锁定时通过 `MSR MDSCR_EL1` 的 save/restore 写入会同步更新 `TXfull/RXfull`，解锁后 `MRS MDSCR_EL1` 会只读反映 live 的 DCC 状态；并补 `debug_mdscr_dcc_flags` 裸机回归覆盖锁定态 save/restore 与解锁态 live 反映。
-- [x] 已收口 `AT S1E1R/W` 与 `PSTATE.PAN` / `FEAT_PAN2` 的边界，避免 plain `AT` 错误受 PAN 影响，并确保 `AT S1E1RP/WP` 在 `FEAT_PAN2` absent 时表现为 `UNDEFINED`。
+- [x] 已收口 `AT S1E1R/W` 与 `PSTATE.PAN` / `FEAT_PAN2` 的边界，避免 plain `AT` 错误受 PAN 影响，并通过 `at_pan2_absent_undef` 正式裸机回归锁定 `AT S1E1RP/WP` 在 `FEAT_PAN2` absent 时应表现为 `UNDEFINED`，且不应修改 `PAR_EL1` 或源寄存器。
+- [x] 已新增 `at_s1e0_el0_undef` 正式裸机回归，把 `EL0` 执行 `AT S1E0R/W` 的程序可见负向语义锁进回归：当前模型下两者都应报 `UNDEFINED`，并显式检查 `ESR_EL1.EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`，同时断言 `PAR_EL1` 与源寄存器保持不变，避免后续 system decode 调整把这组 `AT` 指令误宽放行或留下隐藏副作用。
+- [x] 已新增 `wfxt_absent_undef` 正式裸机回归，把当前 `!FEAT_WFxT` 模型下 `WFET/WFIT` 的负向语义单独锁进回归：覆盖 EL1/EL0 两级的 `UNDEFINED` 分类、`ESR_EL1.EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`，并断言超时寄存器参数不被修改，以及 EL0 异常保存的 `NZCV/DAIF/PAN/M/IL` 符合源 `PSTATE`。
 - [x] 已对齐 `ID_AA64MMFR0_EL1` 的 granule 声明与当前 `4KB`-only 页表实现，避免把未实现的 `16KB granule` 错误宣称为存在。
 - [x] 已收口 `ID_AA64MMFR0_EL1.BigEnd/BigEndEL0` 与 `SCTLR_EL1.EE/E0E` 的固定值语义，避免在 mixed-endian absent 时仍把 `EE/E0E` 读回为可配置位。
 - [x] 已收口 `SPSR_EL1` 在“AArch64-only + 当前 absent feature 集”下的 `RES0` / 固定位语义，避免 guest 通过 `MSR SPSR_EL1` 把 `UAO/DIT/TCO/SSBS/BTYPE/ALLINT/PM/PPEND/EXLOCK/PACM/UINJ` 等当前未实现位读回成 1。
@@ -75,6 +91,9 @@
 - [x] 已收口 `FEAT_PAuth absent` 下 hint-space 与 integer / direct `PAuth` encoding 的语义边界，确保前者为 `NOP`、后者为 `UNDEFINED`，并修正 direct integer encodings 被 generic integer decode 误吞的问题。
 - [x] 已收口 `PACM` 在 `!FEAT_PAuth_LR` 下的语义，确保它作为 hint-space 指令表现为 `NOP` 而不是 `UNDEFINED`，并补裸机单测覆盖 EL1 / EL0 两种执行路径。
 - [x] 已收口 `LDRAA/LDRAB` 在 `!FEAT_PAuth` 下的语义，确保它们不再被 generic X load/store post/pre-index decode 误吞，而是稳定表现为 `UNDEFINED`，并补裸机单测覆盖 offset/pre-index 与“无访存、无写回”边界。
+- [x] 已收口 `FEAT_LS64 absent` 下 `LD64B/ST64B/ST64BV/ST64BV0` 的语义边界，修正它们落入 generic unscaled load/store decode 并被误吞成普通 `STUR` 类指令的问题；当前模型下它们现在稳定表现为 `UNDEFINED`，并已补裸机回归覆盖 EL1/EL0 的 `EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0` 与“无结果寄存器修改 / 无基址写回”边界。
+- [x] 已收口 `FEAT_LRCPC absent` 下 `LDAPR W/X`、`LDAPRB W`、`LDAPRH W` 的语义边界，修正它们被 generic unscaled load/store decode 误吞成 `LDURSW/LDURSB/LDURSH` 的问题，并补裸机回归覆盖 EL1/EL0 下的 `EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0` 与“无寄存器修改 / 无写回”边界。
+- [x] 已新增 `mops_absent_undef` 正式裸机回归，把当前 `ID_AA64ISAR2_EL1.MOPS=0` 模型下 `SETP/SETM/SETE` 与 `CPYP/CPYM/CPYE` 的 absent-feature 语义固定进回归，显式锁定 EL1/EL0 的 `EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`，以及目的/源/长度寄存器都不应发生写回。
 - [x] 已把 `BRAA/BLRAA/RETAA/ERETAA` 以及 `RETAASPPCR/RETABSPPCR` 等 `PAuth/PAuth_LR` 分支返回类 absent-feature 语义固化进正式裸机回归，防止后续解码调整把它们误吞成普通 `BR/BLR/RET/ERET`。
 - [x] 已补 `RETAASPPC/RETABSPPC` immediate-return 形式的正式裸机回归，确认当前 `!FEAT_PAuth_LR` 模型下它们稳定表现为 `UNDEFINED`，且不会被其它分支类解码误吞。
 - [x] 已补 `RMIF/SETF8/SETF16` 的正式裸机回归，确认当前 `!FEAT_FlagM` 模型下它们在 EL1/EL0 都稳定表现为 `UNDEFINED`，且 `FAR_EL1` 保持当前未定义指令异常形态。
@@ -143,8 +162,12 @@
 - [x] 已新增并修正一组 pair atomic 裸机回归，覆盖 `32-bit pair exclusive` 成功路径、`CASP` / pair-exclusive 对齐 fault，以及写权限 fault 下的“无部分提交 / status 不写回 / syndrome 正确”行为。
 - [x] 已新增 `fp_ah_absent_ignored` 裸机单测，确认在当前 `ID_AA64ISAR1_EL1=0`、`!FEAT_AFP` 模型下，`FPCR.AH` 对 `FRECPE/FRECPS/FRSQRTE/FRSQRTS/FMAX` 的结果与 `FPSR` 都被正确忽略。
 - [x] 已修正一处裸机回归覆盖空洞：`fpsimd_minimal` 现在显式断言当前模型下 `FPCR/FPSR` direct read/write 的掩码语义，`run_all.sh` 也不再只“运行看看”而会真正把这条失败记成回归失败。
+- [x] 已新增 `sysreg_trap_iss_rt_fields`，把 `EC=0x18` system-access trap 的 syndrome 覆盖从 smoke 提升为强断言，显式锁定 `ISS` 的 `Rt/read-write/op fields` 与 `FAR_EL1`。
 - [x] 已把 Linux UMP/SMP 功能回归接入 `mprotect_exec_stress`、`pthread_sync_stress` 与 `run_dmesg_stress_check` 的显式输出断言和无乱码检查。
 - [x] 已新增 host 侧 `tests/linux/run_qemu_user_diff.sh`，把 `fpsimd_selftest`、`fpint_selftest`、`mprotect_exec_stress`、`pthread_sync_stress` 固化为 `qemu-aarch64` 差分验证入口。
+- [x] 已新增 `ls64_absent_undef` 裸机回归，把当前 `!FEAT_LS64` 模型下 `LD64B/ST64B/ST64BV/ST64BV0` 的 absent-feature 行为固定进正式回归，防止后续 generic load/store 解码调整再次把这组 64-byte single-copy atomic 指令误吞成普通 load/store。
+- [x] 已新增 `lrcpc_absent_undef` 裸机回归，把当前 `!FEAT_LRCPC` 模型下 `LDAPR W/X`、`LDAPRB W`、`LDAPRH W` 的 absent-feature 语义固定进正式回归，避免后续 generic load/store 解码调整再次把它们误吞成已实现指令。
+- [x] 已新增 `at_pan2_absent_undef` 裸机回归，把当前 `!FEAT_PAN2` 模型下 `AT S1E1RP/WP` 的 absent-feature 语义固定进正式回归，显式锁定 `EL1/EL0` 下的 `EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`，以及 `PAR_EL1` 与源寄存器都不应发生修改。
 
 ### 6. 建议实施顺序
 
@@ -1055,6 +1078,443 @@
 - Linux DTB
 - Linux + initramfs + BusyBox shell
 - snapshot / 回归 / 性能测试接入
+
+## 宿主一致时钟外设设计
+
+目标：
+- 为 guest 提供一个与宿主系统 wall clock 保持一致的“时间-of-day”外设。
+- 不改变当前 `GenericTimer/CNTVCT` 的 guest-time 语义，避免把 wall clock 与内核调度时钟混在一起。
+- 保持现有外设风格一致：
+  - SoC 固定 MMIO 窗口；
+  - `Device` 子类；
+  - 可选 DT 暴露；
+  - 独立 `save_state/load_state`；
+  - 需要时接 GIC 中断；
+  - 首版不进 `BusFastPath`。
+
+设计判断：
+- [ ] 首选做一个 `PL031` 风格的 RTC，而不是自定义奇特寄存器协议。
+  - 原因：这和当前 `PL011/PL050/GICv3/simple-framebuffer` 的风格最一致；
+  - Linux / U-Boot 都更容易直接复用已有驱动；
+  - 设备职责清晰，就是“宿主一致的 wall clock / RTC”，不承担高频 timer tick 职责。
+- [ ] 明确把“宿主一致 wall clock”与“架构定时器 / guest 时间”分层：
+  - `GenericTimer` 继续只表示 guest 可控、可回放的架构计数器；
+  - 新 RTC 只负责日期/时间-of-day；
+  - 不把 Linux scheduler、delay loop、clocksource 直接迁移到该 RTC。
+- [ ] 明确该 RTC 的实现原则是“程序可见正确性优先于体系结构精确回放”：
+  - RTC 对 guest 提供的是“当前时间”语义；
+  - 默认不追求 snapshot 后 wall clock 严格可重放；
+  - 如需确定性测试，应通过单独模式显式选择，而不是污染默认行为。
+
+### 0. 总体架构原则
+
+目标：
+- 先把这个设备与现有时间体系、SoC 调度体系以及 snapshot 体系的边界定义清楚。
+
+任务：
+- [ ] 明确时间域分层：
+  - `GenericTimer/CNTPCT/CNTVCT` 属于 guest-time / architectural timer 域；
+  - 新 RTC 属于 host-derived wall-clock / time-of-day 域；
+  - 两者共享同一套 MMIO/快照框架，但不共享时间推进语义。
+- [ ] 明确 SoC 中的放置方式：
+  - RTC 仍是普通 `Device`；
+  - 由 `SoC` 统一创建、map、保存/恢复状态；
+  - 不绕开当前 bus / GIC / snapshot 框架实现“特权旁路”。
+- [ ] 明确首版不做的事：
+  - 不替代 generic timer；
+  - 不参与 TLB / decode hot path；
+  - 不为了 RTC 引入新的 guest ABI；
+  - 不把 wall clock 读数塞进 CPU system register。
+- [ ] 在设计稿里显式区分三种模式：
+  - 默认 `realtime`：对齐宿主当前 wall clock；
+  - 可选 `frozen`：固定在 snapshot/启动时刻推进或保持不动，只用于测试；
+  - 可选 `mock=<epoch>`：测试专用伪时钟源。
+
+### 1. 外设模型与寄存器风格
+
+目标：
+- 让该设备在代码结构上与当前其它 MMIO 外设保持同一种实现模式。
+
+任务：
+- [ ] 新增 `HostRtcPl031 final : public Device`，接口只暴露标准 `read/write`。
+- [ ] SoC 为它分配固定 MMIO 窗口，建议复用当前空洞地址：
+  - `base = 0x09030000`
+  - `size = 0x1000`
+- [ ] 首版只走 bus 慢路径，不放进 `BusFastPath`：
+  - RTC 访问频率低；
+  - 读路径可能调用宿主机时间 API；
+  - 没必要把这类低频、强外部依赖设备塞进热路径。
+- [ ] DT 风格优先采用标准节点：
+  - `compatible = "arm,pl031", "arm,primecell"`
+  - `reg = <...>`
+  - `interrupts = <...>` 作为后续 alarm 扩展保留
+  - PrimeCell ID / cell-id 也按 `PL031` 风格返回。
+- [ ] 明确首版内部状态字段：
+  - `offset_seconds`：guest 可见时间相对宿主 wall clock 的偏移；
+  - `match_seconds`：alarm compare 值；
+  - `imsc`：中断 mask；
+  - `raw_pending`：原始 pending；
+  - `lr_shadow`：最近一次写入 `LR` 的值；
+  - `cr_shadow`：控制寄存器可见值；
+  - 必要时额外保留 `last_sampled_seconds` 仅用于调试，不作为架构状态。
+
+#### 1.1 PL031 兼容寄存器 ABI
+
+目标：
+- 把 guest 可见寄存器布局写成实现时几乎可直接照着落地的程度。
+
+任务：
+- [ ] 约定首版寄存器布局如下：
+  - `0x000 DR`：Data Register，`RO`，返回当前 guest-visible RTC 秒值的低 32 位。
+  - `0x004 MR`：Match Register，`RW`，保存 alarm compare 秒值。
+  - `0x008 LR`：Load Register，`RW`，写入时重设 guest-visible 当前秒值；读取返回最近一次写入值。
+  - `0x00c CR`：Control Register，首版只保留 `bit0` 可见；默认上电为启用态。
+  - `0x010 IMSC`：Interrupt Mask Set/Clear，`RW`。
+  - `0x014 RIS`：Raw Interrupt Status，`RO`。
+  - `0x018 MIS`：Masked Interrupt Status，`RO`。
+  - `0x01c ICR`：Interrupt Clear Register，`WO`，写任意值清 `raw_pending`。
+  - `0xfe0..0xffc`：`PeriphID[0..3]`、`PCellID[0..3]`，按 PL031 风格返回固定值。
+- [ ] 明确首阶段对保留位采用 `RAZ/WI`：
+  - 不支持的位读零；
+  - 写入忽略；
+  - 避免 guest 因未定义垃圾位读出而误判设备能力。
+- [ ] 明确读写宽度策略：
+  - 首版仅保证 32-bit aligned `read/write` 为主路径；
+  - 非法宽度或跨寄存器访问按照当前设备风格返回 bus error / `RAZ/WI`，需要在实现阶段与现有 MMIO 约定统一。
+- [ ] 明确 `CR` 首版语义：
+  - 复位后 `bit0 = 1`；
+  - 写 `1` 保持启用；
+  - 写 `0` 首版可以 `WI`，前提是 Linux/U-Boot 不依赖停表行为；
+  - 若后续发现驱动会实际停表，再补全 disable 语义。
+
+#### 1.2 PrimeCell 与 DT 暴露
+
+目标：
+- 避免设备本体实现完后，才发现 Linux/U-Boot DTS 绑定方式不匹配。
+
+任务：
+- [ ] DTS 节点草案：
+  - `rtc@9030000`
+  - `compatible = "arm,pl031", "arm,primecell"`
+  - `reg = <0x0 0x09030000 0x0 0x1000>`
+  - `interrupt-parent = <&gic>`
+  - `interrupts = <GIC_SPI ... IRQ_TYPE_LEVEL_HIGH>` 预留 alarm 用
+  - 如 Linux `pl031` 驱动需要 `apb_pclk`，则再配一个最小 `fixed-clock` 节点，不在第一阶段强行加入。
+- [ ] U-Boot / Linux 集成策略：
+  - 默认不改当前通用 DTB；
+  - 使用专用 DTS 或 overlay 启用；
+  - 这样不会把 wall-clock 非确定性引入所有现有回归。
+
+### 2. 时间语义
+
+目标：
+- 精确定义“与宿主系统保持一致”到底是什么意思，避免后续实现时歧义。
+
+任务：
+- [ ] 把该设备定义为“宿主 wall clock 设备”，默认对齐宿主 `CLOCK_REALTIME`。
+- [ ] 设备返回的是“当前宿主时间 + guest 软件通过 RTC load/set-time 写入形成的偏移”，而不是 guest-time 推进值。
+- [ ] 明确 guest 写 RTC 时间时的语义：
+  - 不是停止或重置宿主时间；
+  - 而是更新“guest-visible RTC 相对宿主时间的 offset”。
+- [ ] 明确首版只保证“读取时间-of-day 与宿主一致”，不保证：
+  - 周期级可重放；
+  - 与 snapshot 时间冻结一致；
+  - 高精度 monotonic 基准。
+
+设计判断：
+- [ ] 首版只承诺 `seconds` 级 wall clock 语义，符合 `PL031` 定位。
+- [ ] 如果后续确实需要纳秒级 `realtime/monotonic raw`，再加第二个 paravirt host-time 设备，不污染 RTC ABI。
+
+#### 2.1 时间计算公式
+
+目标：
+- 把读写 RTC 时的数值语义写成明确公式。
+
+任务：
+- [ ] 默认 `realtime` 模式下定义：
+  - `host_now_sec = floor(CLOCK_REALTIME_ns / 1_000_000_000)`
+  - `guest_rtc_sec = host_now_sec + offset_seconds`
+- [ ] `DR` 读取返回：
+  - `guest_rtc_sec & 0xffffffff`
+  - 内部仍建议使用有符号 64 位保存 `offset_seconds`，避免设定过去时间时溢出。
+- [ ] `LR = new_sec` 写入语义：
+  - 先采样当前 `host_now_sec`；
+  - 再设置 `offset_seconds = (int64_t)new_sec - (int64_t)host_now_sec`；
+  - `lr_shadow = new_sec`；
+  - 因此写完后紧接一次 `DR` 读取应立即得到 `new_sec` 或最多相差 1 秒边界。
+- [ ] `MR = match_sec` 写入只更新匹配目标，不改变当前时间。
+- [ ] `CR` 首版不改变 wall clock 公式，只影响“设备是否认为 alarm 逻辑有效”。
+
+#### 2.2 程序可见语义边界
+
+目标：
+- 避免把本不该由 RTC 保证的语义混进去。
+
+任务：
+- [ ] 明确 RTC 返回的是 UTC epoch 秒，不带时区概念：
+  - 时区转换由 guest 用户态/内核处理；
+  - 不在设备内部维护 timezone/DST。
+- [ ] 明确不单独模拟 leap second：
+  - 直接继承宿主 `CLOCK_REALTIME` 的表现；
+  - 如果宿主做 leap smear 或时间步进，guest 看到的 RTC 也随之变化。
+- [ ] 明确 `PL031` 是秒级设备：
+  - 不承诺亚秒精度；
+  - 不保证单条 guest 指令之间时间严格单调增长；
+  - 同一秒内重复读取相同值是预期行为。
+- [ ] 明确 32 位秒值外露的边界：
+  - guest-visible ABI 保持 `PL031` 风格的 32 位；
+  - 若未来需要跨 2106 或纳秒级高精度，使用独立新设备而不是修改 RTC ABI。
+
+#### 2.3 宿主时间抽象
+
+目标：
+- 在不破坏默认“宿主一致 wall clock”语义的前提下，为单元测试和 deterministic 场景留出实现空间。
+
+任务：
+- [ ] 设计一个最小 host clock 抽象层，仅供 RTC 使用：
+  - `now_realtime_ns()`
+  - 可选 `now_monotonic_ns()` 仅供 alarm/调度辅助
+- [ ] 首版实现形态规划：
+  - 生产环境使用 `RealHostClock`
+  - 单元测试使用 `MockHostClock`
+  - snapshot/回归若需确定性，可引入 `FrozenHostClock`
+- [ ] 明确这个抽象层只服务 RTC / host-deadline 设备：
+  - 不反向改写 `GenericTimer`
+  - 不把整个 SoC 的 guest 时间推进机制改成 wall clock 驱动
+
+### 3. 快照与恢复语义
+
+目标：
+- 让该设备的 host-time 特性与当前 snapshot 体系不冲突。
+
+任务：
+- [ ] 明确 snapshot 保存哪些状态：
+  - `match/alarm`
+  - `mask`
+  - `pending`
+  - `load-offset`
+  - 控制寄存器
+- [ ] 明确 snapshot 不保存哪些状态：
+  - 宿主机绝对时间值本身
+  - “保存快照时的 host realtime 秒数”
+- [ ] `load_state()` 时重新采样当前宿主时间，并按保存下来的 offset 重建 guest-visible RTC。
+- [ ] 文档中显式声明：
+  - 这是一个“非严格可重放”的外设；
+  - 恢复旧快照后，RTC 读数会跳到“当前宿主时间 + 已保存 offset”，而不是回到保存快照那一刻。
+
+设计判断：
+- [ ] 默认接受这种“恢复后 wall clock 前跳”的行为，因为它更符合 RTC/实时时钟的直觉。
+- [ ] 如后续测试需要严格复现，再额外提供 `frozen/mock` 模式，而不是把默认行为做成不可预期的折中态。
+
+#### 3.1 快照字段清单
+
+目标：
+- 明确哪些字段属于设备状态，哪些属于运行环境，不要在实现时混淆。
+
+任务：
+- [ ] snapshot 保存以下 RTC 设备状态：
+  - `offset_seconds`
+  - `match_seconds`
+  - `imsc`
+  - `raw_pending`
+  - `lr_shadow`
+  - `cr_shadow`
+- [ ] snapshot 不保存以下内容：
+  - 宿主绝对 `CLOCK_REALTIME` 秒值；
+  - 保存快照时的 wall-clock 文本时间；
+  - 任何“为了让恢复后回到旧世界线”的隐式补偿值。
+- [ ] 如 alarm 在保存时已 pending，恢复后应保留 `raw_pending`，避免 guest 丢中断状态。
+
+#### 3.2 恢复语义
+
+目标：
+- 把“为什么恢复后会前跳”定义成正式语义，而不是实现副作用。
+
+任务：
+- [ ] `load_state()` 时流程定义为：
+  - 读取保存的逻辑状态；
+  - 重新采样当前宿主 `CLOCK_REALTIME`；
+  - 使用保存的 `offset_seconds` 重建 `guest_rtc_sec`；
+  - 如 alarm 已实现，再根据新时间与 `match_seconds` 重算 `raw_pending` 或立即置位。
+- [ ] 文档中明确说明：
+  - 恢复旧 snapshot 后，`DR` 返回的是“当前宿主 wall clock + 已保存偏移”；
+  - 因此 wall clock 可见值通常会比保存快照时更大；
+  - 这不是 bug，而是 RTC 设备语义本身。
+- [ ] 若 future test 需要“恢复回旧时刻”，只通过 `frozen/mock` 模式解决，不改变默认 snapshot 语义。
+
+### 4. 中断与事件驱动衔接
+
+目标：
+- 让该外设能自然接入现有 SoC/GIC/事件驱动风格，但不一次把复杂度全拉满。
+
+任务：
+- [ ] 第一阶段先做“可读、可设时、可快照”的 RTC，本身不作为高频事件源。
+- [ ] 第二阶段再补 `PL031` alarm / match / IRQ：
+  - `MIS/RIS/ICR`
+  - GIC line
+  - 与 DT 中断声明对齐
+- [ ] 若实现 alarm，需要把它接入“host deadline”而不是“guest tick deadline”：
+  - RTC alarm 比较的是 host-consistent wall time；
+  - 不能简单复用当前 `guest_now` deadline 逻辑。
+- [ ] 为事件驱动化预留单独的 host-deadline 通道：
+  - `next_host_deadline_ns()`
+  - `poll_host_time(now_ns)`
+  - 或统一塞进未来的 host/guest 双时间域调度器。
+
+设计判断：
+- [ ] 在 host-deadline 通道未设计好之前，不急着把 RTC alarm 做成完整中断设备。
+- [ ] 首版先把“正确、简单、Linux 可见”放在第一位，不为一个低频外设提前扭曲主循环。
+
+#### 4.1 Alarm 语义细化
+
+目标：
+- 提前把后续 alarm/IRQ 的行为定义清楚，避免第一阶段结束后返工。
+
+任务：
+- [ ] 定义 alarm 触发条件：
+  - 当 `guest_rtc_sec >= match_seconds` 时，`raw_pending = 1`
+  - 若 `imsc = 1` 且 `cr_shadow.bit0 = 1`，则向 GIC 拉高 RTC IRQ 线
+- [ ] `RIS/MIS/ICR` 语义：
+  - `RIS` 反映 `raw_pending`
+  - `MIS = RIS & IMSC`
+  - `ICR` 写任意值清 `raw_pending`
+- [ ] 明确 alarm 为单次 compare，不做 periodic 模式：
+  - `PL031` 本身是简单 RTC + match；
+  - 周期 tick 应继续由 generic timer 或未来独立设备承担。
+- [ ] 明确如果 guest 把 `MR` 设到过去：
+  - 写后下一次状态刷新即可立刻 pending；
+  - 不要求再等一秒。
+
+#### 4.2 事件驱动接入方向
+
+目标：
+- 让 RTC 后续能自然接入当前 SoC 的事件驱动演进，而不是走回“每步轮询所有设备”。
+
+任务：
+- [ ] 为低频 host-time 设备预留独立调度接口：
+  - `next_host_deadline_ns() -> optional<uint64_t>`
+  - `poll_host_time(now_ns)`
+- [ ] 设计 SoC 层的双时间域调度原则：
+  - guest-time 设备继续用 `guest_tick` 驱动；
+  - host-time 设备用 `host monotonic/realtime deadline` 驱动；
+  - 主循环取两者中最近的一个事件作为下一次同步边界。
+- [ ] 明确第一阶段即使未做 alarm，也不要把 RTC 特判塞进主循环：
+  - 设备本体先只提供正确 MMIO 语义；
+  - 等 host-deadline 框架成熟后再接 IRQ。
+
+### 5. 与 Linux / U-Boot / 现有测试体系的关系
+
+目标：
+- 让新设备的接入方式和现有工程的使用方式保持一致，不引入无谓不确定性。
+
+任务：
+- [ ] 默认不把该 RTC 节点塞进当前所有通用测试 DTB。
+- [ ] 采用“专用 DTS/overlay 或显式开关”方式启用：
+  - 避免现有回归因为 wall clock 非确定性受影响；
+  - 也避免 guest 自动把它选成默认时钟源后改变启动路径。
+- [ ] 如果后续启用 Linux 支持，优先让它作为 RTC / time-of-day 来源，而不是 clocksource。
+- [ ] 文档中说明：
+  - 何时建议启用该设备；
+  - 它和 `GenericTimer/CNTVCT` 的职责区别；
+  - 它会让 snapshot 恢复后的 wall clock 体现当前宿主时间。
+
+#### 5.1 启用策略
+
+目标：
+- 避免 RTC 一落地就破坏现有确定性测试流程。
+
+任务：
+- [ ] 默认行为设计为：
+  - 不启用 RTC 节点；
+  - 不额外改变 Linux cmdline；
+  - 不让当前 functional/perf/snapshot 脚本自动引入 wall-clock 变数。
+- [ ] 单独提供：
+  - 专用 DTS 或 DT overlay
+  - 专用 Linux 用户态测试脚本
+  - 必要时单独的 initramfs case
+- [ ] 若 Linux 自动把 `pl031` 当作 RTC 驱动加载，应检查但不强迫其成为 clocksource。
+
+#### 5.2 Linux / U-Boot 验证项
+
+目标：
+- 提前写明接入成功时应该观察到哪些现象。
+
+任务：
+- [ ] U-Boot 侧验证：
+  - 设备节点可枚举；
+  - MMIO 读 `DR` 有合理秒值；
+  - 如 U-Boot 已启用 RTC 命令，可额外验证 `date` / `rtc` 相关命令。
+- [ ] Linux 侧验证：
+  - `/sys/class/rtc/rtc0/` 出现；
+  - `cat /sys/class/rtc/rtc0/since_epoch` 或 `hwclock -r` 能读到接近宿主的秒值；
+  - `date -u +%s` 与 host 对比误差在预期范围内。
+- [ ] snapshot 恢复验证：
+  - 保存快照前读取一次 RTC；
+  - 恢复后再次读取；
+  - 验证其前跳符合“当前宿主时间 + offset”的设计，而不是冻结在旧值。
+
+### 6. 后续可选扩展
+
+目标：
+- 给未来更强的“宿主一致时间能力”留出生长空间，但不把第一版做复杂。
+
+任务：
+- [ ] 可选增加一个单独的高精度 host-time 设备：
+  - `realtime_ns`
+  - `monotonic_ns`
+  - `boot_id / clock_id / validity`
+- [ ] 可选增加 `AARCHVM_HOST_CLOCK_MODE`：
+  - `realtime`
+  - `frozen`
+  - `mock=<epoch>`
+- [ ] 可选为 snapshot / 自动化测试补一个“固定宿主时间源”的测试模式。
+
+#### 6.1 推荐分阶段落地顺序
+
+目标：
+- 把这个设备拆成几个风险可控的最小闭环，便于后续真正实现时按阶段推进。
+
+任务：
+- [ ] 第一阶段：只做可读 wall clock
+  - `DR/LR/CR` 最小闭环
+  - `offset_seconds` 语义
+  - `save_state/load_state`
+  - 裸机 MMIO 单元测试
+- [ ] 第二阶段：补齐 PL031 基础寄存器可见面
+  - `MR/IMSC/RIS/MIS/ICR`
+  - PrimeCell ID
+  - DTS 节点与 Linux 枚举
+- [ ] 第三阶段：接入 alarm IRQ
+  - host-deadline 调度接口
+  - GIC 路由
+  - Linux/U-Boot alarm 行为验证
+- [ ] 第四阶段：补 deterministic/test 模式
+  - `frozen/mock`
+  - snapshot 精确测试
+  - 回归脚本接入
+
+#### 6.2 测试计划细化
+
+目标：
+- 在设计阶段就把后续需要覆盖的行为写成清单，防止实现后漏测。
+
+任务：
+- [ ] 裸机单元测试：
+  - `DR` 读取非零且单调不减；
+  - 写 `LR` 后 `DR` 立即贴近写入值；
+  - 写过去/未来时间都能正确更新 `offset_seconds`；
+  - snapshot 恢复后 `DR` 前跳但保持先前设定偏移。
+- [ ] Linux 用户态测试：
+  - `hwclock -r` / `cat /sys/class/rtc/rtc0/since_epoch`
+  - 与宿主 `date +%s` 做秒级容差比较
+  - 写 RTC 后再次读取，验证 guest-visible offset 生效
+- [ ] Alarm 测试：
+  - 设 `MR` 到未来 1~2 秒，验证中断到达；
+  - 设 `MR` 到过去，验证立即 pending；
+  - `ICR` 清除后 `MIS` 恢复为 0。
+- [ ] Snapshot 测试：
+  - `realtime` 模式验证“恢复后前跳”；
+  - `frozen/mock` 模式验证“恢复后可精确复现”。
 
 ## 隔离式 `.so` 外设扩展机制
 

@@ -1,3 +1,4 @@
+    .arch armv8.1-a
     .text
     .global _start
 _start:
@@ -11,6 +12,14 @@ _start:
     movz x12, #0
     str  x12, [x11]
 
+    movz x0, #0x0240               // A=1, I=1.
+    movk x0, #0xB040, lsl #16      // NZCV=1011, PAN=1, EL1h.
+    msr  daifclr, #0xf
+    msr  nzcv, x0
+    msr  daifset, #0x6
+    movz x19, #1
+    msr  pan, x19
+
     // Trigger instruction abort by jumping to an unmapped address outside the
     // 1 GiB SDRAM window [0x40000000, 0x80000000).
     movz x20, #0x8000, lsl #16      // 0x80000000
@@ -19,6 +28,21 @@ _start:
 after_fault:
     ldr  x13, [x11]
     cbz  x13, fail
+
+    mrs  x14, nzcv
+    ubfx x14, x14, #28, #4
+    movz x15, #0xb
+    subs xzr, x14, x15
+    b.ne fail
+
+    mrs  x14, daif
+    and  x14, x14, #0x3c0
+    movz x15, #0x180
+    subs xzr, x14, x15
+    b.ne fail
+
+    mrs  x14, pan
+    cbz  x14, fail
 
     movz x0, #'X'
     str  x0, [x1]
@@ -69,9 +93,28 @@ ec_ok:
     subs xzr, x6, x20
     b.ne fail_from_handler
 
-    // SPSR_EL1 stores pre-exception PSTATE. Here I should still be 0.
+    mrs  x3, daif
+    and  x3, x3, #0x3c0
+    movz x4, #0x3c0
+    subs xzr, x3, x4
+    b.ne fail_from_handler
+
+    // SPSR_EL1 stores the pre-exception PSTATE.
     mrs  x7, spsr_el1
-    tbnz x7, #7, fail_from_handler
+    tbnz x7, #20, fail_from_handler
+    and  x8, x7, #0xf
+    movz x9, #0x5
+    subs xzr, x8, x9
+    b.ne fail_from_handler
+    ubfx x8, x7, #28, #4
+    movz x9, #0xb
+    subs xzr, x8, x9
+    b.ne fail_from_handler
+    ubfx x8, x7, #6, #4
+    movz x9, #0x6
+    subs xzr, x8, x9
+    b.ne fail_from_handler
+    tbz  x7, #22, fail_from_handler
 
     // Mark handled, then redirect return PC to resume path.
     adr  x11, handled

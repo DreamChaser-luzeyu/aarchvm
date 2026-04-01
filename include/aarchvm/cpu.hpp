@@ -141,6 +141,7 @@ private:
     std::uint8_t level = 3;
     std::uint8_t attr_index = 0;
     std::uint8_t mair_attr = 0;
+    bool global_entry = false;
     bool writable = false;
     bool user_accessible = false;
     bool executable = true;
@@ -159,6 +160,7 @@ private:
     std::uint8_t level = 3;
     std::uint8_t attr_index = 0;
     std::uint8_t mair_attr = 0;
+    bool global_entry = false;
     bool writable = false;
     bool user_accessible = false;
     bool executable = true;
@@ -272,22 +274,38 @@ private:
   [[nodiscard]] std::uint8_t decode_ips_bits() const;
   [[nodiscard]] bool pa_within_ips(std::uint64_t pa, std::uint8_t ips_bits) const;
   void tlb_flush_all();
-  void tlb_flush_va(std::uint64_t va);
+  void tlb_flush_va(std::uint64_t operand);
   void tlb_flush_asid(std::uint16_t asid);
   [[nodiscard]] static constexpr std::uint64_t tlb_page_mask() { return (1ull << 44u) - 1ull; }
+  [[nodiscard]] static constexpr std::uint64_t tlbi_operand_va_page(std::uint64_t operand) {
+    return operand & tlb_page_mask();
+  }
+  [[nodiscard]] static constexpr std::uint64_t tlbi_operand_va_base(std::uint64_t operand) {
+    return tlbi_operand_va_page(operand) << 12;
+  }
   [[nodiscard]] static constexpr std::size_t tlb_set_index(std::uint64_t va_page) { return static_cast<std::size_t>(va_page) & (kTlbSets - 1u); }
   [[nodiscard]] std::uint16_t mmu_asid_mask() const;
   [[nodiscard]] std::uint16_t ttbr_asid(std::uint64_t ttbr) const;
   [[nodiscard]] std::uint16_t current_translation_asid(bool va_upper) const;
   [[nodiscard]] std::uint16_t tlbi_operand_asid(std::uint64_t operand) const;
+  [[nodiscard]] static constexpr bool tlb_entry_matches_asid(const TlbEntry& entry, std::uint16_t asid) {
+    return entry.global_entry || entry.asid == asid;
+  }
   [[nodiscard]] const TlbEntry* tlb_lookup(std::uint64_t va_page, std::uint16_t asid) const {
+    const TlbEntry* global_hit = nullptr;
     const auto& set = tlb_entries_[tlb_set_index(va_page)];
     for (const TlbEntry& entry : set) {
-      if (entry.valid && entry.va_page == va_page && entry.asid == asid) {
+      if (!entry.valid || entry.va_page != va_page) {
+        continue;
+      }
+      if (!entry.global_entry && entry.asid == asid) {
         return &entry;
       }
+      if (entry.global_entry && global_hit == nullptr) {
+        global_hit = &entry;
+      }
     }
-    return nullptr;
+    return global_hit;
   }
   void tlb_insert(std::uint64_t va_page, const TranslationResult& result);
   void tlb_insert_entry(std::uint64_t va_page, const TlbEntry& entry);
@@ -369,6 +387,10 @@ private:
   void write_dbgdtrtx_el0(std::uint32_t value);
   void write_osdtrrx_el1(std::uint64_t value);
   void write_osdtrtx_el1(std::uint64_t value);
+  [[nodiscard]] std::uint64_t read_icc_iar1_el1();
+  [[nodiscard]] std::uint64_t read_icc_hppir1_el1() const;
+  void icc_priority_drop(std::uint32_t intid);
+  void icc_deactivate(std::uint32_t intid);
   [[nodiscard]] bool maybe_take_breakpoint_exception(std::uint64_t fault_pc);
   [[nodiscard]] bool maybe_take_watchpoint_exception(std::uint64_t va,
                                                      std::size_t size,
@@ -458,6 +480,10 @@ private:
   std::array<std::uint32_t, kExceptionStackCapacity> exception_intid_stack_{};
   std::array<std::uint16_t, kExceptionStackCapacity> exception_prev_prio_stack_{};
   std::array<bool, kExceptionStackCapacity> exception_prio_dropped_stack_{};
+  std::uint32_t manual_irq_depth_ = 0;
+  std::array<std::uint32_t, kExceptionStackCapacity> manual_irq_intid_stack_{};
+  std::array<std::uint16_t, kExceptionStackCapacity> manual_irq_prev_prio_stack_{};
+  std::array<bool, kExceptionStackCapacity> manual_irq_prio_dropped_stack_{};
   bool sync_reported_ = false;
   bool trace_exceptions_ = false;
   bool trace_all_exceptions_ = false;

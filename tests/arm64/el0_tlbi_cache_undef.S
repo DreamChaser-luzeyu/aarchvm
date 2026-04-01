@@ -173,8 +173,13 @@ sync_lower:
 
 lower_sync_handler:
     mrs  x20, esr_el1
+    tbz  x20, #25, handler_fail
     ubfx x21, x20, #26, #6
     cbnz x21, handler_fail
+    and  x24, x20, #0x1ffffff
+    cbnz x24, handler_fail
+    mrs  x24, far_el1
+    cbnz x24, handler_fail
 
     mrs  x22, elr_el1
     adr  x23, el0_tlbi_vmalle1_insn

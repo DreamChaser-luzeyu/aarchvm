@@ -160,7 +160,8 @@ fsc_ok:
     b.ne fail_from_handler
 
     str  x28, [x25]
-    tlbi vae1is, x20
+    lsr  x21, x20, #12
+    tlbi vae1is, x21
     dsb  sy
     isb
 

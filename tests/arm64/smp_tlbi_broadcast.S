@@ -119,7 +119,8 @@ core0_remap:
     orr  x2, x3, x15
     str  x2, [x25]
     dsb  sy
-    tlbi vae1is, x30
+    lsr  x16, x30, #12
+    tlbi vae1is, x16
     dsb  sy
     isb
     movz x13, #1

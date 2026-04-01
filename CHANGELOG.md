@@ -1,3 +1,535 @@
+# 修改日志 2026-04-01 13:48
+
+## 本轮修改
+
+- 继续沿着“异常 / 系统寄存器 / trap 语义收尾”审 `WFET/WFIT` 这组 `FEAT_WFxT absent` 边界；这轮没有改模拟器执行逻辑，而是把此前只被一个较宽松回归顺带覆盖、但还没被单独强断言锁死的负向路径固化成正式裸机回归：
+  - [tests/arm64/wfxt_absent_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/wfxt_absent_undef.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 新增正式裸机回归 `wfxt_absent_undef`：
+  - 覆盖当前模型下 `WFET` 与 `WFIT` 在 `EL1/EL0` 两级的执行；
+  - 显式锁定两者都应表现为 `UNDEFINED`，并检查 `ESR_EL1.EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`；
+  - 同时断言寄存器形式的 timeout 操作数不应被修改，并额外检查 `EL0` 异常保存下来的 `NZCV/DAIF/PAN/M/IL`，避免后续 `WFE/WFI` trap 逻辑或 system decode 调整把 `WFET/WFIT` 误并到错误路径。
+
+## 本轮测试
+
+- `timeout 1200s ./tests/arm64/build_tests.sh`
+- `timeout 1200s ./build/aarchvm -bin tests/arm64/out/wfxt_absent_undef.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+- `timeout 1800s ./tests/linux/run_qemu_user_diff.sh`
+
+## 当前结论
+
+- 这轮之后，`WFET/WFIT` 这组 `!FEAT_WFxT` negative path 不再只依赖较宽松的大杂烩回归，而是有了单独的强断言覆盖。
+- 当前整套裸机回归、Linux UMP 回归、Linux SMP 回归与现有 qemu-user 差分入口都通过。
+- 但我仍不能自信宣称“Armv8-A 程序可见最小集已完整收口”。当前我认为剩余最值得继续审的仍然是：
+  - `FP/AdvSIMD` 的尾差，尤其 `FPCR/FPSR`、`NaN/subnormal/flag` 传播一致性；
+  - `SMP` 下 barrier / exclusive / LSE 与 fault / exception 交错边界；
+  - `MMU/TLB/fault` 在更复杂 Linux 压力与 system-level 差分下的剩余语义角落。
+
+# 修改日志 2026-04-01 13:39
+
+## 本轮修改
+
+- 继续沿着“异常 / 系统寄存器 / trap 语义收尾”审 `AT` 指令在不同异常级别下的程序可见边界；这轮没有改模拟器执行逻辑，而是把此前未被正式锁死的一条 `EL0` 负向路径固化成裸机强断言回归：
+  - [tests/arm64/at_s1e0_el0_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/at_s1e0_el0_undef.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 新增正式裸机回归 `at_s1e0_el0_undef`：
+  - 覆盖当前模型下 `EL0` 执行 `AT S1E0R` 与 `AT S1E0W` 的行为；
+  - 显式锁定它们都应表现为 `UNDEFINED`，并检查 `ESR_EL1.EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`；
+  - 同时断言 `PAR_EL1` 与源寄存器都不应被修改，避免后续 `AT` / system decode 调整把这组指令误宽放行、或在异常前偷偷产生寄存器副作用。
+
+## 本轮测试
+
+- `timeout 1200s ./tests/arm64/build_tests.sh`
+- `timeout 1200s ./build/aarchvm -bin tests/arm64/out/at_s1e0_el0_undef.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+- `timeout 1800s ./tests/linux/run_qemu_user_diff.sh`
+
+## 当前结论
+
+- 这轮之后，`EL0` 执行 `AT S1E0R/W` 的负向语义不再只靠实现代码本身，而是有了正式回归持续锁定。
+- 当前整套裸机回归、Linux UMP 回归、Linux SMP 回归与现有 qemu-user 差分入口都通过。
+- 但我仍不能自信宣称“Armv8-A 程序可见最小集已完整收口”。当前我认为剩余最值得继续审的仍然是：
+  - `FP/AdvSIMD` 的尾差，尤其 `FPCR/FPSR`、`NaN/subnormal/flag` 传播一致性；
+  - `SMP` 下 barrier / exclusive / LSE 与 fault / exception 交错边界；
+  - `MMU/TLB/fault` 在更复杂 Linux 压力与 system-level 差分下的剩余语义角落。
+
+# 修改日志 2026-04-01 13:23
+
+## 本轮修改
+
+- 继续沿着“异常 / 系统寄存器 / trap 语义收尾”审 `ID` 已声明 absent 的 system-encoding 边界；这轮没有改模拟器执行逻辑，而是把 `FEAT_PAN2 absent` 下此前只有实现、还没被正式回归单独锁住的一条边界固化成裸机强断言回归：
+  - [tests/arm64/at_pan2_absent_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/at_pan2_absent_undef.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 新增正式裸机回归 `at_pan2_absent_undef`：
+  - 覆盖当前 `ID_AA64MMFR1_EL1.PAN=0`、`!FEAT_PAN2` 模型下 `AT S1E1RP` 与 `AT S1E1WP` 在 `EL1` / `EL0` 下的 absent-feature 行为；
+  - 显式锁定 `ESR_EL1.EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`；
+  - 同时断言 `PAR_EL1` 与源寄存器都不应被修改，避免后续 system decode 调整把这两条 PAN2 专属 `AT` 指令误吞进普通 `AT` 路径。
+
+## 本轮测试
+
+- `timeout 1200s ./tests/arm64/build_tests.sh`
+- `timeout 1200s ./build/aarchvm -bin tests/arm64/out/at_pan2_absent_undef.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+- `timeout 1800s ./tests/linux/run_qemu_user_diff.sh`
+
+## 当前结论
+
+- 这轮之后，`FEAT_PAN2 absent` 相关的 `AT` system-encoding 边界已经不再只靠实现代码本身，而是有了正式负向回归持续锁定。
+- 当前整套裸机回归、Linux UMP 回归、Linux SMP 回归与现有 qemu-user 差分入口都通过。
+- 但我仍不能自信宣称“Armv8-A 程序可见最小集已完整收口”。在当前代码状态下，我认为剩余最值得继续审的仍然是：
+  - `FP/AdvSIMD` 细节，尤其 `FPCR/FPSR` 与 `NaN/subnormal/flags` 传播的一致性尾差；
+  - `SMP` 下同步原语、barrier、exclusive/LSE 与异常/fault 交错时的边界；
+  - `MMU/TLB/fault` 在更复杂 Linux 压力和差分验证下是否还会暴露新的尾差。
+
+# 修改日志 2026-04-01 12:50
+
+## 本轮修改
+
+- 继续沿着“异常 / 系统寄存器 / trap 语义收尾”审 `ID` 已声明 absent 的低频 memory-operation 指令边界；这轮没有改模拟器执行逻辑，而是把此前尚未正式接回归的 `FEAT_MOPS absent` 行为固化成裸机强断言回归：
+  - [tests/arm64/mops_absent_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mops_absent_undef.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 新增正式裸机回归 `mops_absent_undef`：
+  - 覆盖当前 `ID_AA64ISAR2_EL1.MOPS=0` 模型下 `SETP/SETM/SETE` 与 `CPYP/CPYM/CPYE` 在 `EL1` / `EL0` 下的 absent-feature 行为；
+  - 显式锁定 `ESR_EL1.EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`；
+  - 同时断言目的/源/长度寄存器都不应被修改，避免后续解码调整把这组 memory-operation 指令误吞成其它 load/store 路径或错误发生写回。
+
+## 本轮测试
+
+- `timeout 1200s ./tests/arm64/build_tests.sh`
+- `timeout 1200s ./build/aarchvm -bin tests/arm64/out/mops_absent_undef.bin -load 0x0 -entry 0x0 -steps 1500000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮之后，`FEAT_MOPS absent` 至少已有一条正式回归，能持续锁住当前模型下最基础的 `SET*` / `CPY*` memory-operation 指令都应表现为 `UNDEFINED` 这一程序可见边界。
+- 但我仍不能自信宣称“Armv8-A 程序可见最小集已完整收口”。当前剩余的不确定性仍主要集中在：
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 的系统化复查是否已经覆盖到所有已实现异常家族；
+  - `SMP barrier / exclusive monitor / TLBI / IC IVAU` 在更极端交错场景下的程序可见尾差；
+  - `FP/AdvSIMD` 剩余的 NaN / subnormal / rounding / exception-flag 细部语义是否已经被足够系统地锁定。
+
+# 修改日志 2026-04-01 13:18
+
+## 本轮修改
+
+- 继续沿着“异常 / 系统寄存器 / trap 语义收尾”审 `ID` 已声明 absent 的 load/store 指令边界，这轮包含一处真实的 guest 可见语义修复，并新增一条正式裸机回归：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/ls64_absent_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/ls64_absent_undef.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 修正了 `FEAT_LS64 absent` 下的一处真实解码缺口：
+  - 当前模型把 `ID_AA64ISAR1_EL1.LS64` 声明为 `0`，因此 `LD64B/ST64B/ST64BV/ST64BV0` 不应对软件可见；
+  - 旧实现里，这组 64-byte single-copy atomic 指令会落进 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 的 generic load/store decode 空间，其中 `LD64B/ST64B` 已可稳定复现被误吞进普通 `STUR` 类路径；
+  - 这会让 guest 既看不到 `UNDEFINED`，又可能执行出真实访存或寄存器副作用；
+  - 现在这四条编码在当前模型下都会稳定走同步异常 `EC=0x00` 的 `UNDEFINED` 语义，不再被 generic load/store handler 误分类。
+- 新增正式裸机回归 `ls64_absent_undef`：
+  - 覆盖 `LD64B/ST64B/ST64BV/ST64BV0` 在 `EL1` 与 `EL0` 下的 absent-feature 行为；
+  - 显式锁定 `ESR_EL1.EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`；
+  - 同时断言结果寄存器与基址寄存器都不应被修改，避免后续又被别的 generic load/store 路径误吞。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 1200s ./tests/arm64/build_tests.sh`
+- `timeout 1200s ./build/aarchvm -bin tests/arm64/out/ls64_absent_undef.bin -load 0x0 -entry 0x0 -steps 1200000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮之后，当前 `!FEAT_LS64` 模型下最容易被 generic load/store decode 误吞的 64-byte single-copy atomic 指令已经有了模拟器修复、正式裸机回归，以及 Linux UMP/SMP 回归闭环。
+- 但我仍不能自信宣称“Armv8-A 程序可见最小集已完整收口”。按当前代码状态，下一批仍值得继续优先审的点是：
+  - 其它 `ID` 已声明 absent 的低频 load/store / system 指令，是否还存在被 generic decode 误吞的边界；
+  - `MOPS` 一类较新的 memory-operation 指令族，除了已 probe 过的 `CPY*` 外，`SET*` 路径是否也全部稳定表现为 `UNDEFINED`；
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 在剩余异常家族上的系统化复查。
+
+# 修改日志 2026-04-01 12:13
+
+## 本轮修改
+
+- 继续沿着“异常 / 系统寄存器 / trap 语义收尾”审 `ID` 已声明 absent 的 load/store 指令边界，这轮包含一处真实的 guest 可见语义修复，并新增一条正式裸机回归：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/lrcpc_absent_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/lrcpc_absent_undef.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 修正了 `FEAT_LRCPC absent` 下的一处真实解码缺口：
+  - 当前模型把 `ID_AA64ISAR1_EL1.LRCPC` 声明为 `0`，因此 `LDAPR*` / `LDAPR[BH]` 不应对软件可见；
+  - 旧实现里，`LDAPR W`、`LDAPRB W`、`LDAPRH W` 会在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 的 `exec_load_store()` 中被后续 generic unscaled load 路径误吞；
+  - 结果分别退化成 `LDURSW`、`LDURSB Xt`、`LDURSH Xt`，软件侧既看不到 `UNDEFINED`，还会错误地发生实际访存和目标寄存器写回；
+  - 现在这些编码在当前模型下都会稳定走同步异常 `EC=0x00` 的 `UNDEFINED` 语义，不再被 generic load/store decode 误分类。
+- 新增正式裸机回归 `lrcpc_absent_undef`：
+  - 覆盖 `LDAPR W`、`LDAPR X`、`LDAPRB W`、`LDAPRH W` 在 `EL1` 与 `EL0` 下的 absent-feature 行为；
+  - 显式锁定 `ESR_EL1.EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`；
+  - 同时断言目标寄存器与基址寄存器都不应被修改，避免后续又被别的 generic decode 路径误吞。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 1200s ./tests/arm64/build_tests.sh`
+- `timeout 1200s ./build/aarchvm -bin tests/arm64/out/lrcpc_absent_undef.bin -load 0x0 -entry 0x0 -steps 1200000`
+- `timeout 1200s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮之后，当前 `!FEAT_LRCPC` 模型下最容易被 generic load/store decode 误吞的 `LDAPR*` 边界已经有了模拟器修复、正式裸机回归，以及 Linux UMP/SMP 回归闭环。
+- 但我仍不能自信宣称“Armv8-A 程序可见最小集已完整收口”。按当前代码状态，下一批仍值得继续优先审的点是：
+  - 其它 `ID` 已声明 absent 的低频 load/store / system 指令，是否还存在被 generic decode 误吞的边界；
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 在剩余异常家族上的系统化复查；
+  - `SMP barrier / exclusive monitor / TLBI / IC IVAU` 在更极端交错场景下的程序可见尾差。
+
+# 修改日志 2026-04-01 10:19
+
+## 本轮修改
+
+- 继续沿着“异常 / 系统寄存器 / trap 语义收尾”审 system-register visible bits，这轮包含两处真实的 guest 可见语义修复，并新增两条正式裸机回归：
+  - [src/system_registers.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/system_registers.cpp)
+  - [tests/arm64/cpacr_visible_bits.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/cpacr_visible_bits.S)
+  - [tests/arm64/vbar_el1_res0_bits.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/vbar_el1_res0_bits.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 修正了 `CPACR_EL1` 的 architected visible-bits 缺口：
+  - 旧实现对 `CPACR_EL1` 做 raw read/write，会把当前模型根本没有实现的 `TTA/SMEN/ZEN/E0POE/TAM/TCPAC` 等位错误暴露给 guest；
+  - 现在 direct `MRS/MSR CPACR_EL1`、以及 snapshot load 后的状态，都统一收敛到当前模型真正支持的 `FPEN[21:20]`。
+- 修正了 `VBAR_EL1` 的 `RES0` 低位缺口：
+  - 旧实现允许 guest 写入并读回 bits `[10:0]`，异常入口也会直接使用这个未对齐值；
+  - 现在 `VBAR_EL1` direct read/write 与 snapshot load 后状态都会强制清零 bits `[10:0]`，CPU 异常入口也因此稳定落在 2KB 对齐的向量表基址。
+- 新增正式裸机回归：
+  - `cpacr_visible_bits` 显式锁定 `CPACR_EL1` 初值、全 1 写入后的读回，以及混合脏位写入后只保留 `FPEN`；
+  - `vbar_el1_res0_bits` 同时锁定 `VBAR_EL1` read-back 对齐结果，以及一次真实 `SVC` 是否落到对齐后的向量入口，而不是 misaligned 基址。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 1200s ./tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/cpacr_visible_bits.bin -load 0x0 -entry 0x0 -steps 200000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/vbar_el1_res0_bits.bin -load 0x0 -entry 0x0 -steps 200000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮之后，`CPACR_EL1` 和 `VBAR_EL1` 两条最直接的 system-register visible-bits 缺口都已经有了模拟器实现、正式裸机回归，以及 Linux UMP/SMP 功能回归闭环。
+- 但我仍不能自信宣称“Armv8-A 程序可见最小集已完整收口”。当前剩余的不确定性仍主要集中在：
+  - `SMP barrier / exclusive monitor / TLBI / IC IVAU` 的系统化复查；
+  - 更多 system register / exception visible bits 的继续审计，尤其是 `TTBR/TCR/MAIR/cache ID` 这类目前仍偏宽松的 direct read/write 路径；
+  - 更系统的差分验证和长期 Linux 压力回归。
+
+# 修改日志 2026-03-31 23:34
+
+## 本轮修改
+
+- 继续沿着“异常 / 系统寄存器 / trap 语义收尾”审 `PC alignment fault` 这条线，这轮包含一处真实的模拟器执行逻辑修复，并新增正式裸机回归：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/pc_alignment_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/pc_alignment_fault.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 修正了当前 AArch64 取指路径一处真实缺口：
+  - 旧实现没有在取指前检查 `PC[1:0]`，所以通过 `BR/RET/ERET` 写入 misaligned `PC` 后，会直接从错地址继续取指；
+  - 现在在 CPU 主循环里补上了真正的 `PC alignment fault` 检查，misaligned `PC` 会稳定走 `EC=0x22`，并把 `FAR_EL1/ELR_EL1` 都指向 faulting `PC`。
+- 这轮还顺手补齐了它与 `Illegal Execution state` 的优先级边界：
+  - ARM ARM 的同步异常优先级里，`PC alignment fault` 高于 `Illegal Execution state`；
+  - 旧实现先看 `PSTATE.IL`，因此“`ERET` 返回到 `IL=1 + misaligned PC`”会被错误报成 `EC=0x0E`；
+  - 现在顺序已经改正，`PC alignment fault` 会先发生。
+- 新增的 `pc_alignment_fault` 裸机回归显式覆盖两条正式边界：
+  - `EL1 BR` 到 misaligned 目标时，目标指令不得执行；
+  - `ERET` 返回到 `EL0`，且同时满足 `IL=1 + misaligned PC` 时，仍必须先报 `EC=0x22`，而不是 `Illegal Execution state`。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 1200s ./tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/pc_alignment_fault.bin -load 0x0 -entry 0x0 -steps 600000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮之后，AArch64 `PC alignment fault` 这条程序可见最小语义已经有了模拟器实现、正式裸机回归，以及 Linux UMP/SMP 全回归闭环。
+- 但我仍不能自信宣称“Armv8-A 程序可见最小集已完整收口”。当前剩余的不确定性仍主要集中在：
+  - `SMP barrier / exclusive monitor / TLBI / IC IVAU` 的系统化复查；
+  - 其余低频 `trap / undef / no-op` 边界继续审计；
+  - 更系统的差分验证和长期 Linux 压力回归。
+
+# 修改日志 2026-03-31 23:19
+
+## 本轮修改
+
+- 继续沿着“异常 / 系统寄存器 / trap 语义收尾”审 `WFE/WFI` 这条线，这轮包含一处真实的模拟器执行逻辑修复，不只是测试收紧：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/el0_wfx_trap.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_wfx_trap.S)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 修正了 `EL0 WFE/WFI` 在 `SCTLR_EL1.nTWE/nTWI=0` 下的一处真实 trap 顺序缺口：
+  - 旧实现会先看 `event_register_` 或已有 pending IRQ，再决定是否 trap；
+  - 但按 ARM ARM `CheckForWFxTrap` 伪代码，这一类 trap 必须先判定；
+  - 现在 `EL0 WFE` 在 `nTWE=0` 时会先 trap，不再因为本地 event register 已置位就错误地“直接完成”；
+  - 现在 `EL0 WFI` 在 `nTWI=0` 时也会先 trap，不再因为已有 pending IRQ 就绕过 `EC=0x01` 的 `WFx` trap。
+- 同步把对应裸机回归从旧错误假设修正为正式强断言：
+  - `el0_wfx_trap` 现在显式覆盖“event register 已置位但 `WFE` 仍必须 trap”；
+  - 以及“已有 pending IRQ 但 `WFI` 仍必须 trap”；
+  - 并额外锁定：被 trap 的 `WFE` 不应偷偷消费 event register。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 1200s ./tests/arm64/build_tests.sh`
+- `timeout 120s ./build/aarchvm -bin tests/arm64/out/el0_wfx_trap.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮之后，`WFE/WFI` 这条程序可见 trap 边界与 ARM ARM 的优先级已经对齐，并且已经被裸机单测和 Linux UMP/SMP 功能回归锁住。
+- 但我仍不能自信宣称“Armv8-A 程序可见最小集已完整收口”。当前剩余的不确定性仍主要集中在：
+  - `SMP barrier / exclusive monitor / TLBI / IC IVAU` 在更极端交错场景下的系统化复查；
+  - 若干低频 `trap / undef / no-op` 边界的继续审计；
+  - 更系统的差分验证与长期 Linux 压力回归。
+
+# 修改日志 2026-03-30 22:12
+
+## 本轮修改
+
+- 继续沿着“异常 / 系统寄存器 / trap 语义收尾”审 `ICC_*` 这条线，这轮包含真实的模拟器执行逻辑修复，不只是测试收紧：
+  - [include/aarchvm/gicv3.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/gicv3.hpp)
+  - [src/gicv3.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/gicv3.cpp)
+  - [include/aarchvm/cpu.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/cpu.hpp)
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [src/soc.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/soc.cpp)
+  - [tests/arm64/gic_sysreg_manual_ack.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/gic_sysreg_manual_ack.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 修正了当前 GIC CPU-interface sysreg 一处真实缺口：
+  - 之前 `ICC_HPPIR1_EL1 / ICC_IAR1_EL1 / ICC_EOIR1_EL1 / ICC_DIR_EL1` 基本只在“已经走进 IRQ 异常入口”的路径上有完整语义；
+  - 当 guest 在同步异常上下文或普通 EL1 代码里，手动通过这些 sysreg 查询并处理 pending IRQ 时，模拟器会给出不完整甚至错误的程序可见结果；
+  - 现在 CPU 侧新增了独立的 manual-IRQ stack，能在非 IRQ 异常上下文下正确维护 `running_priority`、priority drop 与 deactivate 语义；
+  - `ICC_IAR1_EL1` 会真正执行一次手动 acknowledge，`ICC_EOIR1_EL1` / `ICC_DIR_EL1` 会按 `EOImode` 与当前 running priority 状态正确收尾；
+  - 这部分新增状态已并入 snapshot save/load，因此 snapshot 版本从 `20` 升到 `21`。
+- 同时修正了 GIC acknowledge 的优先级选择策略：
+  - 之前存在按 `INTID` 顺序扫 pending 的路径；
+  - 现在 `GicV3` 统一先选“当前可递送的最高优先级 pending 中断”，同优先级再按 `INTID` 打破平局；
+  - `has_pending()` 也复用这一逻辑，避免“能看到有 pending，但手动 `IAR` 拿到的不是同一个候选”这类尾差。
+- 在继续审计时还发现一处测试本身的真实错误：
+  - [tests/arm64/casp_pair.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/casp_pair.S) 原先把 64-bit `CASP*` 测试槽放在仅 8-byte 对齐的位置；
+  - 依据 Arm ARM，`CASP` 必须按总访问大小对齐，因此 64-bit pair 需要 16-byte 对齐；
+  - 这轮把 `pair64_slot` 改成显式 `16-byte` 对齐，避免把正确的 alignment fault 误当成模拟器 bug。
+- 顺手补上了裸机测试框架的一处盲点：
+  - `run_all.sh` 原先有一类 `run` 用例只看退出码，可能把 stderr 里的 `FATAL/UNIMPL/NESTED-SYNC` 静默吞掉；
+  - 现在 `run` / `run_expect` / `run_expect_smp` / `run_expect_trap` 都会统一扫描 stderr，一旦出现这类内部异常立即失败；
+  - `casp_pair.bin` 也从“只运行”改成“必须输出 `C`”，防止同类问题再次漏检。
+- 更新：
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+
+## 本轮测试
+
+- `timeout 300s ./tests/arm64/build_tests.sh`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/el0_wfx_trap.bin -load 0x0 -entry 0x0 -steps 1200000`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/gic_sysreg_manual_ack.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/casp_pair.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮之后，`ICC_*` 手动查询 / acknowledge / EOI / DIR 这条程序可见路径已经有了模拟器实现与正式裸机回归闭环，`CASP` 这条线也纠正了一处测试本身的对齐错误，并顺带补上了 `run_all.sh` 的 stderr 漏检盲点。
+- 但我仍不认为现在可以自信宣称“Armv8-A 程序可见最小集已完整收口”。当前剩余的不确定性仍主要集中在：
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 在剩余异常家族上的系统化复查；
+  - 仍未完全系统化锁死的 `trap / undef / no-op` 边界；
+  - `SMP barrier / TLBI / fault / exception return` 在更极端交错场景下的尾差。
+
+# 修改日志 2026-03-30 16:58
+
+## 本轮修改
+
+- 继续沿着“异常 / 系统寄存器 / trap 语义收尾”推进，这轮仍然没有修改模拟器执行逻辑，而是把一批此前已经存在、但断言还不够硬的正式回归继续收紧：
+  - [tests/arm64/sync_exception_regs.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/sync_exception_regs.S)
+  - [tests/arm64/svc_sysreg_minimal.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/svc_sysreg_minimal.S)
+  - [tests/arm64/software_step_basic.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/software_step_basic.S)
+  - [tests/arm64/el0_cache_ops_privilege.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_cache_ops_privilege.S)
+  - [tests/arm64/el0_tlbi_cache_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_tlbi_cache_undef.S)
+  - [tests/arm64/mmu_at_par_formats.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_at_par_formats.S)
+  - [tests/arm64/brk_exception.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/brk_exception.S)
+  - [tests/arm64/hlt_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/hlt_undef.S)
+  - [tests/arm64/el0_hvc_smc_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_hvc_smc_undef.S)
+  - [tests/arm64/el1_hvc_smc_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el1_hvc_smc_undef.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 这轮把几组关键异常语义从“发生了异常就算过”推进到“异常细节也必须对”：
+  - `sync_exception_regs` 现在锁定 same-EL instruction abort 的 `ESR_EL1/ELR_EL1/FAR_EL1`、异常入口 live `DAIF`，以及 `SPSR_EL1` 保存的源 `NZCV/DAIF/PAN/IL/M`；
+  - `svc_sysreg_minimal` 现在显式检查 `SVC` 的 `ESR_EL1.IL`、`ISS imm16`、`FAR_EL1=0`，以及 `SPSR_EL1` 里保存的源 `NZCV/DAIF/PAN/M`；
+  - `software_step_basic` 新增 “`SS + EL0 BRK` 走 Breakpoint Instruction exception，且 `SPSR_EL1.SS` 保持置位” 的正式断言；
+  - `mmu_at_par_formats` 新增 `AT -> PAR_EL1` 成功态与 fault 态格式回归，显式锁定 `RES1 bit11`、shareability 与 permission fault 的 `FST`；
+  - `el0_cache_ops_privilege` / `el0_tlbi_cache_undef` 现在会显式拒绝把 `TLBI from EL0` 一类路径误报成 `EC=0x18` system-access trap，并断言 `IL=1`、`ISS=0`、`FAR_EL1=0`；
+  - `brk_exception`、`hlt_undef`、`el0_hvc_smc_undef`、`el1_hvc_smc_undef` 现在统一检查 `IL/ISS/FAR` 与 `SPSR_EL1` 中保存的源 `NZCV/DAIF/PAN/M`，把 `BRK/HLT/HVC/SMC` 从 smoke 收紧成正式异常回归。
+- 这一轮的重点不是“再堆几条测试”，而是继续补齐我们对异常路径的信心边界：让更多 same-EL / lower-EL、`trap / undef / breakpoint`、以及 `AT / cache / TLBI` 路径都必须给出正确的 syndrome、`FAR_EL1` 和保存状态。
+- 更新：
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+
+## 本轮测试
+
+- `timeout 300s ./tests/arm64/build_tests.sh`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/mmu_at_par_formats.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/el0_cache_ops_privilege.bin -load 0x0 -entry 0x0 -steps 600000`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/el0_tlbi_cache_undef.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 60s env AARCHVM_BRK_MODE=trap ./build/aarchvm -bin tests/arm64/out/brk_exception.bin -load 0x0 -entry 0x0 -steps 600000`
+- `timeout 60s env AARCHVM_BRK_MODE=trap ./build/aarchvm -bin tests/arm64/out/hlt_undef.bin -load 0x0 -entry 0x0 -steps 600000`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/el0_hvc_smc_undef.bin -load 0x0 -entry 0x0 -steps 600000`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/el1_hvc_smc_undef.bin -load 0x0 -entry 0x0 -steps 600000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮之后，same-EL instruction abort、`SVC`、software step、`AT -> PAR_EL1`、`EL0 cache/TLBI/AT`、以及 `BRK/HLT/HVC/SMC` 这几条线上，`ESR_EL1/FAR_EL1/PAR_EL1/SPSR_EL1` 的程序可见关键位已经比前一轮更系统地被正式回归锁住。
+- 但我仍不能自信宣称“Armv8-A 程序可见最小集已完整收口”。按当前代码状态，下一批仍值得继续优先审的点是：
+  - `WFE/WFI` trap、EL0 timer trap 与一般 `system-access trap` 路径中，尚未系统锁定的 `FAR_EL1/IL/SPSR_EL1` 保存状态；
+  - `SMP barrier / TLBI / fault / exception return` 在更极端交错场景下是否还存在程序可见尾差；
+  - 仍未系统化差分验证的一些低频 `trap / undef / no-op` 边界。
+
+# 修改日志 2026-03-30 15:58
+
+## 本轮修改
+
+- 继续沿着 “异常 / 系统寄存器 / trap 语义收尾” 审 `ERET/SPSR/PSTATE` 这条线，这轮仍然没有改模拟器执行逻辑，而是把 [tests/arm64/illegal_state_return.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/illegal_state_return.S) 从“两条 smoke case”继续收紧成三条正式边界：
+  - 保留的 AArch64 `SPSR_EL1.M` 非法返回；
+  - 合法返回但 `SPSR_EL1.IL=1`，首条目标指令触发 `Illegal State`；
+  - 返回到当前模型不支持的 AArch32 state，首条目标指令同样触发 `Illegal State`。
+- 同一轮继续把 [tests/arm64/el0_eret_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_eret_undef.S) 从 “EL0 执行 `ERET` 会进 `UNDEFINED`” 的基本 smoke，收紧成同时校验：
+  - `ESR_EL1.IL=1`
+  - `ESR_EL1.ISS=0`
+  - `FAR_EL1=0`
+  - `SPSR_EL1` 中保存的 EL0 源 `NZCV/DAIF/PAN/M/IL`
+- 这条回归现在不再只验证“有没有进 `EC=0x0E`”，而是把 `ERET` 非法返回后的保存状态也一起锁死，显式断言 `SPSR_EL1` 中的：
+  - `NZCV`
+  - `DAIF`
+  - `PAN`
+  - `IL`
+  - `M`
+  都与非法返回后当前 EL 真正可见的 `PSTATE` 一致。
+- 这轮的意义是把 `ERET` 这条尾状态路径再往前推一格，既覆盖非法返回，也覆盖 `EL0 -> UNDEFINED` 这条 trap 语义，防止后续继续优化异常返回时，只保住“能 trap”，却把 `PSTATE` / syndrome 某些程序可见位悄悄弄错。
+- 更新：
+  - [tests/arm64/illegal_state_return.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/illegal_state_return.S)
+  - [tests/arm64/el0_eret_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_eret_undef.S)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+
+## 本轮测试
+
+- `timeout 300s ./tests/arm64/build_tests.sh`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/illegal_state_return.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/el0_eret_undef.bin -load 0x0 -entry 0x0 -steps 600000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- `ERET/SPSR/PSTATE` 这条线现在又多了一条正式回归，覆盖了“AArch64-only 模型下返回到 AArch32 state”这类之前仍未被显式锁住的非法返回边界。
+- 但我仍不能自信宣称“Armv8-A 程序可见最小集已完整收口”。当前仍值得继续优先审的点是：
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 在更多异常家族上的一致性，尤其是 cache/TLB/system 指令与 fault 交错时的 syndrome；
+  - 剩余 `trap / undef / no-op` 边界里低频 debug/system 指令的系统化收口；
+  - `SMP barrier / TLBI / fault / exception return` 交错路径下是否还存在只在更极端场景才暴露的程序可见尾差。
+
+# 修改日志 2026-03-30 15:34
+
+## 本轮修改
+
+- 继续沿着 “异常 / 系统寄存器 / trap 语义收尾” 审 `EC=0x18 system access trap` 这条线，这轮没有改模拟器执行逻辑，而是补上了一处此前仍偏弱的 syndrome 覆盖：
+  - [tests/arm64/sysreg_trap_iss_rt_fields.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/sysreg_trap_iss_rt_fields.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+- 这条新回归把 `EC=0x18` 的验证从“只看 trap 有没有发生”收紧到“显式锁死 syndrome 编码字段”，覆盖四条代表性 EL0 trap：
+  - `mrs x5, ctr_el0` with `SCTLR_EL1.UCT=0`
+  - `msr tcr_el1, x9`
+  - `ic ivau, x17` with `SCTLR_EL1.UCI=0`
+  - `dc zva, x13` with `SCTLR_EL1.DZE=0`
+- 回归现在会逐项断言：
+  - `ESR_EL1.EC == 0x18`
+  - `ISS` 中的 `Rt` 字段不被错误固定
+  - read/write bit 与实际指令方向一致
+  - `op0/op1/CRn/CRm/op2` 编码与 trap 指令一致
+  - `FAR_EL1 == 0`
+- 这轮的意义不是把测试“堆多一点”，而是把 `system-access trap` 这条线上最容易悄悄错、但之前不一定会被发现的 `ISS` 细节正式锁进回归。
+
+## 本轮测试
+
+- `timeout 300s ./tests/arm64/build_tests.sh`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/sysreg_trap_iss_rt_fields.bin -load 0x0 -entry 0x0 -steps 600000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮之后，`EC=0x18` system-access trap 至少已有一条正式回归会检查 `ISS` 的关键编码字段，不再只是笼统验证“发生了 trap”。
+- 但我仍不能自信宣称“Armv8-A 程序可见最小集已完整收口”。按当前代码状态，仍值得继续审的高优先级缺口主要是：
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 在其余异常家族上的全覆盖一致性，尤其是更多 cache/TLB/system 指令与 fault 交错的场景；
+  - 剩余 `trap / undef / no-op` 边界里尚未系统化锁住的低频 system/debug 指令族；
+  - `ERET/SPSR/PSTATE` 尾状态与 `SMP barrier / TLBI / fault` 交错边界。
+
+# 修改日志 2026-03-30 13:35
+
+## 本轮修改
+
+- 继续沿着 “异常 / 系统寄存器 / trap 语义收尾” 审 `CPACR_EL1` 下 direct `FPCR/FPSR` 访问这条线，补上了一处会影响我们对回归结论信心的覆盖空洞：
+  - [tests/arm64/cpacr_fp_sysreg_trap.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/cpacr_fp_sysreg_trap.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 具体修正了两部分：
+  - 修正了新回归自身的一处标签错误：handler 原先拿 `ELR_EL1` 去比的是准备指令地址，而不是真正会 trap 的 `MRS/MSR FPCR/FPSR` 地址，导致测试误报失败；
+  - 把 `FPEN=10` 也正式纳入覆盖，不再只测 `00 / 01 / 11`。
+- 现在这条回归会显式覆盖：
+  - `FPEN=00` 时 EL1 direct `MRS FPCR` trap；
+  - `FPEN=01` 时 EL0 direct `MSR FPSR` trap；
+  - `FPEN=10` 时 EL1 direct `MRS FPCR` trap；
+  - `FPEN=10` 时 EL0 direct `MSR FPSR` trap；
+  - `FPEN=11` 时 EL0 direct `MSR/MRS FPCR/FPSR` 正常访问。
+- 这轮没有修改模拟器执行逻辑，修改的是正式回归覆盖本身；目的不是把测试“改绿”，而是把 `CPACR_EL1.FPEN` 对 direct `FPCR/FPSR` special-purpose sysreg access 的程序可见语义真正锁死。
+- 更新：
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+
+## 本轮测试
+
+- `timeout 300s ./tests/arm64/build_tests.sh`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/cpacr_fp_sysreg_trap.bin -load 0x0 -entry 0x0 -steps 500000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- direct `FPCR/FPSR` 访问在 `CPACR_EL1.FPEN` 各主要模式下的 trap/allow 语义，现在已有正式回归闭环，且整套裸机与 Linux UMP/SMP 回归通过。
+- 但我仍不能自信宣称“Armv8-A 程序可见最小集已完整收口”；当前剩余的不确定性更集中在：
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 的全覆盖一致性；
+  - 一些低频 `trap / undef / no-op` 边界是否还存在未正式覆盖的系统指令族；
+  - `SMP barrier / fault / TLB` 这几类路径是否还有只在更极端场景下才会暴露的程序可见尾差。
+
 # 修改日志 2026-03-30 13:15
 
 ## 本轮修改
@@ -5560,3 +6092,46 @@
   - `OS Lock` 保持锁定时，`TDA` 只作为 `EDSCR.TDA` 的 save/restore 影子位，不应影响直接 debug sysreg 访问；
   - `OS Lock` 解锁后，同样的 `DBGBCR/DBGWCR` 访问会触发 halting 行为；
   - 分别覆盖读路径与写路径。
+
+# 修改日志 2026-04-01 11:38
+
+## 本轮修改
+
+- 继续按“审阅 -> 修复 -> 测试”流程推进“Armv8-A 程序可见正确性收尾计划”，这轮收的是 base cache maintenance by set/way 里一个真实的 guest 可见缺口：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - 此前 `DC CSW, Xt` 没有被系统指令路径解码，客体在 `EL1` 执行它时会错误落到 `UNDEFINED`。
+  - 现在已把 `DC CSW, Xt` 接入 `exec_system()`，与现有 `DC ISW/CISW` 一样按当前模型实现为：
+    - `EL1` 下 side-effect-free 成功执行；
+    - `EL0` 下保持 `UNDEFINED`。
+- 新增并接入了专门的裸机回归：
+  - [tests/arm64/dc_csw_privilege.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/dc_csw_privilege.S)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - 这条用例同时锁定：
+    - `EL1` 执行 `DC CSW` 不应异常；
+    - `EL0` 执行 `DC CSW` 仍应 `UNDEFINED`；
+    - 异常时 `ESR_EL1.IL=1`、`ISS=0`、`FAR_EL1=0`；
+    - `SPSR_EL1` 中保存的源 `NZCV/DAIF/PAN/M` 正确无尾差。
+
+## 本轮测试
+
+- 定向验证：
+  - `timeout 1200s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/dc_csw_privilege.bin -load 0x0 -entry 0x0 -steps 600000`
+- 重新编译与测试产物：
+  - `timeout 1200s cmake --build build -j`
+  - `timeout 1200s ./tests/arm64/build_tests.sh`
+- 裸机完整回归：
+  - `timeout 5400s ./tests/arm64/run_all.sh`
+- Linux 单核功能回归：
+  - `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- Linux SMP 功能回归：
+  - `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮又补掉了一条真实的 trap/undef/no-op 边界，不是“补文档式”的审计：之前 base cache op 家族里 `DC CSW` 这条指令确实缺失。
+- 当前代码状态下，新增 `DC CSW` 语义与回归都已经通过，且没有破坏裸机、Linux UMP、Linux SMP 现有回归。
+- 但我还不能宣称“Armv8-A 程序可见最小集已完整收口”。下一批仍最值得继续审的是：
+  - `FP/AdvSIMD` 里 `DN/FZ/NaN/payload/flags` 的一致性尾差；
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 尚未逐类完全枚举覆盖的剩余异常；
+  - `SMP` 下 barrier / exclusive / fault 交错时的程序可见边界。

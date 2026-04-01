@@ -195,6 +195,7 @@ sync_lower:
 
 lower_sync_handler:
     mrs  x20, esr_el1
+    tbz  x20, #25, handler_fail
     ubfx x21, x20, #26, #6
     cbz  x21, handle_undef
     movz x22, #0x18
@@ -206,6 +207,8 @@ lower_sync_handler:
     b handler_fail
 
 handle_sys_trap:
+    mrs  x22, far_el1
+    cbnz x22, handler_fail
     mrs  x23, elr_el1
     adr  x24, el0_ic_ivau_insn
     cmp  x23, x24
@@ -213,9 +216,6 @@ handle_sys_trap:
     adr  x24, el0_dc_zva_insn
     cmp  x23, x24
     b.eq trap_dc_zva
-    adr  x24, el0_tlbi_insn
-    cmp  x23, x24
-    b.eq trap_tlbi
     b handler_fail
 
 trap_ic_ivau:
@@ -257,6 +257,10 @@ trap_tlbi:
     b return_to_el1
 
 handle_undef:
+    and  x22, x20, #0x1ffffff
+    cbnz x22, handler_fail
+    mrs  x22, far_el1
+    cbnz x22, handler_fail
     mrs  x23, elr_el1
     adr  x24, el0_at_insn
     cmp  x23, x24

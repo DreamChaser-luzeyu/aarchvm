@@ -1,3 +1,4 @@
+    .arch armv8.1-a
     .text
     .global _start
 _start:
@@ -12,6 +13,13 @@ _start:
     adr  x11, handled
     str  xzr, [x11]
 
+    movz x0, #0xA000, lsl #16
+    msr  nzcv, x0
+    msr  daifclr, #0xf
+    msr  daifset, #0x9
+    movz x0, #1
+    msr  pan, x0
+
 el1_hlt_insn:
     hlt  #0x1234
 
@@ -23,7 +31,9 @@ after_el1_hlt:
 
     adr  x3, el0_hlt_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr             // EL0t
+    movz x4, #0x0140               // A=1, F=1.
+    movk x4, #0x3040, lsl #16      // NZCV=0011, PAN=1, EL0t.
+    msr  spsr_el1, x4
     eret
 
 after_el0_hlt:
@@ -86,6 +96,18 @@ sync_handler:
     b fail_from_handler
 
 handle_el1_hlt:
+    mrs  x26, spsr_el1
+    and  x27, x26, #0xf
+    cmp  x27, #0x5
+    b.ne fail_from_handler
+    tbnz x26, #20, fail_from_handler
+    ubfx x27, x26, #28, #4
+    cmp  x27, #0xa
+    b.ne fail_from_handler
+    ubfx x27, x26, #6, #4
+    cmp  x27, #0x9
+    b.ne fail_from_handler
+    tbz  x26, #22, fail_from_handler
     adr  x26, handled
     movz x27, #1
     str  x27, [x26]
@@ -94,6 +116,17 @@ handle_el1_hlt:
     eret
 
 handle_el0_hlt:
+    mrs  x26, spsr_el1
+    and  x27, x26, #0xf
+    cbnz x27, fail_from_handler
+    tbnz x26, #20, fail_from_handler
+    ubfx x27, x26, #28, #4
+    cmp  x27, #0x3
+    b.ne fail_from_handler
+    ubfx x27, x26, #6, #4
+    cmp  x27, #0x5
+    b.ne fail_from_handler
+    tbz  x26, #22, fail_from_handler
     adr  x26, handled
     ldr  x27, [x26]
     orr  x27, x27, #2

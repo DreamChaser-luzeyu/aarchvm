@@ -77,6 +77,7 @@ void GenericTimer::write(std::uint64_t offset, std::uint64_t value, std::size_t 
 
   if (offset == 0x08) {
     compare_ = value;
+    mmio_irq_pending_ = false;
     fired_ = false;
     update_irq_state();
     if (state_change_observer_) {
@@ -85,6 +86,7 @@ void GenericTimer::write(std::uint64_t offset, std::uint64_t value, std::size_t 
   } else if (offset == 0x10) {
     enabled_ = (value & 1u) != 0;
     if (!enabled_) {
+      mmio_irq_pending_ = false;
       fired_ = false;
     }
     if ((value & 2u) != 0) {

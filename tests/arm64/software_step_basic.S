@@ -86,11 +86,30 @@ after_case3:
     cmp  x4, x7
     b.ne fail6
 
+    // Case 4: stepping a BRK takes the Breakpoint Instruction exception, and
+    // SPSR_EL1.SS remains set because the preferred return address is the BRK.
+    str  xzr, [x3]
+    movz x0, #1                    // SS
+    msr  mdscr_el1, x0
+    msr  daifset, #8
+    adr  x4, el0_case4_entry
+    msr  elr_el1, x4
+    movz x4, #0
+    movk x4, #0x20, lsl #16        // SPSR_EL1.SS=1, EL0t
+    msr  spsr_el1, x4
+    eret
+after_case4:
+    ldr  x4, [x3]
+    movz x7, #5
+    cmp  x4, x7
+    b.ne fail7
+
     movz x0, #'T'
     str  x0, [x1]
     movz x0, #'\n'
     str  x0, [x1]
-    brk  #0
+1:
+    b    1b
 
 fail1:
     movz x0, #'1'
@@ -140,7 +159,8 @@ failF:
 
 out:
     str  x0, [x1]
-    brk  #0
+1:
+    b    1b
 
 el0_case2_entry:
     movz x5, #0x55
@@ -154,6 +174,11 @@ el0_case3_entry:
     svc  #0x123
 el0_case3_after_svc:
     brk  #0
+
+el0_case4_entry:
+el0_case4_brk:
+    brk  #0x456
+    b    fail7
 
     .balign 8
 handled:
@@ -208,6 +233,10 @@ sync_lower_handler:
     adr  x27, el0_case3_after_svc
     cmp  x25, x27
     b.eq handle_case3_svc
+
+    adr  x27, el0_case4_brk
+    cmp  x25, x27
+    b.eq handle_case4_brk
 
     b failF
 
@@ -264,6 +293,25 @@ handle_case3_svc:
     str  x28, [x27]
     msr  mdscr_el1, xzr
     adr  x28, after_case3
+    msr  elr_el1, x28
+    movz x28, #0x5               // EL1h
+    msr  spsr_el1, x28
+    eret
+
+handle_case4_brk:
+    mov  x28, x24
+    CHECK_EC x28, 0x3c, failE
+    and  x28, x24, #0xffff
+    movz x29, #0x456
+    cmp  x28, x29
+    b.ne failF
+    tbz  x26, #21, failA
+
+    adr  x27, handled
+    movz x28, #5
+    str  x28, [x27]
+    msr  mdscr_el1, xzr
+    adr  x28, after_case4
     msr  elr_el1, x28
     movz x28, #0x5               // EL1h
     msr  spsr_el1, x28

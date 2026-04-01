@@ -5,7 +5,7 @@ _start:
     movk x1, #0x0900, lsl #16      // UART
 
     movz x9, #3
-    movz x15, #0x0403
+    movz x15, #0x0c03              // valid + AF + nG
     movz x16, #0x0401
 
     // Table set A

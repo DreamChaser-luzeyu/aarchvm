@@ -51,7 +51,8 @@ _start:
 
     movz x2, #0
     str  x2, [x23]
-    tlbi vae1, x30
+    lsr  x14, x30, #12
+    tlbi vae1, x14
     dsb  sy
     isb
 

@@ -13,6 +13,8 @@ _start:
     str  xzr, [x11]
     adr  x11, executed2
     str  xzr, [x11]
+    adr  x11, executed3
+    str  xzr, [x11]
 
     // Case 1: illegal ERET from EL1 with reserved SPSR.M value must not
     // execute the target instruction. Instead it sets PSTATE.IL and the next
@@ -22,7 +24,8 @@ _start:
     str  x12, [x11]
     adr  x0, illegal_target_el1
     msr  elr_el1, x0
-    movz x0, #0x2                   // Reserved AArch64 SPSR.M value.
+    movz x0, #0x0142                // A=1, F=1, reserved SPSR.M value.
+    movk x0, #0xA040, lsl #16       // NZCV=1010, PAN=1.
     msr  spsr_el1, x0
     eret
 
@@ -38,7 +41,8 @@ after_case1:
     str  x12, [x11]
     adr  x0, illegal_target_el0
     msr  elr_el1, x0
-    movz x0, #0x10, lsl #16         // SPSR_EL1.IL=1, EL0t.
+    movz x0, #0x0280                // D=1, I=1.
+    movk x0, #0x5010, lsl #16       // NZCV=0101, IL=1, EL0t.
     msr  spsr_el1, x0
     eret
 
@@ -46,6 +50,23 @@ after_case2:
     adr  x11, executed2
     ldr  x12, [x11]
     cbnz x12, fail2
+
+    // Case 3: returning to unsupported AArch32 state is also illegal in this
+    // AArch64-only model. The target instruction must not execute.
+    adr  x11, current_case
+    movz x12, #3
+    str  x12, [x11]
+    adr  x0, illegal_target_a32
+    msr  elr_el1, x0
+    movz x0, #0x02d0                // D=1, I=1, F=1, AArch32 state bit set.
+    movk x0, #0x3040, lsl #16       // NZCV=0011, PAN=1.
+    msr  spsr_el1, x0
+    eret
+
+after_case3:
+    adr  x11, executed3
+    ldr  x12, [x11]
+    cbnz x12, failc
 
 pass:
     movz x0, #'I'
@@ -71,6 +92,27 @@ fail5:
     b out
 fail6:
     movz x0, #'6'
+    b out
+fail7:
+    movz x0, #'7'
+    b out
+fail8:
+    movz x0, #'8'
+    b out
+fail9:
+    movz x0, #'9'
+    b out
+faila:
+    movz x0, #'A'
+    b out
+failb:
+    movz x0, #'B'
+    b out
+failc:
+    movz x0, #'C'
+    b out
+faild:
+    movz x0, #'D'
 out:
     str  x0, [x20]
     brk  #0
@@ -89,6 +131,13 @@ illegal_target_el0:
     svc  #0x42
     b    fail4
 
+illegal_target_a32:
+    adr  x0, executed3
+    movz x1, #1
+    str  x1, [x0]
+    svc  #0x43
+    b    fail4
+
     .balign 2048
 vectors:
     b fail5
@@ -103,7 +152,12 @@ sync_spx_handler:
     adr  x9, current_case
     ldr  x9, [x9]
     cmp  x9, #1
-    b.ne fail6
+    b.eq handle_case1
+    cmp  x9, #3
+    b.eq handle_case3
+    b    fail6
+
+handle_case1:
 
     mrs  x0, esr_el1
     tbz  x0, #25, fail6
@@ -121,12 +175,54 @@ sync_spx_handler:
     and  x5, x4, #0xf
     cmp  x5, #0x5
     b.ne fail6
+    ubfx x6, x4, #28, #4
+    cmp  x6, #0xa
+    b.ne fail7
+    ubfx x6, x4, #6, #4
+    cmp  x6, #0x5
+    b.ne fail8
+    tbz  x4, #22, fail9
 
     adr  x6, executed1
     ldr  x7, [x6]
     cbnz x7, fail6
 
     adr  x8, after_case1
+    movz x9, #0x5
+    msr  elr_el1, x8
+    msr  spsr_el1, x9
+    eret
+
+handle_case3:
+    mrs  x0, esr_el1
+    tbz  x0, #25, fail6
+    ubfx x1, x0, #26, #6
+    cmp  x1, #0x0e
+    b.ne fail6
+
+    mrs  x2, elr_el1
+    adr  x3, illegal_target_a32
+    cmp  x2, x3
+    b.ne fail6
+
+    mrs  x4, spsr_el1
+    tbz  x4, #20, fail6
+    and  x5, x4, #0xf
+    cmp  x5, #0x5
+    b.ne fail6
+    ubfx x6, x4, #28, #4
+    cmp  x6, #0x3
+    b.ne failc
+    ubfx x6, x4, #6, #4
+    cmp  x6, #0xb
+    b.ne faild
+    tbz  x4, #22, fail9
+
+    adr  x6, executed3
+    ldr  x7, [x6]
+    cbnz x7, fail6
+
+    adr  x8, after_case3
     movz x9, #0x5
     msr  elr_el1, x8
     msr  spsr_el1, x9
@@ -153,6 +249,12 @@ sync_lower_handler:
     tbz  x4, #20, fail6
     and  x5, x4, #0xf
     cbnz x5, fail6
+    ubfx x6, x4, #28, #4
+    cmp  x6, #0x5
+    b.ne faila
+    ubfx x6, x4, #6, #4
+    cmp  x6, #0xa
+    b.ne failb
 
     adr  x6, executed2
     ldr  x7, [x6]
@@ -171,4 +273,6 @@ current_case:
 executed1:
     .quad 0
 executed2:
+    .quad 0
+executed3:
     .quad 0

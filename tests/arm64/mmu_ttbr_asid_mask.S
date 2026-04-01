@@ -73,9 +73,26 @@ _start:
     subs xzr, x12, #0x66
     b.ne fail
 
-    // Sanity: sysreg readback preserves full TTBR value.
+    // Sysreg readback must honor architecturally visible TTBR masking.
     mrs  x5, ttbr0_el1
-    subs xzr, x5, x4
+    mrs  x6, id_aa64mmfr0_el1
+    ubfx x6, x6, #4, #4
+    mov  x7, x4
+    cmp  x6, #2
+    b.eq 1f
+    movz x8, #0xffff
+    movk x8, #0xffff, lsl #16
+    movk x8, #0xffff, lsl #32
+    movk x8, #0x00ff, lsl #48
+    and  x7, x7, x8
+1:
+    mrs  x6, id_aa64mmfr2_el1
+    ubfx x6, x6, #12, #4
+    cmp  x6, #1
+    b.eq 2f
+    bic  x7, x7, #1
+2:
+    subs xzr, x5, x7
     b.ne fail
 
     movz x2, #0

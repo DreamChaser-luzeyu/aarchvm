@@ -77,7 +77,8 @@ _start:
     b.ne fail
 
     // Invalidate only VA0.
-    tlbi vae1, x30
+    lsr  x14, x30, #12
+    tlbi vae1, x14
     dsb  sy
     isb
 

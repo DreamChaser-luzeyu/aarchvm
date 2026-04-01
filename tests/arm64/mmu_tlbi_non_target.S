@@ -99,7 +99,8 @@ _start:
 
     // Remap VA0, but invalidate VA1 only: VA0 TLB entry must remain valid.
     str  x26, [x25]
-    tlbi vae1, x29
+    lsr  x14, x29, #12
+    tlbi vae1, x14
     dsb  sy
     isb
 
@@ -111,7 +112,8 @@ _start:
     b.ne fail
 
     // Invalidate exact target VA0, then new mapping is visible.
-    tlbi vae1, x30
+    lsr  x15, x30, #12
+    tlbi vae1, x15
     dsb  sy
     isb
     ldr  x12, [x30]

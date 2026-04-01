@@ -1,3 +1,4 @@
+    .arch armv8.1-a
     .text
     .global _start
 _start:
@@ -9,6 +10,14 @@ _start:
 
     adr  x11, handled
     str  xzr, [x11]
+
+    movz x0, #0x0240               // A=1, I=1.
+    movk x0, #0xB040, lsl #16      // NZCV=1011, PAN=1, EL1h.
+    msr  daifclr, #0xf
+    msr  nzcv, x0
+    msr  daifset, #0x6             // Restore A=1, I=1 via live PSTATE path.
+    movz x19, #1
+    msr  pan, x19
 
 svc_here:
     svc  #0x1234
@@ -74,6 +83,7 @@ sync_handler:
     movz x4, #0x15
     subs xzr, x3, x4
     b.ne fail_from_handler
+    tbz  x2, #25, fail_from_handler
 
     movz x5, #0xffff
     and  x6, x2, x5
@@ -81,10 +91,26 @@ sync_handler:
     subs xzr, x6, x7
     b.ne fail_from_handler
 
+    mrs  x30, far_el1
+    cbnz x30, fail_from_handler
+
     mrs  x8, elr_el1
     adr  x9, after_svc
     subs xzr, x8, x9
     b.ne fail_from_handler
+
+    mrs  x13, spsr_el1
+    tbnz x13, #20, fail_from_handler
+    and  x14, x13, #0xf
+    cmp  x14, #0x5
+    b.ne fail_from_handler
+    ubfx x14, x13, #28, #4
+    cmp  x14, #0xb
+    b.ne fail_from_handler
+    ubfx x14, x13, #6, #4
+    cmp  x14, #0x6
+    b.ne fail_from_handler
+    tbz  x13, #22, fail_from_handler
 
     adr  x10, handled
     movz x11, #1

@@ -12,7 +12,9 @@ _start:
 
     adr  x3, el0_eret
     msr  elr_el1, x3
-    msr  spsr_el1, xzr             // EL0t
+    movz x4, #0x0280              // D=1, I=1.
+    movk x4, #0x9040, lsl #16     // NZCV=1001, PAN=1, EL0t.
+    msr  spsr_el1, x4
     eret
 
 after_undef:
@@ -48,11 +50,29 @@ lower_sync_handler:
     mrs  x20, esr_el1
     ubfx x21, x20, #26, #6
     cbnz x21, handler_fail
+    tbz  x20, #25, handler_fail
+    and  x28, x20, #0x1ffffff
+    cbnz x28, handler_fail
 
     mrs  x22, elr_el1
     adr  x23, el0_eret_insn
     cmp  x22, x23
     b.ne handler_fail
+
+    mrs  x24, far_el1
+    cbnz x24, handler_fail
+
+    mrs  x25, spsr_el1
+    and  x26, x25, #0xf
+    cbnz x26, handler_fail
+    tbnz x25, #20, handler_fail
+    ubfx x26, x25, #28, #4
+    cmp  x26, #0x9
+    b.ne handler_fail
+    ubfx x26, x25, #6, #4
+    cmp  x26, #0xa
+    b.ne handler_fail
+    tbz  x25, #22, handler_fail
 
     adr  x24, trap_count
     movz x25, #1

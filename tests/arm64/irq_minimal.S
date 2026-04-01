@@ -13,6 +13,18 @@ _start:
     adr  x10, vectors
     msr  vbar_el1, x10
 
+    // Route timer MMIO IRQs through GIC PPI 27.
+    movz x15, #0x0000
+    movk x15, #0x080b, lsl #16     // GICR_SGI base
+    movz x16, #0
+    movk x16, #0x0800, lsl #16
+    str  w16, [x15, #0x100]
+    movz x16, #0xff
+    msr  icc_pmr_el1, x16
+    movz x16, #1
+    msr  icc_sre_el1, x16
+    msr  icc_igrpen1_el1, x16
+
     // flag = 0
     adr  x3, flag
     movz x4, #0

@@ -188,7 +188,8 @@ fsc_ok:
     b.ne fail_from_handler
 
     str  x27, [x25]
-    tlbi vale1is, x30
+    lsr  x16, x30, #12
+    tlbi vale1is, x16
     dsb  sy
     isb
 

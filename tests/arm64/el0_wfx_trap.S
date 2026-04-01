@@ -1,3 +1,4 @@
+    .arch armv8.1-a
     .text
     .global _start
 _start:
@@ -40,21 +41,47 @@ _start:
 
     adr  x3, el0_wfe_denied
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    movz x4, #0x0280               // D=1, I=1.
+    movk x4, #0x9040, lsl #16      // NZCV=1001, PAN=1, EL0t.
+    msr  spsr_el1, x4
     eret
 after_wfe_denied:
     adr  x11, trap_flags
     ldr  x12, [x11]
     tbz  x12, #0, fail1
 
-    adr  x3, el0_wfi_denied
+    sevl
+    adr  x3, el0_wfe_event_denied
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    movz x4, #0x0300               // D=1, A=1.
+    movk x4, #0x1040, lsl #16      // NZCV=0001, PAN=1, EL0t.
+    msr  spsr_el1, x4
     eret
-after_wfi_denied:
+after_wfe_event_denied:
     adr  x11, trap_flags
     ldr  x12, [x11]
-    tbz  x12, #1, fail2
+    tbz  x12, #2, fail2
+
+    msr  daifset, #0x2
+    mrs  x14, cntvct_el0
+    msr  cntv_cval_el0, x14
+    movz x15, #1
+    msr  cntv_ctl_el0, x15
+
+    adr  x3, el0_wfi_pending_denied
+    msr  elr_el1, x3
+    movz x4, #0x0080               // I=1.
+    movk x4, #0x8040, lsl #16      // NZCV=1000, PAN=1, EL0t.
+    msr  spsr_el1, x4
+    eret
+after_wfi_pending_denied:
+    adr  x11, trap_flags
+    ldr  x12, [x11]
+    tbz  x12, #3, fail3
+    adr  x11, irq_count
+    ldr  x12, [x11]
+    cbnz x12, fail4
+    msr  daifclr, #0x2
 
     mrs  x3, sctlr_el1
     movz x4, #1
@@ -68,10 +95,10 @@ after_wfi_denied:
     movz x4, #1
     lsl  x5, x4, #16
     tst  x6, x5
-    b.eq fail3
+    b.eq fail5
     lsl  x5, x4, #18
     tst  x6, x5
-    b.eq fail3
+    b.eq fail5
 
     adr  x3, el0_wfe_allowed
     msr  elr_el1, x3
@@ -82,7 +109,7 @@ after_wfe_allowed:
     ldr  x12, [x11]
     movz x13, #1
     cmp  x12, x13
-    b.ne fail4
+    b.ne fail2
 
     mrs  x14, cntvct_el0
     add  x14, x14, #30
@@ -99,11 +126,11 @@ after_wfi_allowed:
     ldr  x12, [x11]
     movz x13, #2
     cmp  x12, x13
-    b.ne fail5
+    b.ne fail6
     adr  x11, irq_count
     ldr  x12, [x11]
     cmp  x12, #1
-    b.ne fail6
+    b.ne fail7
 
     movz x0, #'T'
     str  x0, [x1]
@@ -132,6 +159,9 @@ fail5:
 fail6:
     movz x0, #'6'
     b out
+fail7:
+    movz x0, #'7'
+    b out
 
 out:
     movz x1, #0x0000
@@ -144,15 +174,19 @@ el0_wfe_denied_insn:
     wfe
     svc  #0x11
 
-el0_wfi_denied:
-el0_wfi_denied_insn:
-    wfi
-    svc  #0x12
+el0_wfe_event_denied:
+el0_wfe_event_denied_insn:
+    wfe
+    svc  #0x19
 
 el0_wfe_allowed:
-    sevl
     wfe
     svc  #0x20
+
+el0_wfi_pending_denied:
+el0_wfi_pending_denied_insn:
+    wfi
+    svc  #0x1a
 
 el0_wfi_allowed:
 el0_wfi_allowed_insn:
@@ -185,6 +219,7 @@ irq_handler:
 
 lower_sync_handler:
     mrs  x20, esr_el1
+    tbz  x20, #25, handler_fail
     ubfx x21, x20, #26, #6
     movz x22, #0x01
     cmp  x21, x22
@@ -199,34 +234,99 @@ handle_wfx_trap:
     adr  x24, el0_wfe_denied_insn
     cmp  x23, x24
     b.eq trap_wfe
-    adr  x24, el0_wfi_denied_insn
+    adr  x24, el0_wfe_event_denied_insn
     cmp  x23, x24
-    b.eq trap_wfi
+    b.eq trap_wfe_event
+    adr  x24, el0_wfi_pending_denied_insn
+    cmp  x23, x24
+    b.eq trap_wfi_pending
     b handler_fail
 
 trap_wfe:
-    and  x24, x20, #0x3
+    and  x24, x20, #0x1ffffff
     cmp  x24, #1
     b.ne handler_fail
+    mrs  x24, far_el1
+    cbnz x24, handler_fail
+    mrs  x24, spsr_el1
+    and  x25, x24, #0xf
+    cbnz x25, handler_fail
+    tbnz x24, #20, handler_fail
+    ubfx x25, x24, #28, #4
+    cmp  x25, #0x9
+    b.ne handler_fail
+    ubfx x25, x24, #6, #4
+    cmp  x25, #0xa
+    b.ne handler_fail
+    tbz  x24, #22, handler_fail
     adr  x24, trap_flags
     ldr  x25, [x24]
     orr  x25, x25, #1
     str  x25, [x24]
     adr  x26, after_wfe_denied
+    movz x27, #0x5                // EL1h
     b return_to_el1
 
-trap_wfi:
-    and  x24, x20, #0x3
+trap_wfe_event:
+    and  x24, x20, #0x1ffffff
+    cmp  x24, #1
+    b.ne handler_fail
+    mrs  x24, far_el1
     cbnz x24, handler_fail
+    mrs  x24, spsr_el1
+    and  x25, x24, #0xf
+    cbnz x25, handler_fail
+    tbnz x24, #20, handler_fail
+    ubfx x25, x24, #28, #4
+    cmp  x25, #0x1
+    b.ne handler_fail
+    ubfx x25, x24, #6, #4
+    cmp  x25, #0xc
+    b.ne handler_fail
+    tbz  x24, #22, handler_fail
     adr  x24, trap_flags
     ldr  x25, [x24]
-    orr  x25, x25, #2
+    orr  x25, x25, #4
     str  x25, [x24]
-    adr  x26, after_wfi_denied
+    adr  x26, after_wfe_event_denied
+    movz x27, #0x5                // EL1h
+    b return_to_el1
+
+trap_wfi_pending:
+    and  x24, x20, #0x1ffffff
+    cbnz x24, handler_fail
+    mrs  x24, far_el1
+    cbnz x24, handler_fail
+    mrs  x24, spsr_el1
+    and  x25, x24, #0xf
+    cbnz x25, handler_fail
+    tbnz x24, #20, handler_fail
+    ubfx x25, x24, #28, #4
+    cmp  x25, #0x8
+    b.ne handler_fail
+    ubfx x25, x24, #6, #4
+    cmp  x25, #0x2
+    b.ne handler_fail
+    tbz  x24, #22, handler_fail
+    mrs  x24, icc_hppir1_el1
+    movz x25, #27
+    cmp  x24, x25
+    b.ne handler_fail
+    adr  x24, trap_flags
+    ldr  x25, [x24]
+    orr  x25, x25, #8
+    str  x25, [x24]
+    msr  cntv_ctl_el0, xzr
+    mrs  x24, icc_iar1_el1
+    msr  icc_eoir1_el1, x24
+    msr  icc_dir_el1, x24
+    adr  x26, after_wfi_pending_denied
+    movz x27, #0x5                // EL1h
     b return_to_el1
 
 handle_svc:
     and  x22, x20, #0xffff
+    movz x27, #0x5                // EL1h
     movz x23, #0x20
     cmp  x22, x23
     b.eq svc_wfe_ok
@@ -247,9 +347,9 @@ svc_wfi_ok:
     movz x25, #2
     str  x25, [x24]
     adr  x26, after_wfi_allowed
+    b return_to_el1
 
 return_to_el1:
-    movz x27, #0x5                // EL1h
     msr  spsr_el1, x27
     msr  elr_el1, x26
     eret

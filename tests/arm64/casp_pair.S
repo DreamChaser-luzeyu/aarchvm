@@ -112,6 +112,7 @@ out:
 pair32_slot:
     .word 0
     .word 0
+    .balign 16
 pair64_slot:
     .quad 0
     .quad 0

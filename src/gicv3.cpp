@@ -677,26 +677,46 @@ bool GicV3::has_pending(std::size_t cpu_index, std::uint8_t pmr) const {
     return cache.value;
   }
 
-  bool pending = false;
-  for (std::uint32_t intid = 0; intid < kLocalIntIds; ++intid) {
-    if (local_candidate(idx, intid, pmr)) {
-      pending = true;
-      break;
-    }
-  }
-  if (!pending) {
-    for (std::uint32_t intid = kFirstSpiIntId; intid < kNumIntIds; ++intid) {
-      if (spi_candidate(intid, pmr)) {
-        pending = true;
-        break;
-      }
-    }
-  }
+  std::uint32_t intid = 1023u;
+  const bool pending = highest_pending(idx, pmr, intid);
   cache.valid = true;
   cache.value = pending;
   cache.pmr = pmr;
   cache.epoch = state_epoch_;
   return pending;
+}
+
+bool GicV3::highest_pending(std::size_t cpu_index, std::uint32_t& intid) const {
+  return highest_pending(cpu_index, 0xFFu, intid);
+}
+
+bool GicV3::highest_pending(std::size_t cpu_index, std::uint8_t pmr, std::uint32_t& intid) const {
+  const std::size_t idx = std::min(cpu_index, locals_.size() - 1u);
+  bool found = false;
+  std::uint8_t best_prio = 0xFFu;
+  std::uint32_t best_intid = 1023u;
+  const auto consider = [&](std::uint32_t candidate_intid, std::uint8_t candidate_prio) {
+    if (!found || candidate_prio < best_prio ||
+        (candidate_prio == best_prio && candidate_intid < best_intid)) {
+      found = true;
+      best_prio = candidate_prio;
+      best_intid = candidate_intid;
+    }
+  };
+
+  for (std::uint32_t local_intid = 0; local_intid < kLocalIntIds; ++local_intid) {
+    if (local_candidate(idx, local_intid, pmr)) {
+      consider(local_intid, local_cpu(idx).priorities[local_intid]);
+    }
+  }
+  for (std::uint32_t global_intid = kFirstSpiIntId; global_intid < kNumIntIds; ++global_intid) {
+    if (spi_candidate(global_intid, pmr)) {
+      consider(global_intid, spi_priorities_[spi_index(global_intid)]);
+    }
+  }
+
+  intid = found ? best_intid : 1023u;
+  return found;
 }
 
 bool GicV3::acknowledge(std::size_t cpu_index, std::uint32_t& intid) {
@@ -705,26 +725,18 @@ bool GicV3::acknowledge(std::size_t cpu_index, std::uint32_t& intid) {
 
 bool GicV3::acknowledge(std::size_t cpu_index, std::uint8_t pmr, std::uint32_t& intid) {
   ++perf_counters_.acknowledge_calls;
-  for (std::uint32_t local_intid = 0; local_intid < kLocalIntIds; ++local_intid) {
-    if (!local_candidate(cpu_index, local_intid, pmr)) {
-      continue;
-    }
-    intid = local_intid;
-    set_local_pending_bit(cpu_index, local_intid, false);
-    set_local_active_bit(cpu_index, local_intid, true);
-    return true;
+  if (!highest_pending(cpu_index, pmr, intid)) {
+    intid = 1023u;
+    return false;
   }
-  for (std::uint32_t global_intid = kFirstSpiIntId; global_intid < kNumIntIds; ++global_intid) {
-    if (!spi_candidate(global_intid, pmr)) {
-      continue;
-    }
-    intid = global_intid;
-    set_spi_pending_bit(global_intid, false);
-    set_spi_active_bit(global_intid, true);
-    return true;
+  if (is_local_intid(intid)) {
+    set_local_pending_bit(cpu_index, intid, false);
+    set_local_active_bit(cpu_index, intid, true);
+  } else {
+    set_spi_pending_bit(intid, false);
+    set_spi_active_bit(intid, true);
   }
-  intid = 1023u;
-  return false;
+  return true;
 }
 
 void GicV3::eoi(std::size_t cpu_index, std::uint32_t intid) {
