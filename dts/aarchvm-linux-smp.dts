@@ -72,6 +72,14 @@
 		status = "okay";
 	};
 
+	rtc@9030000 {
+		compatible = "arm,pl031", "arm,primecell";
+		reg = <0x0 0x09030000 0x0 0x00001000>;
+		clocks = <&apb_pclk>;
+		clock-names = "apb_pclk";
+		status = "okay";
+	};
+
 	intc: interrupt-controller@8000000 {
 		compatible = "arm,gic-v3";
 		reg = <0x0 0x08000000 0x0 0x00010000>,

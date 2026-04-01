@@ -143,6 +143,7 @@ SoC::SoC(std::size_t cpu_count)
           .request_exit = [this]() { request_stop(); },
           .flush_tlb = [this]() { perf_flush_tlb(); },
       })),
+      rtc_(std::make_shared<RtcPl031>()),
       block_mmio_(std::make_shared<BlockMmio>(bus_)),
       gic_(std::make_shared<GicV3>()),
       timer_(std::make_shared<GenericTimer>()) {
@@ -162,6 +163,7 @@ SoC::SoC(std::size_t cpu_count)
   bus_.map(kUartBase, kUartSize, uart_);
   bus_.map(kKmiBase, kKmiSize, kmi_);
   bus_.map(kPerfBase, kPerfSize, perf_mailbox_);
+  bus_.map(kRtcBase, kRtcSize, rtc_);
   bus_.map(kBlockBase, kBlockSize, block_mmio_);
   bus_.map(kGicBase, kGicSize, gic_);
   bus_.map(kTimerBase, kTimerSize, timer_);
@@ -1304,7 +1306,7 @@ bool SoC::save_snapshot(const std::string& path) const {
     return false;
   }
   static constexpr char kMagic[8] = {'A', 'A', 'R', 'C', 'H', 'S', 'N', 'P'};
-  static constexpr std::uint32_t kVersion = 22;
+  static constexpr std::uint32_t kVersion = 23;
   const std::uint32_t snapshot_cpu_count = static_cast<std::uint32_t>(cpus_.size());
   out.write(kMagic, sizeof(kMagic));
   if (!out ||
@@ -1344,7 +1346,8 @@ bool SoC::save_snapshot(const std::string& path) const {
       !snapshot_io::write(out, snapshot_perf_session.arg0) ||
       !snapshot_io::write(out, snapshot_perf_session.arg1) ||
       !snapshot_io::write(out, snapshot_perf_session.accumulated_host_ns) ||
-      !snapshot_io::write(out, snapshot_perf_session.accumulated)) {
+      !snapshot_io::write(out, snapshot_perf_session.accumulated) ||
+      !rtc_->save_state(out)) {
     return false;
   }
   return static_cast<bool>(out);
@@ -1372,7 +1375,8 @@ bool SoC::load_snapshot(const std::string& path) {
       (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 &&
       version != 7 && version != 8 && version != 9 && version != 10 && version != 11 && version != 12 &&
       version != 13 && version != 14 && version != 15 && version != 16 && version != 17 &&
-      version != 18 && version != 19 && version != 20 && version != 21 && version != 22) ||
+      version != 18 && version != 19 && version != 20 && version != 21 && version != 22 &&
+      version != 23) ||
       boot_ram_base != kBootRamBase || boot_ram_size != kBootRamSize ||
       sdram_base != kSdramBase || sdram_size != kSdramSize ||
       !snapshot_io::read(in, timer_tick_scale_)) {
@@ -1470,6 +1474,13 @@ bool SoC::load_snapshot(const std::string& path) {
         !snapshot_io::read(in, restored_perf_session.accumulated)) {
       return false;
     }
+  }
+  if (version >= 23) {
+    if (!rtc_->load_state(in)) {
+      return false;
+    }
+  } else {
+    rtc_->reset();
   }
 
   for (std::size_t i = 0; i < cpus_.size(); ++i) {

@@ -42,6 +42,9 @@ aarch64-linux-gnu-gcc -O2 -static -Wall -Wextra -pthread -march=armv8-a -mno-out
 aarch64-linux-gnu-gcc -O2 -static -Wall -Wextra -march=armv8-a -mno-outline-atomics -fno-tree-vectorize -fno-tree-slp-vectorize \
   -o out/mprotect_exec_stress tests/linux/mprotect_exec_stress.c
 
+aarch64-linux-gnu-gcc -O2 -static -Wall -Wextra -march=armv8-a -mno-outline-atomics -fno-tree-vectorize -fno-tree-slp-vectorize \
+  -o out/rtc_smoke tests/linux/rtc_smoke.c
+
 if [[ ! -d out/initramfs-full-root ]]; then
   echo "missing out/initramfs-full-root; build the full busybox rootfs first" >&2
   exit 1
@@ -62,6 +65,7 @@ cp out/poll_pipe_tty_affine out/initramfs-usertests-root/bin/poll_pipe_tty_affin
 cp out/read_tty_spin_affine out/initramfs-usertests-root/bin/read_tty_spin_affine
 cp out/pthread_sync_stress out/initramfs-usertests-root/bin/pthread_sync_stress
 cp out/mprotect_exec_stress out/initramfs-usertests-root/bin/mprotect_exec_stress
+cp out/rtc_smoke out/initramfs-usertests-root/bin/rtc_smoke
 
 cat > out/initramfs-usertests-root/init <<'EOS'
 #!/bin/sh
@@ -174,6 +178,10 @@ dmesg -s 128 >/dev/null
 echo DMESG-OK
 dmesg | grep hang >/dev/null || true
 echo GREP-HANG-OK
+ls /sys/class/rtc
+cat /sys/class/rtc/rtc0/name
+cat /sys/class/rtc/rtc0/since_epoch
+/bin/rtc_smoke
 /bin/run_dmesg_stress_check
 /bin/mprotect_exec_stress
 ping -c 1 127.0.0.1 || true
@@ -198,6 +206,9 @@ while [ "$i" -le 3 ]; do
   df
   cat /proc/cpuinfo
   /bin/busybox ls /bin >/dev/null
+  ls /sys/class/rtc >/dev/null
+  cat /sys/class/rtc/rtc0/since_epoch >/dev/null
+  /bin/rtc_smoke
   ping -c 1 127.0.0.1 || true
   /bin/pthread_sync_stress
   /bin/mprotect_exec_stress
@@ -221,6 +232,7 @@ chmod 0755 \
   out/initramfs-usertests-root/bin/read_tty_spin_affine \
   out/initramfs-usertests-root/bin/pthread_sync_stress \
   out/initramfs-usertests-root/bin/mprotect_exec_stress \
+  out/initramfs-usertests-root/bin/rtc_smoke \
   out/initramfs-usertests-root/bin/run_dmesg_stress_check \
   out/initramfs-usertests-root/bin/run_usertests \
   out/initramfs-usertests-root/bin/run_functional_suite \

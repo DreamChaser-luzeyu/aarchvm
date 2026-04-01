@@ -6135,3 +6135,60 @@
   - `FP/AdvSIMD` 里 `DN/FZ/NaN/payload/flags` 的一致性尾差；
   - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 尚未逐类完全枚举覆盖的剩余异常；
   - `SMP` 下 barrier / exclusive / fault 交错时的程序可见边界。
+
+# 修改日志 2026-04-01 16:15
+
+## 本轮修改
+
+- 为 SoC 新增了宿主一致的 `PL031` 风格 RTC 设备，并接入现有 MMIO / snapshot 框架：
+  - [include/aarchvm/rtc_pl031.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/rtc_pl031.hpp)
+  - [src/rtc_pl031.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/rtc_pl031.cpp)
+  - [include/aarchvm/soc.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/soc.hpp)
+  - [src/soc.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/soc.cpp)
+- 当前 RTC 实现提供：
+  - `DR/MR/LR/CR/IMSC/RIS/MIS/ICR`
+  - PrimeCell `PeriphID/PCellID`
+  - 宿主 `CLOCK_REALTIME` 驱动的秒级 wall-clock 语义
+  - guest 写 `LR` 时通过 `offset_seconds` 维护 guest-visible RTC 时间
+  - snapshot 保存 / 恢复 RTC 设备状态，SoC 快照版本升到 `23`
+- 为 Linux DT 补充了 RTC 节点，使内核可直接加载 `rtc-pl031`：
+  - [dts/aarchvm-current.dts](/media/luzeyu/Storage2/FOSS_src/aarchvm/dts/aarchvm-current.dts)
+  - [dts/aarchvm-linux-min.dts](/media/luzeyu/Storage2/FOSS_src/aarchvm/dts/aarchvm-linux-min.dts)
+  - [dts/aarchvm-linux-smp.dts](/media/luzeyu/Storage2/FOSS_src/aarchvm/dts/aarchvm-linux-smp.dts)
+- 调整了 Linux snapshot 构建脚本，在所用 `.dts` 更新后自动重建对应 `.dtb`：
+  - [tests/linux/build_linux_shell_snapshot.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/build_linux_shell_snapshot.sh)
+- 新增 Linux 用户态 RTC 冒烟程序，并并入统一 initramfs / 功能回归：
+  - [tests/linux/rtc_smoke.c](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/rtc_smoke.c)
+  - [tests/linux/build_usertests_rootfs.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/build_usertests_rootfs.sh)
+  - [tests/linux/run_functional_suite.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/run_functional_suite.sh)
+  - [tests/linux/run_functional_suite_smp.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/run_functional_suite_smp.sh)
+- 同步更新了项目文档与 TODO：
+  - [README.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/README.md)
+  - [doc/README.en.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/README.en.md)
+  - [doc/README.zh.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/README.zh.md)
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+
+## 本轮测试
+
+- 编译与 rootfs：
+  - `timeout 1800s cmake --build build -j`
+  - `timeout 1800s ./tests/linux/build_usertests_rootfs.sh`
+- Linux 单核冷启动 / snapshot 构建：
+  - `timeout 1800s ./tests/linux/build_linux_shell_snapshot.sh`
+- Linux 单核功能回归：
+  - `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- 裸机完整回归：
+  - `timeout 5400s ./tests/arm64/run_all.sh`
+- Linux SMP 功能回归：
+  - `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- Linux 已能稳定识别新的 RTC 设备，functional log 中可见：
+  - `rtc-pl031 9030000.rtc: registered as rtc0`
+  - `/sys/class/rtc/rtc0` 枚举成功
+  - 用户态 `rtc_smoke` 已验证 `/dev/rtc0` 的读时、设时、恢复三条路径
+- 这轮修改没有破坏裸机完整回归、Linux 单核功能回归、Linux SMP 功能回归。
+- 当前 RTC 仍是第一阶段实现：
+  - 已具备 Linux 可见的 wall-clock / set-time / snapshot 基础闭环；
+  - 尚未接入 GIC alarm IRQ，也还没有 `frozen/mock` 等确定性时钟模式。

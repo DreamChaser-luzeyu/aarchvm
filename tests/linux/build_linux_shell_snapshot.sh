@@ -37,7 +37,30 @@ print_cmd() {
   printf '\n'
 }
 
+ensure_linux_dtb() {
+  local dtb="$1"
+  local dts="${dtb%.dtb}.dts"
+  local dtc_bin=""
+
+  if [[ ! -f "$dtb" || ( -f "$dts" && "$dts" -nt "$dtb" ) ]]; then
+    if [[ ! -f "$dts" ]]; then
+      echo "missing DTS source for DTB: $dtb" >&2
+      exit 1
+    fi
+    if command -v dtc >/dev/null 2>&1; then
+      dtc_bin=dtc
+    elif [[ -x linux-6.12.76/build-aarchvm/scripts/dtc/dtc ]]; then
+      dtc_bin=linux-6.12.76/build-aarchvm/scripts/dtc/dtc
+    else
+      echo "missing dtc; cannot rebuild $dtb" >&2
+      exit 1
+    fi
+    timeout 120s "$dtc_bin" -I dts -O dtb -o "$dtb" "$dts"
+  fi
+}
+
 mkdir -p "$(dirname "$SNAPSHOT")" "$(dirname "$LOG")" "$(dirname "$VERIFY_LOG")"
+ensure_linux_dtb "$LINUX_DTB"
 rm -f "$SNAPSHOT"
 SNAPSHOT_OK=0
 cleanup() {

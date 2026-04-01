@@ -69,7 +69,7 @@ Optional for the 2-core SMP / GUI path:
 The following paths are currently implemented and exercised by in-tree regression flows:
 - Single-core AArch64 EL1 interpreter execution.
 - Same-thread round-robin SMP execution, currently validated for `-smp 2`.
-- Current Linux-facing platform path: low boot RAM alias, 1 GiB SDRAM, PL011 UART, Generic Timer, minimal GICv3, SDL framebuffer, PL050 KMI keyboard, and perf mailbox.
+- Current Linux-facing platform path: low boot RAM alias, 1 GiB SDRAM, PL011 UART, PL031 RTC, Generic Timer, minimal GICv3, SDL framebuffer, PL050 KMI keyboard, and perf mailbox.
 - Minimal synchronous exception loop with `ESR_EL1`, `FAR_EL1`, `ELR_EL1`, and `SPSR_EL1`.
 - Minimal MMU/TLB behavior required by early Linux page-table bring-up.
 - U-Boot serial boot and Linux hand-off via `booti`.
@@ -77,6 +77,7 @@ The following paths are currently implemented and exercised by in-tree regressio
 - Interactive BusyBox shell over serial.
 - SDL framebuffer output visible to U-Boot and Linux `simpledrm` / `fbcon`.
 - PL050 KMI keyboard device recognized by Linux through `CONFIG_SERIO_AMBAKMI` + `CONFIG_KEYBOARD_ATKBD`.
+- Host-backed PL031 RTC recognized by Linux through `rtc-pl031`, with `/sys/class/rtc/rtc0` enumeration and read/set smoke coverage in the Linux functional suites.
 - Full-machine snapshot save / restore.
 - In-tree bare-metal regression, Linux functional regression, and Linux algorithm/perf regression suites.
 - Linux SMP smoke bring-up through PSCI secondary boot to BusyBox shell, with user space observing 2 CPUs in `/proc/cpuinfo`.
@@ -95,6 +96,7 @@ Automatic Linux regression runs intentionally use the serial-only path and expli
 The current repository includes and uses the following device / platform pieces:
 - low boot RAM alias plus 1 GiB SDRAM
 - PL011 UART
+- PL031 RTC
 - ARM Generic Timer system-register path
 - Minimal GICv3 distributor / redistributor / CPU-interface path
 - perf mailbox MMIO block used by the Linux perf / benchmark helpers

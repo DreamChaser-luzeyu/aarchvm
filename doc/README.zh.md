@@ -69,7 +69,7 @@ cmake --build build -j
 当前仓库已经实际跑通并回归过的路径包括：
 - 单核 AArch64 EL1 解释执行。
 - 同线程 round-robin 的 SMP 执行路径，当前已验证 `-smp 2`。
-- 当前 Linux 启动平台路径：低地址 boot RAM 映射、1 GiB SDRAM、PL011 UART、Generic Timer、最小 GICv3、SDL framebuffer、PL050 KMI 键盘，以及 perf mailbox。
+- 当前 Linux 启动平台路径：低地址 boot RAM 映射、1 GiB SDRAM、PL011 UART、PL031 RTC、Generic Timer、最小 GICv3、SDL framebuffer、PL050 KMI 键盘，以及 perf mailbox。
 - 最小同步异常闭环：`ESR_EL1`、`FAR_EL1`、`ELR_EL1`、`SPSR_EL1`。
 - Linux 早期页表所需的最小 MMU/TLB 路径。
 - U-Boot 串口启动与 `booti` 引导 Linux。
@@ -77,6 +77,7 @@ cmake --build build -j
 - BusyBox 交互式串口 shell。
 - SDL framebuffer 输出路径，可显示 U-Boot 与 Linux `simpledrm` / `fbcon` 图像。
 - PL050 KMI 键盘设备，Linux 侧可由 `CONFIG_SERIO_AMBAKMI` + `CONFIG_KEYBOARD_ATKBD` 驱动识别。
+- 宿主一致的 PL031 RTC，Linux 侧可由 `rtc-pl031` 识别，且 Linux 功能回归已覆盖 `/sys/class/rtc/rtc0` 枚举与读写冒烟。
 - 整机 snapshot 保存 / 恢复。
 - 仓库内裸机回归、Linux 功能回归、Linux 算法/性能回归。
 - Linux SMP 冒烟路径：通过 PSCI 启动次级核，进入 BusyBox shell，用户态 `/proc/cpuinfo` 可见 2 个 CPU。
@@ -95,6 +96,7 @@ cmake --build build -j
 当前已经实现并在实际启动路径中使用的外设 / 机制包括：
 - 低地址 boot RAM 映射与 1 GiB SDRAM
 - PL011 UART
+- PL031 RTC
 - ARM Generic Timer 系统寄存器路径
 - 最小 GICv3 分发器 / redistributor / CPU 接口路径
 - Linux perf / benchmark helper 使用的 perf mailbox MMIO

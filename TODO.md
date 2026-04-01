@@ -1093,11 +1093,11 @@
   - 首版不进 `BusFastPath`。
 
 设计判断：
-- [ ] 首选做一个 `PL031` 风格的 RTC，而不是自定义奇特寄存器协议。
+- [x] 首选做一个 `PL031` 风格的 RTC，而不是自定义奇特寄存器协议。
   - 原因：这和当前 `PL011/PL050/GICv3/simple-framebuffer` 的风格最一致；
   - Linux / U-Boot 都更容易直接复用已有驱动；
   - 设备职责清晰，就是“宿主一致的 wall clock / RTC”，不承担高频 timer tick 职责。
-- [ ] 明确把“宿主一致 wall clock”与“架构定时器 / guest 时间”分层：
+- [x] 明确把“宿主一致 wall clock”与“架构定时器 / guest 时间”分层：
   - `GenericTimer` 继续只表示 guest 可控、可回放的架构计数器；
   - 新 RTC 只负责日期/时间-of-day；
   - 不把 Linux scheduler、delay loop、clocksource 直接迁移到该 RTC。
@@ -1137,14 +1137,14 @@
 
 任务：
 - [ ] 新增 `HostRtcPl031 final : public Device`，接口只暴露标准 `read/write`。
-- [ ] SoC 为它分配固定 MMIO 窗口，建议复用当前空洞地址：
+- [x] SoC 为它分配固定 MMIO 窗口，建议复用当前空洞地址：
   - `base = 0x09030000`
   - `size = 0x1000`
-- [ ] 首版只走 bus 慢路径，不放进 `BusFastPath`：
+- [x] 首版只走 bus 慢路径，不放进 `BusFastPath`：
   - RTC 访问频率低；
   - 读路径可能调用宿主机时间 API；
   - 没必要把这类低频、强外部依赖设备塞进热路径。
-- [ ] DT 风格优先采用标准节点：
+- [x] DT 风格优先采用标准节点：
   - `compatible = "arm,pl031", "arm,primecell"`
   - `reg = <...>`
   - `interrupts = <...>` 作为后续 alarm 扩展保留
@@ -1164,7 +1164,7 @@
 - 把 guest 可见寄存器布局写成实现时几乎可直接照着落地的程度。
 
 任务：
-- [ ] 约定首版寄存器布局如下：
+- [x] 约定首版寄存器布局如下：
   - `0x000 DR`：Data Register，`RO`，返回当前 guest-visible RTC 秒值的低 32 位。
   - `0x004 MR`：Match Register，`RW`，保存 alarm compare 秒值。
   - `0x008 LR`：Load Register，`RW`，写入时重设 guest-visible 当前秒值；读取返回最近一次写入值。
@@ -1231,7 +1231,7 @@
 - 把读写 RTC 时的数值语义写成明确公式。
 
 任务：
-- [ ] 默认 `realtime` 模式下定义：
+- [x] 默认 `realtime` 模式下定义：
   - `host_now_sec = floor(CLOCK_REALTIME_ns / 1_000_000_000)`
   - `guest_rtc_sec = host_now_sec + offset_seconds`
 - [ ] `DR` 读取返回：
@@ -1297,7 +1297,7 @@
 - [ ] 明确 snapshot 不保存哪些状态：
   - 宿主机绝对时间值本身
   - “保存快照时的 host realtime 秒数”
-- [ ] `load_state()` 时重新采样当前宿主时间，并按保存下来的 offset 重建 guest-visible RTC。
+- [x] `load_state()` 时重新采样当前宿主时间，并按保存下来的 offset 重建 guest-visible RTC。
 - [ ] 文档中显式声明：
   - 这是一个“非严格可重放”的外设；
   - 恢复旧快照后，RTC 读数会跳到“当前宿主时间 + 已保存 offset”，而不是回到保存快照那一刻。
@@ -1348,7 +1348,7 @@
 - 让该外设能自然接入现有 SoC/GIC/事件驱动风格，但不一次把复杂度全拉满。
 
 任务：
-- [ ] 第一阶段先做“可读、可设时、可快照”的 RTC，本身不作为高频事件源。
+- [x] 第一阶段先做“可读、可设时、可快照”的 RTC，本身不作为高频事件源。
 - [ ] 第二阶段再补 `PL031` alarm / match / IRQ：
   - `MIS/RIS/ICR`
   - GIC line
@@ -1444,7 +1444,7 @@
   - 设备节点可枚举；
   - MMIO 读 `DR` 有合理秒值；
   - 如 U-Boot 已启用 RTC 命令，可额外验证 `date` / `rtc` 相关命令。
-- [ ] Linux 侧验证：
+- [x] Linux 侧验证：
   - `/sys/class/rtc/rtc0/` 出现；
   - `cat /sys/class/rtc/rtc0/since_epoch` 或 `hwclock -r` 能读到接近宿主的秒值；
   - `date -u +%s` 与 host 对比误差在预期范围内。
@@ -1480,7 +1480,7 @@
   - `offset_seconds` 语义
   - `save_state/load_state`
   - 裸机 MMIO 单元测试
-- [ ] 第二阶段：补齐 PL031 基础寄存器可见面
+- [x] 第二阶段：补齐 PL031 基础寄存器可见面
   - `MR/IMSC/RIS/MIS/ICR`
   - PrimeCell ID
   - DTS 节点与 Linux 枚举
@@ -1504,7 +1504,7 @@
   - 写 `LR` 后 `DR` 立即贴近写入值；
   - 写过去/未来时间都能正确更新 `offset_seconds`；
   - snapshot 恢复后 `DR` 前跳但保持先前设定偏移。
-- [ ] Linux 用户态测试：
+- [x] Linux 用户态测试：
   - `hwclock -r` / `cat /sys/class/rtc/rtc0/since_epoch`
   - 与宿主 `date +%s` 做秒级容差比较
   - 写 RTC 后再次读取，验证 guest-visible offset 生效
