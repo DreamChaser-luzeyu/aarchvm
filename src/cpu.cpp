@@ -7949,6 +7949,46 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     qregs_[rd] = dst;
     return true;
   }
+
+  {
+    const std::uint32_t tag = insn & 0xBF20FC00u;
+    if (tag == 0x0E204000u || tag == 0x2E204000u ||
+        tag == 0x0E206000u || tag == 0x2E206000u) { // ADDHN/RADDHN/SUBHN/RSUBHN and *2 variants
+      const bool upper_half = ((insn >> 30) & 1u) != 0u;
+      const bool is_rounded = ((insn >> 29) & 1u) != 0u;
+      const bool is_subtract = (insn & 0x00002000u) != 0u;
+      const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+      const std::uint32_t size = (insn >> 22) & 0x3u;
+      const std::uint32_t src_esize_bits = 16u << size;
+      if (src_esize_bits < 16u || src_esize_bits > 64u) {
+        return false;
+      }
+      const std::uint32_t dst_esize_bits = src_esize_bits / 2u;
+      const std::uint32_t lanes = 64u / dst_esize_bits;
+      const std::uint64_t src_mask = ones(src_esize_bits);
+      const std::uint64_t dst_mask = ones(dst_esize_bits);
+      const std::uint64_t rounding = is_rounded ? (1ull << (dst_esize_bits - 1u)) : 0u;
+      const auto lhs = qregs_[rn];
+      const auto rhs = qregs_[rm];
+      auto dst = upper_half ? qregs_[rd] : std::array<std::uint64_t, 2>{0, 0};
+      const std::uint32_t dst_base = upper_half ? lanes : 0u;
+      for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+        std::uint64_t value = 0;
+        const std::uint64_t a = vector_get_elem(lhs, src_esize_bits, lane);
+        const std::uint64_t b = vector_get_elem(rhs, src_esize_bits, lane);
+        if (is_subtract) {
+          value = a - b;
+        } else {
+          value = a + b;
+        }
+        value = (value + rounding) & src_mask;
+        vector_set_elem(dst, dst_esize_bits, dst_base + lane, (value >> dst_esize_bits) & dst_mask);
+      }
+      qregs_[rd] = dst;
+      return true;
+    }
+  }
+
   if ((insn & 0x9F80FC00u) == 0x0E004800u) { // SQXTN/UQXTN and *2 variants
     const bool is_unsigned = ((insn >> 29) & 1u) != 0u;
     const bool upper_half = ((insn >> 30) & 1u) != 0u;

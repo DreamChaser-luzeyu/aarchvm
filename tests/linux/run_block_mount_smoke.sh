@@ -60,7 +60,7 @@ setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 rdinit=/init in
 booti 0x40400000 0x46000000:${INITRD_SIZE_HEX} ${DTB_ADDR}
 EOC
 )
-SHELL_CMDS=$'/bin/busybox mkdir -p /mnt/debian\n/bin/busybox mount -t ext4 -o ro /dev/vda /mnt/debian\n/bin/busybox test -d /mnt/debian/bin && echo ROOTFS-BIN-OK\n/bin/busybox test -f /mnt/debian/etc/debian_version && echo ROOTFS-DEBIAN-VERSION-OK\n/bin/busybox cat /mnt/debian/etc/debian_version\necho BLOCK-MOUNT PASS\n'
+SHELL_CMDS=$'/bin/busybox mkdir -p /mnt/debian\n/bin/busybox mount -t ext4 -o ro /dev/vda /mnt/debian\n/bin/busybox test -d /mnt/debian/bin && echo ROOTFS-BIN-OK\n/bin/busybox test -f /mnt/debian/etc/debian_version && echo ROOTFS-DEBIAN-VERSION-OK\n/bin/busybox cat /mnt/debian/etc/debian_version\n/bin/busybox chroot /mnt/debian /bin/sh -c "echo CHROOT-OK"\necho BLOCK-MOUNT PASS\n'
 
 AARCHVM_CMD=(
   ./build/aarchvm
@@ -115,6 +115,12 @@ check 'virtio_blk virtio0'
 check '[vda]'
 check 'ROOTFS-BIN-OK'
 check 'ROOTFS-DEBIAN-VERSION-OK'
+check 'CHROOT-OK'
 check 'BLOCK-MOUNT PASS'
+if grep -aFq 'Illegal instruction' "$CLEAN_LOG"; then
+  echo 'unexpected illegal instruction in block mount smoke' >&2
+  tail -n 160 "$CLEAN_LOG" >&2
+  exit 1
+fi
 
 printf 'linux block mount smoke passed\nlog: %s\nimage: %s\n' "$LOG" "$IMAGE_PATH"

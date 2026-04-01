@@ -6508,3 +6508,43 @@
 
 - 这轮仍未发现新的执行语义 bug，但又补齐了一块此前没有强断言锁住的异常面：`EL0` lower-EL instruction abort。
 - 目前异常/系统寄存器/MMU 这条线的剩余风险已明显收缩到更细碎的 syndrome 角落、SMP 内存模型和更长时程 Linux 压力交互，而不再是明显缺失的基础异常分类。
+
+# 修改日志 2026-04-02 01:03
+
+## 本轮修改
+
+- 修复 Debian rootfs 中执行 `chroot` 触发 `Illegal instruction` 的问题，根因并非 `chroot` 系统调用或块设备访问异常，而是动态链接器 `ld-linux-aarch64.so.1` 在启动 `/bin/sh` 时执行了此前未实现的 AdvSIMD `ADDHN/RADDHN/SUBHN/RSUBHN` 家族指令。
+- 在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 补齐以下程序可见语义：
+  - `ADDHN`
+  - `RADDHN`
+  - `SUBHN`
+  - `RSUBHN`
+  - `ADDHN2`
+  - `RADDHN2`
+  - `SUBHN2`
+  - `RSUBHN2`
+- 新增裸机回归 [tests/arm64/fpsimd_addhn_family.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_addhn_family.S)，覆盖：
+  - 16->8、32->16、64->32 三种缩窄宽度
+  - 加法、带舍入加法、减法、带舍入减法
+  - `*2` 上半区写回语义
+- 将新用例接入：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 强化 Linux 块设备 smoke [tests/linux/run_block_mount_smoke.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/run_block_mount_smoke.sh)，现在会实际执行：
+  - `/bin/busybox chroot /mnt/debian /bin/sh -c "echo CHROOT-OK"`
+  - 并显式检查日志中不存在 `Illegal instruction`
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j4`
+- `timeout 1800s ./tests/arm64/build_tests.sh`
+- `timeout 120s ./build/aarchvm -bin tests/arm64/out/fpsimd_addhn_family.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 2400s ./tests/linux/run_functional_suite.sh`
+- `timeout 3000s ./tests/linux/run_functional_suite_smp.sh`
+- `timeout 2400s ./tests/linux/run_block_mount_smoke.sh`
+
+## 当前结论
+
+- `chroot` 的 `SIGILL` 已修复，Debian rootfs 内的 `/bin/sh` 现在能够在 guest 中正常由动态链接器拉起。
+- 这次问题暴露的是 AdvSIMD 缩窄高半算术家族的真实语义缺口；补齐后，裸机回归与 Linux UMP/SMP 回归均通过。
