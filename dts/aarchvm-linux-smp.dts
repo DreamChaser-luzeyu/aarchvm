@@ -66,11 +66,14 @@
 		status = "okay";
 	};
 
-	blk@9040000 {
-		compatible = "aarchvm,mmio-blk";
-		reg = <0x0 0x09040000 0x0 0x00001000>;
-		status = "okay";
-	};
+		virtio_block@9040000 {
+			compatible = "virtio,mmio";
+			reg = <0x0 0x09040000 0x0 0x00001000>;
+			interrupt-parent = <&intc>;
+			interrupts = <0 3 4>;
+			dma-coherent;
+			status = "okay";
+		};
 
 	rtc@9030000 {
 		compatible = "arm,pl031", "arm,primecell";

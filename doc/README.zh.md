@@ -69,7 +69,7 @@ cmake --build build -j
 当前仓库已经实际跑通并回归过的路径包括：
 - 单核 AArch64 EL1 解释执行。
 - 同线程 round-robin 的 SMP 执行路径，当前已验证 `-smp 2`。
-- 当前 Linux 启动平台路径：低地址 boot RAM 映射、1 GiB SDRAM、PL011 UART、PL031 RTC、Generic Timer、最小 GICv3、SDL framebuffer、PL050 KMI 键盘，以及 perf mailbox。
+- 当前 Linux 启动平台路径：低地址 boot RAM 映射、1 GiB SDRAM、PL011 UART、PL031 RTC、Generic Timer、最小 GICv3、SDL framebuffer、PL050 KMI 键盘、virtio-mmio 块设备，以及 perf mailbox。
 - 最小同步异常闭环：`ESR_EL1`、`FAR_EL1`、`ELR_EL1`、`SPSR_EL1`。
 - Linux 早期页表所需的最小 MMU/TLB 路径。
 - U-Boot 串口启动与 `booti` 引导 Linux。
@@ -78,6 +78,7 @@ cmake --build build -j
 - SDL framebuffer 输出路径，可显示 U-Boot 与 Linux `simpledrm` / `fbcon` 图像。
 - PL050 KMI 键盘设备，Linux 侧可由 `CONFIG_SERIO_AMBAKMI` + `CONFIG_KEYBOARD_ATKBD` 驱动识别。
 - 宿主一致的 PL031 RTC，Linux 侧可由 `rtc-pl031` 识别，且 Linux 功能回归已覆盖 `/sys/class/rtc/rtc0` 枚举与读写冒烟。
+- 标准 Linux `virtio-mmio + virtio-blk` 原始磁盘路径，已通过 `/dev/vda` 枚举与只读 Debian ext4 挂载冒烟验证。
 - 整机 snapshot 保存 / 恢复。
 - 仓库内裸机回归、Linux 功能回归、Linux 算法/性能回归。
 - Linux SMP 冒烟路径：通过 PSCI 启动次级核，进入 BusyBox shell，用户态 `/proc/cpuinfo` 可见 2 个 CPU。
@@ -103,7 +104,7 @@ cmake --build build -j
 - `simple-framebuffer` 对应的 framebuffer RAM 区域
 - SDL 窗口后端，用于把 framebuffer 内容显示到宿主机窗口
 - PL050 KMI 键盘控制器
-- 可通过 `-drive` 挂载、并支持快照保存/恢复的 MMIO 块设备（`aarchvm,mmio-blk`），当前仍比串口/GUI 主路径更偏实验性
+- 标准 `virtio,mmio` 传输层和其后的 `virtio-blk` 设备，可通过 `-drive` 挂载原始镜像
 - 整机 snapshot
 
 与 Linux GUI 路径相关的设备树节点已经在以下文件中提供：
@@ -113,7 +114,7 @@ cmake --build build -j
 其中包括：
 - `simple-framebuffer`
 - `arm,pl050` / `arm,primecell`
-- `aarchvm,mmio-blk`
+- `virtio,mmio`
 
 ## 工具链版本
 
@@ -214,7 +215,11 @@ linux-6.12.76/scripts/config --file linux-6.12.76/build-aarchvm/.config \
   --enable VT_CONSOLE \
   --enable FB \
   --enable DRM_SIMPLEDRM \
-  --enable FRAMEBUFFER_CONSOLE
+  --enable FRAMEBUFFER_CONSOLE \
+  --enable VIRTIO \
+  --enable VIRTIO_MMIO \
+  --enable VIRTIO_BLK \
+  --enable EXT4_FS
 
 make -C linux-6.12.76 \
   O=build-aarchvm \
@@ -284,6 +289,23 @@ mkdir -p out/initramfs-full-root/{dev,proc,sys,tmp,run,root,mnt,etc}
 - 生成 `out/initramfs-usertests.cpio.gz`
 - 在 `/init` 中根据命令行参数选择进入 shell、功能测试或性能测试
 
+### 7. 为块设备冒烟构建 Debian ext4 镜像
+
+```bash
+./tests/linux/build_debian_rootfs_image.sh
+```
+
+该脚本现在会优先使用本机 `debootstrap`；若本机不可用，再回退到 Docker 导出。
+当以非 root 身份运行且宿主机存在 `fakeroot` 时，脚本会自动用 `fakeroot` 包裹 `debootstrap`。
+默认的 `debootstrap` 路径使用 `--foreign`，目标是块设备挂载/检查冒烟，而不是直接启动 Debian `init`。
+
+常用环境变量：
+- `AARCHVM_DEBIAN_ROOTFS_SOURCE=auto|debootstrap|docker`
+- `AARCHVM_DEBIAN_SUITE=<suite>`
+- `AARCHVM_DEBIAN_ARCH=<arch>`
+- `AARCHVM_DEBIAN_MIRROR=<mirror>`
+- `AARCHVM_DEBIAN_VARIANT=<variant>`
+
 ## 运行
 
 ### 1. 运行最小示例
@@ -312,7 +334,7 @@ mkdir -p out/initramfs-full-root/{dev,proc,sys,tmp,run,root,mnt,etc}
 - `-segment <file@addr>`：装载额外镜像段
 - `-snapshot-save <file>`：运行结束保存整机快照
 - `-snapshot-load <file>`：从整机快照恢复
-- `-drive <image.bin>`：把原始镜像挂到 MMIO 块设备上
+- `-drive <image.bin>`：把原始镜像挂到标准 `virtio-mmio + virtio-blk` 设备上
 - `-stop-on-uart <text>`：UART 输出命中特定字符串时立即停止
 - `-decode <fast|slow>`：切换解码执行路径，默认使用快路径
 - `-fb-sdl <on|off>`：显式打开或关闭 SDL framebuffer 窗口
@@ -449,15 +471,19 @@ console=ttyAMA0,115200 console=tty1 earlycon=pl011,0x09000000 rdinit=/init initr
 - `tests/linux/build_usertests_rootfs.sh`
 - `tests/linux/build_linux_shell_snapshot.sh`
 - `tests/linux/build_linux_smp_shell_snapshot.sh`
+- `tests/linux/build_debian_rootfs_image.sh`
 - `tests/linux/run_interactive.sh`
 - `tests/linux/run_functional_suite.sh`
 - `tests/linux/run_algorithm_perf.sh`
 - `tests/linux/run_functional_suite_smp.sh`
+- `tests/linux/run_block_mount_smoke.sh`
 - `tests/linux/run_gui_tty1.sh`
 - `tests/linux/run_gui_tty1_from_snapshot.sh`
 
 其中：
 - `build_linux_shell_snapshot.sh`、`build_linux_smp_shell_snapshot.sh`、`run_functional_suite.sh`、`run_algorithm_perf.sh`、`run_functional_suite_smp.sh` 面向自动化，默认串口路径
+- `build_debian_rootfs_image.sh` 用于为块设备路径准备 Debian ext4 镜像
+- `run_block_mount_smoke.sh` 会冷启动 Linux、挂载 `/dev/vda`，并检查 Debian rootfs 是否可见
 - `run_interactive.sh` 是最快的手工串口 shell 恢复入口
 - `run_gui_tty1.sh` 和 `run_gui_tty1_from_snapshot.sh` 面向手工 GUI 验证 / 恢复
 

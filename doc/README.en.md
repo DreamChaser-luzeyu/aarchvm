@@ -69,7 +69,7 @@ Optional for the 2-core SMP / GUI path:
 The following paths are currently implemented and exercised by in-tree regression flows:
 - Single-core AArch64 EL1 interpreter execution.
 - Same-thread round-robin SMP execution, currently validated for `-smp 2`.
-- Current Linux-facing platform path: low boot RAM alias, 1 GiB SDRAM, PL011 UART, PL031 RTC, Generic Timer, minimal GICv3, SDL framebuffer, PL050 KMI keyboard, and perf mailbox.
+- Current Linux-facing platform path: low boot RAM alias, 1 GiB SDRAM, PL011 UART, PL031 RTC, Generic Timer, minimal GICv3, SDL framebuffer, PL050 KMI keyboard, virtio-mmio block, and perf mailbox.
 - Minimal synchronous exception loop with `ESR_EL1`, `FAR_EL1`, `ELR_EL1`, and `SPSR_EL1`.
 - Minimal MMU/TLB behavior required by early Linux page-table bring-up.
 - U-Boot serial boot and Linux hand-off via `booti`.
@@ -78,6 +78,7 @@ The following paths are currently implemented and exercised by in-tree regressio
 - SDL framebuffer output visible to U-Boot and Linux `simpledrm` / `fbcon`.
 - PL050 KMI keyboard device recognized by Linux through `CONFIG_SERIO_AMBAKMI` + `CONFIG_KEYBOARD_ATKBD`.
 - Host-backed PL031 RTC recognized by Linux through `rtc-pl031`, with `/sys/class/rtc/rtc0` enumeration and read/set smoke coverage in the Linux functional suites.
+- Standard Linux `virtio-mmio + virtio-blk` raw disk path, validated through `/dev/vda` enumeration plus a read-only Debian ext4 mount smoke.
 - Full-machine snapshot save / restore.
 - In-tree bare-metal regression, Linux functional regression, and Linux algorithm/perf regression suites.
 - Linux SMP smoke bring-up through PSCI secondary boot to BusyBox shell, with user space observing 2 CPUs in `/proc/cpuinfo`.
@@ -103,7 +104,7 @@ The current repository includes and uses the following device / platform pieces:
 - framebuffer RAM region described as `simple-framebuffer`
 - SDL window backend for presenting framebuffer contents
 - PL050 KMI keyboard controller
-- snapshot-aware MMIO block device (`aarchvm,mmio-blk`), attachable with `-drive` and currently more experimental than the serial / GUI paths
+- standard `virtio,mmio` transport with a `virtio-blk` device behind `-drive`
 - full-machine snapshot support
 
 The Linux-facing DTs already contain the relevant nodes in:
@@ -113,7 +114,7 @@ The Linux-facing DTs already contain the relevant nodes in:
 That includes:
 - `simple-framebuffer`
 - `arm,pl050` / `arm,primecell`
-- `aarchvm,mmio-blk`
+- `virtio,mmio`
 
 ## Toolchain Version
 
@@ -214,7 +215,11 @@ linux-6.12.76/scripts/config --file linux-6.12.76/build-aarchvm/.config \
   --enable VT_CONSOLE \
   --enable FB \
   --enable DRM_SIMPLEDRM \
-  --enable FRAMEBUFFER_CONSOLE
+  --enable FRAMEBUFFER_CONSOLE \
+  --enable VIRTIO \
+  --enable VIRTIO_MMIO \
+  --enable VIRTIO_BLK \
+  --enable EXT4_FS
 
 make -C linux-6.12.76 \
   O=build-aarchvm \
@@ -284,6 +289,23 @@ This script will:
 - generate `out/initramfs-usertests.cpio.gz`
 - install an `/init` script that selects shell, functional suite, or perf suite based on the kernel command line
 
+### 7. Build a Debian ext4 image for the block-device smoke
+
+```bash
+./tests/linux/build_debian_rootfs_image.sh
+```
+
+The script now prefers a local `debootstrap` path when available and falls back to Docker export otherwise.
+When running as a non-root user, it automatically wraps `debootstrap` in `fakeroot` if available.
+The default `debootstrap` flow uses `--foreign` and is meant for block-device mount / inspection smoke rather than booting Debian `init`.
+
+Useful knobs:
+- `AARCHVM_DEBIAN_ROOTFS_SOURCE=auto|debootstrap|docker`
+- `AARCHVM_DEBIAN_SUITE=<suite>`
+- `AARCHVM_DEBIAN_ARCH=<arch>`
+- `AARCHVM_DEBIAN_MIRROR=<mirror>`
+- `AARCHVM_DEBIAN_VARIANT=<variant>`
+
 ## Run
 
 ### 1. Minimal built-in demo
@@ -312,7 +334,7 @@ Common options:
 - `-segment <file@addr>`: load an extra image segment
 - `-snapshot-save <file>`: save a full-machine snapshot at the end of the run
 - `-snapshot-load <file>`: resume from a snapshot
-- `-drive <image.bin>`: attach a raw image to the MMIO block device
+- `-drive <image.bin>`: attach a raw image to the standard `virtio-mmio + virtio-blk` device
 - `-stop-on-uart <text>`: stop immediately when UART output matches a string
 - `-decode <fast|slow>`: switch decode execution path, default is the fast path
 - `-fb-sdl <on|off>`: explicitly enable or disable the SDL framebuffer window
@@ -449,15 +471,19 @@ The current recommended Linux-side scripts are:
 - `tests/linux/build_usertests_rootfs.sh`
 - `tests/linux/build_linux_shell_snapshot.sh`
 - `tests/linux/build_linux_smp_shell_snapshot.sh`
+- `tests/linux/build_debian_rootfs_image.sh`
 - `tests/linux/run_interactive.sh`
 - `tests/linux/run_functional_suite.sh`
 - `tests/linux/run_algorithm_perf.sh`
 - `tests/linux/run_functional_suite_smp.sh`
+- `tests/linux/run_block_mount_smoke.sh`
 - `tests/linux/run_gui_tty1.sh`
 - `tests/linux/run_gui_tty1_from_snapshot.sh`
 
 Where:
 - `build_linux_shell_snapshot.sh`, `build_linux_smp_shell_snapshot.sh`, `run_functional_suite.sh`, `run_algorithm_perf.sh`, and `run_functional_suite_smp.sh` are automation-oriented and intentionally serial-only
+- `build_debian_rootfs_image.sh` prepares a Debian ext4 image for the block-device smoke path
+- `run_block_mount_smoke.sh` cold-boots Linux, mounts `/dev/vda`, and checks that the Debian rootfs is visible
 - `run_interactive.sh` is the quickest manual serial-shell restore path
 - `run_gui_tty1.sh` and `run_gui_tty1_from_snapshot.sh` are the manual GUI validation / restore paths
 

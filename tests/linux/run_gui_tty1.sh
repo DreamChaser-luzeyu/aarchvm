@@ -11,6 +11,8 @@ STEPS="${AARCHVM_GUI_TTY1_STEPS:-300000000000}"
 INITRD="${AARCHVM_GUI_TTY1_INITRD:-out/initramfs-usertests.cpio.gz}"
 LINUX_DTB="${AARCHVM_LINUX_DTB:-dts/aarchvm-linux-smp.dtb}"
 SNAPSHOT="${AARCHVM_USERTEST_SNAPSHOT_OUT:-out/my_test.snap}"
+DEFAULT_DRIVE_IMAGE="${AARCHVM_DEBIAN_ROOTFS_IMAGE:-out/debian-arm64-bookworm.ext4}"
+DRIVE_IMAGE="${AARCHVM_GUI_TTY1_DRIVE-$DEFAULT_DRIVE_IMAGE}"
 DTB_ADDR=0x47f00000
 INITRD_SIZE_HEX=$(printf '0x%x' "$(stat -c '%s' "$INITRD")")
 
@@ -26,6 +28,15 @@ if [[ ! -f "$INITRD" ]]; then
   echo "missing initramfs: $INITRD" >&2
   echo "build it first with tests/linux/build_usertests_rootfs.sh" >&2
   exit 1
+fi
+
+if [[ -n "$DRIVE_IMAGE" && ! -f "$DRIVE_IMAGE" ]]; then
+  if [[ "$DRIVE_IMAGE" == "$DEFAULT_DRIVE_IMAGE" ]]; then
+    tests/linux/build_debian_rootfs_image.sh >/dev/null
+  else
+    echo "missing drive image: $DRIVE_IMAGE" >&2
+    exit 1
+  fi
 fi
 
 UBOOT_BOOT_CMDS=$(cat <<EOC
@@ -52,11 +63,21 @@ AARCHVM_CMD=(
   -arch-timer-mode "$ARCH_TIMER_MODE"
   -steps "$STEPS"
   -snapshot-save "$SNAPSHOT"
+  -arch-timer-mode host
 )
+
+if [[ -n "$DRIVE_IMAGE" ]]; then
+  AARCHVM_CMD+=(-drive "$DRIVE_IMAGE")
+fi
 
 echo "-----------"
 print_cmd 'AARCHVM gui tty1 command:' "${AARCHVM_CMD[@]}"
 printf 'arch timer mode: %s\n' "$ARCH_TIMER_MODE"
+if [[ -n "$DRIVE_IMAGE" ]]; then
+  printf 'drive image: %s\n' "$DRIVE_IMAGE"
+else
+  printf 'drive image: <disabled>\n'
+fi
 printf 'U-Boot auto-reply match:\n%s\n' "$UART_MATCH"
 printf 'U-Boot auto-reply text:\n%s\n' "$UBOOT_BOOT_CMDS"
 echo "-----------"

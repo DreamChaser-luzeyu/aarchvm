@@ -1,3 +1,97 @@
+# 修改日志 2026-04-02 00:39
+
+## 本轮修改
+
+- 为 [tests/linux/run_gui_tty1.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/run_gui_tty1.sh) 接上标准块设备镜像：
+  - 默认使用 `AARCHVM_DEBIAN_ROOTFS_IMAGE` 或 `out/debian-arm64-bookworm.ext4`；
+  - 若默认镜像不存在，会自动调用 `tests/linux/build_debian_rootfs_image.sh` 构建；
+  - 新增 `AARCHVM_GUI_TTY1_DRIVE` 覆盖入口，设为空字符串可显式禁用 GUI 冷启动路径的块设备挂载；
+  - 启动前会把当前使用的 drive image 打印出来，便于手工复现。
+
+## 本轮测试
+
+- `timeout 10s bash -n tests/linux/run_gui_tty1.sh`
+
+## 当前结论
+
+- `run_gui_tty1.sh` 现在默认会带上与 Linux block smoke 同一套 Debian ext4 镜像，从而让 GUI 冷启动路径也能直接看到块设备。
+
+# 修改日志 2026-04-01 23:33
+
+## 本轮修改
+
+- 把标准 Linux 支持的块设备路径收尾到文档与脚本层：
+  - [tests/linux/build_debian_rootfs_image.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/build_debian_rootfs_image.sh)
+  - [README.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/README.md)
+  - [doc/README.en.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/README.en.md)
+  - [doc/README.zh.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/README.zh.md)
+  - [CHANGELOG.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/CHANGELOG.md)
+- `tests/linux/build_debian_rootfs_image.sh` 现在优先使用本机 `debootstrap` 构建 Debian `arm64` rootfs，并按你提醒的方式兼容 `/sbin/debootstrap`；若本机没有 `debootstrap`，则自动回退到原有 Docker 导出路径。非 root 运行时若宿主机存在 `fakeroot`，脚本会自动包一层 `fakeroot` 以便直接使用。
+- 该脚本现在也会优先直接使用宿主机 `mke2fs` 生成 ext4 镜像，只有在宿主机缺少 `mke2fs` 时才回退到 helper 容器。
+- 更新文档与顶层 `Features`，把旧的自定义 `aarchvm,mmio-blk` 表述统一收敛为标准 `virtio-mmio + virtio-blk` 路径，并补充了：
+  - Linux 内核需要的 `VIRTIO/VIRTIO_MMIO/VIRTIO_BLK/EXT4_FS` 配置项；
+  - Debian ext4 镜像构建脚本；
+  - `/dev/vda` Debian 挂载冒烟脚本。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j4`
+- `timeout 1800s ./tests/arm64/run_all.sh`
+- `timeout 2400s ./tests/linux/run_functional_suite.sh`
+- `timeout 3000s ./tests/linux/run_functional_suite_smp.sh`
+- `timeout 2400s ./tests/linux/run_block_mount_smoke.sh`
+- `timeout 10s bash -n tests/linux/build_debian_rootfs_image.sh`
+- `timeout 1200s env AARCHVM_DEBIAN_ROOTFS_SOURCE=docker AARCHVM_DEBIAN_ROOTFS_DIR=out/docker-smoke-rootfs AARCHVM_DEBIAN_ROOTFS_IMAGE=out/docker-smoke.ext4 AARCHVM_DEBIAN_IMAGE_EXTRA_MB=32 ./tests/linux/build_debian_rootfs_image.sh`
+- `timeout 2400s env AARCHVM_DEBIAN_ROOTFS_IMAGE=out/docker-smoke.ext4 AARCHVM_BLOCK_MOUNT_LOG=out/linux-block-mount-docker-smoke.log ./tests/linux/run_block_mount_smoke.sh`
+
+## 当前结论
+
+- 当前标准 `virtio-mmio + virtio-blk` 路径已经完成源码接线、Linux `mainline` 驱动侧验证、Debian ext4 挂载冒烟，以及文档/脚本收尾。
+- `debootstrap` 路径在当前环境下已验证到真实 Debian 仓库访问与基础包下载阶段；完整构建耗时主要受外部网络速度限制。
+- 现阶段仍保留旧自定义块设备源码文件作历史参考，但 Linux 启动与验证路径已经统一到标准 virtio 块设备。
+
+# 修改日志 2026-04-01 22:34
+
+## 本轮修改
+
+- 本轮继续作为后台文档审计，不改模拟器源码、测试源码、DTS 或构建逻辑，仅更新文档：
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+  - [doc/armv8a-program-visible-audit.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/armv8a-program-visible-audit.md)
+  - [CHANGELOG.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/CHANGELOG.md)
+- 继续复核 Armv8-A 程序可见最小实现缺口，并补充了当前证据：
+  - `src/cpu.cpp` 中 `DMB/DSB/ISB` 仍为 decode 后直接返回；
+  - LSE 顺序变体仍有“single-core semantics / no-ops beyond RMW”注释；
+  - 当前差分脚本仍以 `qemu-aarch64` user-mode 为主，系统级 `qemu-system-aarch64` 入口尚待补强。
+- 新增 TODO 复选框一致性复核结论：未发现 Armv8-A 收口相关“明确已完成但未打勾”的文档/计划项；对“部分完成”项继续保持未勾选。
+
+## 本轮测试
+
+- 本轮未执行代码或回归测试（无执行行为改动，文档更新轮次）。
+
+## 当前结论
+
+- 当前实现仍是“接近收口但未完整收口”状态；
+- 下一步仍应优先收敛 SMP 同步语义、异常 syndrome 系统化对账、以及 system-level 差分闭环。
+
+# 修改日志 2026-04-01 21:30
+
+## 本轮修改
+
+- 本轮为后台文档审计，不改模拟器源码、测试源码、DTS 或构建逻辑，仅更新文档收口状态：
+  - [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)
+  - [doc/armv8a-program-visible-audit.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/armv8a-program-visible-audit.md)
+- 在 `TODO.md` 的“Armv8-A 程序可见正确性收尾计划”中新增了本次审计状态，明确当前仍未达到“完整收口”的判定，并补充了当前高优先级剩余缺口。
+- 新增独立审计文档，沉淀只读代码审计证据（barrier、LSE 顺序变体、syndrome 系统化闭环等）与后续收口优先级。
+
+## 本轮测试
+
+- 本轮未执行代码或回归测试（无执行行为改动，文档更新轮次）。
+
+## 当前结论
+
+- 当前实现“接近 Armv8-A 程序可见最小集收口”，但仍不能宣称完全收口。
+- 尚需继续补强 SMP 同步语义、MMU/TLB/fault 组合边界、FP/AdvSIMD 细节以及 system-level 差分与压力回归。
+
 # 修改日志 2026-04-01 20:43
 
 ## 本轮修改

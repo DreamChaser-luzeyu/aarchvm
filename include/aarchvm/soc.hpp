@@ -1,6 +1,5 @@
 #pragma once
 
-#include "aarchvm/block_mmio.hpp"
 #include "aarchvm/bus.hpp"
 #include "aarchvm/bus_fast_path.hpp"
 #include "aarchvm/cpu.hpp"
@@ -14,6 +13,7 @@
 #include "aarchvm/ram.hpp"
 #include "aarchvm/rtc_pl031.hpp"
 #include "aarchvm/uart_pl011.hpp"
+#include "aarchvm/virtio_blk_mmio.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -123,8 +123,8 @@ private:
   static constexpr std::uint64_t kPerfSize = 0x1000;
   static constexpr std::uint64_t kRtcBase = 0x09030000;
   static constexpr std::uint64_t kRtcSize = 0x1000;
-  static constexpr std::uint64_t kBlockBase = 0x09040000;
-  static constexpr std::uint64_t kBlockSize = 0x1000;
+  static constexpr std::uint64_t kVirtioBlkBase = 0x09040000;
+  static constexpr std::uint64_t kVirtioBlkSize = 0x1000;
   static constexpr std::uint64_t kGicBase = 0x08000000;
   static constexpr std::uint64_t kGicSize = 0x100000;
   static constexpr std::uint64_t kTimerBase = 0x0A000000;
@@ -133,6 +133,7 @@ private:
   static constexpr std::uint32_t kTimerPhysIntId = 30; // PPI 14 => INTID 30
   static constexpr std::uint32_t kUartIntId = 33;
   static constexpr std::uint32_t kKmiIntId = 34;
+  static constexpr std::uint32_t kVirtioBlkIntId = 35;
 
   void request_stop();
   void on_uart_tx(std::uint8_t byte);
@@ -204,7 +205,7 @@ private:
   std::shared_ptr<Pl050Kmi> kmi_;
   std::shared_ptr<PerfMailbox> perf_mailbox_;
   std::shared_ptr<RtcPl031> rtc_;
-  std::shared_ptr<BlockMmio> block_mmio_;
+  std::shared_ptr<VirtioBlkMmio> virtio_blk_mmio_;
   std::shared_ptr<GicV3> gic_;
   std::shared_ptr<GenericTimer> timer_;
   std::shared_ptr<BusFastPath> fast_path_;
@@ -237,6 +238,7 @@ private:
   std::vector<bool> last_timer_phys_levels_;
   bool last_uart_level_ = false;
   bool last_kmi_level_ = false;
+  bool last_virtio_blk_level_ = false;
   bool runnable_state_dirty_ = false;
 };
 

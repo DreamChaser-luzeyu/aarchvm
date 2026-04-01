@@ -152,7 +152,7 @@ SoC::SoC(std::size_t cpu_count)
           .flush_tlb = [this]() { perf_flush_tlb(); },
       })),
       rtc_(std::make_shared<RtcPl031>()),
-      block_mmio_(std::make_shared<BlockMmio>(bus_)),
+      virtio_blk_mmio_(std::make_shared<VirtioBlkMmio>(bus_)),
       gic_(std::make_shared<GicV3>()),
       timer_(std::make_shared<GenericTimer>()) {
   if (cpu_count == 0) {
@@ -172,7 +172,7 @@ SoC::SoC(std::size_t cpu_count)
   bus_.map(kKmiBase, kKmiSize, kmi_);
   bus_.map(kPerfBase, kPerfSize, perf_mailbox_);
   bus_.map(kRtcBase, kRtcSize, rtc_);
-  bus_.map(kBlockBase, kBlockSize, block_mmio_);
+  bus_.map(kVirtioBlkBase, kVirtioBlkSize, virtio_blk_mmio_);
   bus_.map(kGicBase, kGicSize, gic_);
   bus_.map(kTimerBase, kTimerSize, timer_);
 
@@ -230,6 +230,7 @@ SoC::SoC(std::size_t cpu_count)
   uart_->set_tx_observer([this](std::uint8_t byte) { on_uart_tx(byte); });
   uart_->set_state_change_observer([this]() { invalidate_device_schedule(); });
   kmi_->set_state_change_observer([this]() { invalidate_device_schedule(); });
+  virtio_blk_mmio_->set_state_change_observer([this]() { invalidate_device_schedule(); });
   timer_->set_state_change_observer([this]() { invalidate_device_schedule(); });
   timer_->set_cycles_per_step(timer_tick_scale_);
   timer_->set_clock_mode(arch_timer_mode_, guest_time_ticks());
@@ -252,7 +253,7 @@ void SoC::rebuild_fast_path() {
                                              *sdram_,
                                              *uart_,
                                              *perf_mailbox_,
-                                             *block_mmio_,
+                                             *virtio_blk_mmio_,
                                              *gic_,
                                              *timer_,
                                              framebuffer_dirty_tracker_.get());
@@ -454,7 +455,7 @@ bool SoC::load_binary(std::uint64_t addr, const std::vector<std::uint8_t>& bytes
 }
 
 bool SoC::load_block_image(const std::vector<std::uint8_t>& bytes) {
-  block_mmio_->set_image(bytes);
+  virtio_blk_mmio_->set_image(bytes);
   return true;
 }
 
@@ -795,6 +796,7 @@ void SoC::reset_perf_measurement_state() {
   std::fill(last_timer_phys_levels_.begin(), last_timer_phys_levels_.end(), false);
   last_uart_level_ = false;
   last_kmi_level_ = false;
+  last_virtio_blk_level_ = false;
   runnable_state_dirty_ = false;
   bus_.reset_perf_counters();
   if (fast_path_ != nullptr) {
@@ -853,6 +855,12 @@ bool SoC::run(std::size_t max_steps) {
     if (!device_sync_valid_ || kmi_level != last_kmi_level_) {
       gic_->set_level(kKmiIntId, kmi_level);
       last_kmi_level_ = kmi_level;
+    }
+
+    const bool virtio_blk_level = virtio_blk_mmio_->irq_pending();
+    if (!device_sync_valid_ || virtio_blk_level != last_virtio_blk_level_) {
+      gic_->set_level(kVirtioBlkIntId, virtio_blk_level);
+      last_virtio_blk_level_ = virtio_blk_level;
     }
 
     if (framebuffer_sdl_ != nullptr) {
@@ -1348,7 +1356,7 @@ bool SoC::save_snapshot(const std::string& path) const {
     return false;
   }
   static constexpr char kMagic[8] = {'A', 'A', 'R', 'C', 'H', 'S', 'N', 'P'};
-  static constexpr std::uint32_t kVersion = 23;
+  static constexpr std::uint32_t kVersion = 24;
   const std::uint32_t snapshot_cpu_count = static_cast<std::uint32_t>(cpus_.size());
   out.write(kMagic, sizeof(kMagic));
   if (!out ||
@@ -1382,7 +1390,7 @@ bool SoC::save_snapshot(const std::string& path) const {
     }
   }
   if (!framebuffer_ram_->save_state(out) ||
-      !block_mmio_->save_state(out) ||
+      !virtio_blk_mmio_->save_state(out) ||
       !snapshot_io::write_bool(out, snapshot_perf_session.active) ||
       !snapshot_io::write(out, snapshot_perf_session.case_id) ||
       !snapshot_io::write(out, snapshot_perf_session.arg0) ||
@@ -1418,7 +1426,7 @@ bool SoC::load_snapshot(const std::string& path) {
       version != 7 && version != 8 && version != 9 && version != 10 && version != 11 && version != 12 &&
       version != 13 && version != 14 && version != 15 && version != 16 && version != 17 &&
       version != 18 && version != 19 && version != 20 && version != 21 && version != 22 &&
-      version != 23) ||
+      version != 23 && version != 24) ||
       boot_ram_base != kBootRamBase || boot_ram_size != kBootRamSize ||
       sdram_base != kSdramBase || sdram_size != kSdramSize ||
       !snapshot_io::read(in, timer_tick_scale_)) {
@@ -1500,12 +1508,17 @@ bool SoC::load_snapshot(const std::string& path) {
     kmi_->reset();
   }
   if (version >= 5) {
-    if (!framebuffer_ram_->load_state(in) || !block_mmio_->load_state(in)) {
+    if (!framebuffer_ram_->load_state(in)) {
+      return false;
+    }
+    const bool block_state_ok =
+        (version >= 24) ? virtio_blk_mmio_->load_state(in) : virtio_blk_mmio_->load_legacy_block_mmio_state(in);
+    if (!block_state_ok) {
       return false;
     }
   } else {
     framebuffer_ram_->load_bytes(0, std::vector<std::uint8_t>(kFramebufferSize, 0));
-    block_mmio_->set_image({});
+    virtio_blk_mmio_->set_image({});
   }
   if (version >= 11) {
     if (!snapshot_io::read_bool(in, restored_perf_session.active) ||

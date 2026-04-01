@@ -27,6 +27,7 @@ add_executable(aarchvm
   src/perf_mailbox.cpp
   src/pl050_kmi.cpp
   src/rtc_pl031.cpp
+  src/virtio_blk_mmio.cpp
 )
 
 target_include_directories(aarchvm PRIVATE include ${SDL2_INCLUDE_DIRS})

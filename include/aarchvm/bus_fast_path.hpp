@@ -1,12 +1,12 @@
 #pragma once
 
-#include "aarchvm/block_mmio.hpp"
 #include "aarchvm/framebuffer_dirty_tracker.hpp"
 #include "aarchvm/generic_timer.hpp"
 #include "aarchvm/gicv3.hpp"
 #include "aarchvm/perf_mailbox.hpp"
 #include "aarchvm/ram.hpp"
 #include "aarchvm/uart_pl011.hpp"
+#include "aarchvm/virtio_blk_mmio.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -41,8 +41,8 @@ public:
   static constexpr std::uint64_t kUartSize = 0x1000ull;
   static constexpr std::uint64_t kPerfBase = 0x09020000ull;
   static constexpr std::uint64_t kPerfSize = 0x1000ull;
-  static constexpr std::uint64_t kBlockBase = 0x09040000ull;
-  static constexpr std::uint64_t kBlockSize = 0x1000ull;
+  static constexpr std::uint64_t kVirtioBlkBase = 0x09040000ull;
+  static constexpr std::uint64_t kVirtioBlkSize = 0x1000ull;
   static constexpr std::uint64_t kGicBase = 0x08000000ull;
   static constexpr std::uint64_t kGicSize = 0x100000ull;
   static constexpr std::uint64_t kTimerBase = 0x0A000000ull;
@@ -53,7 +53,7 @@ public:
               Ram& sdram,
               UartPl011& uart,
               PerfMailbox& perf_mailbox,
-              BlockMmio& block_mmio,
+              VirtioBlkMmio& virtio_blk_mmio,
               GicV3& gic,
               GenericTimer& timer,
               FramebufferDirtyTracker* framebuffer_dirty_tracker)
@@ -65,7 +65,7 @@ public:
         sdram_mutable_(const_cast<std::uint8_t*>(sdram.bytes().data())),
         uart_(&uart),
         perf_mailbox_(&perf_mailbox),
-        block_mmio_(&block_mmio),
+        virtio_blk_mmio_(&virtio_blk_mmio),
         gic_(&gic),
         timer_(&timer),
         framebuffer_dirty_tracker_(framebuffer_dirty_tracker) {}
@@ -95,12 +95,12 @@ public:
       }
     }
 
-    if (kBlockBase <= addr && addr < kBlockBase + kBlockSize) {
-      const std::uint64_t block_off = addr - kBlockBase;
-      if (size <= (kBlockSize - block_off)) {
+    if (kVirtioBlkBase <= addr && addr < kVirtioBlkBase + kVirtioBlkSize) {
+      const std::uint64_t block_off = addr - kVirtioBlkBase;
+      if (size <= (kVirtioBlkSize - block_off)) {
         ++perf_counters_.read_ops;
         perf_counters_.read_bytes += size;
-        value = block_mmio_->read(block_off, size);
+        value = virtio_blk_mmio_->read(block_off, size);
         return true;
       }
     }
@@ -153,12 +153,12 @@ public:
       }
     }
 
-    if (kBlockBase <= addr && addr < kBlockBase + kBlockSize) {
-      const std::uint64_t block_off = addr - kBlockBase;
-      if (size <= (kBlockSize - block_off)) {
+    if (kVirtioBlkBase <= addr && addr < kVirtioBlkBase + kVirtioBlkSize) {
+      const std::uint64_t block_off = addr - kVirtioBlkBase;
+      if (size <= (kVirtioBlkSize - block_off)) {
         ++perf_counters_.write_ops;
         perf_counters_.write_bytes += size;
-        block_mmio_->write(block_off, value, size);
+        virtio_blk_mmio_->write(block_off, value, size);
         return true;
       }
     }
@@ -338,7 +338,7 @@ private:
   std::uint8_t* sdram_mutable_ = nullptr;
   UartPl011* uart_ = nullptr;
   PerfMailbox* perf_mailbox_ = nullptr;
-  BlockMmio* block_mmio_ = nullptr;
+  VirtioBlkMmio* virtio_blk_mmio_ = nullptr;
   GicV3* gic_ = nullptr;
   GenericTimer* timer_ = nullptr;
   FramebufferDirtyTracker* framebuffer_dirty_tracker_ = nullptr;

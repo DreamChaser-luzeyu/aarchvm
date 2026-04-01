@@ -18,7 +18,7 @@ It currently boots U-Boot, hands off to Linux, reaches interactive BusyBox shell
 - PL050 PS/2 keyboard path usable by Linux `ambakmi` + `atkbd`
 - Event-driven outer scheduling by default, with legacy fixed-step mode kept for debugging and A/B comparison
 - Full-machine snapshot save / restore
-- Snapshot-aware MMIO block device path (`-drive`, `aarchvm,mmio-blk`) for experiments beyond the current serial / GUI regression core
+- Standard Linux-supported `virtio-mmio + virtio-blk` raw disk path (`-drive`), validated through `/dev/vda` enumeration and Debian ext4 mount smoke
 - In-tree bare-metal, Linux functional, and Linux algorithm/perf regression suites
 - Optional faster execution paths for bus/decode hot paths
 - Explicit halt / unexpected-stop diagnostics so guest halt states are reported instead of looking like a silent hang
