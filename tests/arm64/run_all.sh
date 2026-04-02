@@ -331,6 +331,7 @@ run_expect fpsimd_arith_fpcr_flags.bin 400000 N
 run_expect fpsimd_fp_pairwise.bin 400000 Z
 run_expect fpsimd_misc_more.bin 300000 G
 run_expect fpsimd_addhn_family.bin 300000 HN
+run_expect fpsimd_mov_elem.bin 300000 ME
 run_expect fpsimd_arith_shift_perm.bin 300000 V
 run_expect fpsimd_fp_vector.bin 400000 V
 run_expect fpsimd_more_perm_fp.bin 400000 M

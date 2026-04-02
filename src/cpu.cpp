@@ -6261,6 +6261,32 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
+  if ((insn & 0xFFE08400u) == 0x6E000400u) { // INS/MOV (element)
+    const std::uint32_t imm5 = (insn >> 16) & 0x1Fu;
+    const std::uint32_t imm4 = (insn >> 11) & 0xFu;
+    if (imm5 == 0u) {
+      return false;
+    }
+    const std::uint32_t size_shift = static_cast<std::uint32_t>(__builtin_ctz(imm5));
+    const std::uint32_t esize_bits = 8u << size_shift;
+    if (esize_bits > 64u) {
+      return false;
+    }
+    const std::uint32_t lane_mask = (1u << size_shift) - 1u;
+    if ((imm4 & lane_mask) != 0u) {
+      return false;
+    }
+    const std::uint32_t lanes = 128u / esize_bits;
+    const std::uint32_t dst_lane = imm5 >> (size_shift + 1u);
+    const std::uint32_t src_lane = imm4 >> size_shift;
+    if (dst_lane >= lanes || src_lane >= lanes) {
+      return false;
+    }
+    const std::uint64_t elem = vector_get_elem(qregs_[rn], esize_bits, src_lane);
+    vector_set_elem(qregs_[rd], esize_bits, dst_lane, elem);
+    return true;
+  }
+
   if ((insn & 0xBF80FC00u) == 0x2F00E400u) { // MOVI (scalar D immediate)
     const std::uint8_t imm8 = static_cast<std::uint8_t>((((insn >> 16) & 0x7u) << 5u) | ((insn >> 5) & 0x1Fu));
     qregs_[rd][0] = scalar_byte_mask_imm(imm8);

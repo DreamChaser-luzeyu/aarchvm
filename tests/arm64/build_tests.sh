@@ -101,6 +101,7 @@ build_asm_prog fpsimd_arith_fpcr_flags
 build_asm_prog fpsimd_fp_pairwise
 build_asm_prog fpsimd_misc_more
 build_asm_prog fpsimd_addhn_family
+build_asm_prog fpsimd_mov_elem
 build_asm_prog fpsimd_arith_shift_perm
 build_asm_prog fpsimd_fp_vector
 build_asm_prog fpsimd_more_perm_fp

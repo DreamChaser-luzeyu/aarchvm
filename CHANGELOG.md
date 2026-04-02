@@ -6548,3 +6548,45 @@
 
 - `chroot` 的 `SIGILL` 已修复，Debian rootfs 内的 `/bin/sh` 现在能够在 guest 中正常由动态链接器拉起。
 - 这次问题暴露的是 AdvSIMD 缩窄高半算术家族的真实语义缺口；补齐后，裸机回归与 Linux UMP/SMP 回归均通过。
+
+# 修改日志 2026-04-02 01:38
+
+## 本轮修改
+
+- 继续追查 Debian rootfs 中默认 `chroot` 路径仍会出现的 `Illegal instruction`，确认此前 smoke 只覆盖了：
+  - `/bin/busybox chroot /mnt/debian /bin/sh -c "..."`
+  - 因而没有覆盖默认 `chroot` 进入交互 shell 的路径。
+- 通过 guest 内跟踪复现确认：
+  - BusyBox `chroot` 默认并不是执行 `sh -c`，而是取当前 shell 名并附带 `-i`
+  - 在当前 initramfs 环境里，这条路径实际进入了 Debian 的 `/usr/bin/bash`
+  - 故障 PC 命中 `bash` 中的 AdvSIMD 元素拷贝指令 `mov vD.<T>[lane], vN.<T>[lane2]`
+- 在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 补齐 `INS/MOV (element)` 的向量元素到向量元素复制语义，覆盖 `B/H/S/D` 四种元素宽度。
+- 新增裸机回归 [tests/arm64/fpsimd_mov_elem.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_mov_elem.S)，覆盖：
+  - `mov v?.b[idx], v?.b[idx2]`
+  - `mov v?.h[idx], v?.h[idx2]`
+  - `mov v?.s[idx], v?.s[idx2]`
+  - `mov v?.d[idx], v?.d[idx2]`
+  - 并验证未写入 lane 保持不变
+- 将新用例接入：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 强化 [tests/linux/run_block_mount_smoke.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/run_block_mount_smoke.sh)：
+  - 新增 `SHELL=/bin/bash /bin/busybox chroot /mnt/debian`
+  - 通过自动输入 `echo ...` 和 `exit` 覆盖默认交互式 bash 路径
+  - 保留显式 `/bin/sh -c` 路径
+  - 继续显式检查日志中不存在 `Illegal instruction`
+
+## 本轮测试
+
+- `timeout 1800s cmake --build build -j4`
+- `timeout 1800s ./tests/arm64/build_tests.sh`
+- `timeout 120s ./build/aarchvm -bin tests/arm64/out/fpsimd_mov_elem.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 2400s ./tests/linux/run_block_mount_smoke.sh`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 2400s ./tests/linux/run_functional_suite.sh`
+- `timeout 3000s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这次 `chroot` 残留 `SIGILL` 的真实根因不是 `/bin/sh`，而是默认 `chroot` 进入的交互式 `bash` 路径命中了此前未实现的 AdvSIMD 元素复制指令。
+- 现在默认 `chroot` 的交互式 bash 路径与显式 `/bin/sh -c` 路径都已通过验证，裸机全回归、Linux UMP 回归、Linux SMP 回归也已全部通过。
