@@ -8,13 +8,12 @@ FASTPATH="${AARCHVM_BUS_FASTPATH:-1}"
 TIMER_SCALE="${AARCHVM_TIMER_SCALE:-1}"
 ARCH_TIMER_MODE="${AARCHVM_ARCH_TIMER_MODE:-host}"
 STEPS="${AARCHVM_GUI_TTY1_STEPS:-300000000000}"
-INITRD="${AARCHVM_GUI_TTY1_INITRD:-out/initramfs-usertests.cpio.gz}"
+INITRD="${AARCHVM_GUI_TTY1_INITRD:-out/initramfs-debian-systemd.cpio.gz}"
 LINUX_DTB="${AARCHVM_LINUX_DTB:-dts/aarchvm-linux-smp.dtb}"
 SNAPSHOT="${AARCHVM_USERTEST_SNAPSHOT_OUT:-out/my_test.snap}"
-DEFAULT_DRIVE_IMAGE="${AARCHVM_DEBIAN_ROOTFS_IMAGE:-out/debian-arm64-bookworm.ext4}"
+DEFAULT_DRIVE_IMAGE="${AARCHVM_DEBIAN_ROOTFS_IMAGE:-out/debian-arm64-bookworm-systemd.ext4}"
 DRIVE_IMAGE="${AARCHVM_GUI_TTY1_DRIVE-$DEFAULT_DRIVE_IMAGE}"
 DTB_ADDR=0x47f00000
-INITRD_SIZE_HEX=$(printf '0x%x' "$(stat -c '%s' "$INITRD")")
 
 print_cmd() {
   local label="$1"
@@ -26,21 +25,24 @@ print_cmd() {
 
 if [[ ! -f "$INITRD" ]]; then
   echo "missing initramfs: $INITRD" >&2
-  echo "build it first with tests/linux/build_usertests_rootfs.sh" >&2
+  echo "build it first with tests/linux/build_debian_systemd_initramfs.sh" >&2
   exit 1
 fi
 
 if [[ -n "$DRIVE_IMAGE" && ! -f "$DRIVE_IMAGE" ]]; then
   if [[ "$DRIVE_IMAGE" == "$DEFAULT_DRIVE_IMAGE" ]]; then
-    tests/linux/build_debian_rootfs_image.sh >/dev/null
+    echo "building debian initrd..."
+    AARCHVM_DEBIAN_PROFILE=systemd tests/linux/build_debian_rootfs_image.sh
   else
     echo "missing drive image: $DRIVE_IMAGE" >&2
     exit 1
   fi
 fi
 
+INITRD_SIZE_HEX=$(printf '0x%x' "$(stat -c '%s' "$INITRD")")
+
 UBOOT_BOOT_CMDS=$(cat <<EOC
-setenv bootargs console=ttyAMA0,115200 console=tty1 earlycon=pl011,0x09000000 rdinit=/init initramfs_async=0
+setenv bootargs console=ttyAMA0,115200 console=tty1 earlycon=pl011,0x09000000 rdinit=/init root=/dev/vda rw rootfstype=ext4 initramfs_async=0 systemd.unit=multi-user.target systemd.log_level=info systemd.log_target=console
 booti 0x40400000 0x46000000:${INITRD_SIZE_HEX} ${DTB_ADDR}
 EOC
 )
@@ -49,7 +51,7 @@ UART_MATCH="${AARCHVM_GUI_TTY1_UART_MATCH:-=> }"
 UART_REPLY="${UBOOT_BOOT_CMDS}"$'\n'
 AARCHVM_CMD=(
   ./build/aarchvm
-  -smp 2
+  -smp 1
   -smp-mode psci
   -bin u-boot-2026.01/build-qemu_arm64/u-boot.bin
   -load 0x0

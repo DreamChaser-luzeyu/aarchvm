@@ -5325,34 +5325,23 @@ bool Cpu::exec_system(std::uint32_t insn) {
     }
   };
 
-  const auto id_group_sysreg = [&](std::uint32_t key) -> bool {
-    switch (key) {
-      case sysreg_key(3u, 0u, 0u, 0u, 0u): // MIDR_EL1
-      case sysreg_key(3u, 0u, 0u, 0u, 5u): // MPIDR_EL1
-      case sysreg_key(3u, 0u, 0u, 0u, 6u): // REVIDR_EL1
-      case sysreg_key(3u, 1u, 0u, 0u, 0u): // CCSIDR_EL1
-      case sysreg_key(3u, 1u, 0u, 0u, 1u): // CLIDR_EL1
-      case sysreg_key(3u, 0u, 0u, 4u, 0u): // ID_AA64PFR0_EL1
-      case sysreg_key(3u, 0u, 0u, 4u, 1u): // ID_AA64PFR1_EL1
-      case sysreg_key(3u, 0u, 0u, 4u, 2u): // ID_AA64PFR2_EL1
-      case sysreg_key(3u, 0u, 0u, 4u, 4u): // ID_AA64ZFR0_EL1
-      case sysreg_key(3u, 0u, 0u, 4u, 5u): // ID_AA64SMFR0_EL1
-      case sysreg_key(3u, 0u, 0u, 4u, 7u): // reserved ID space (RES0 in this model)
-      case sysreg_key(3u, 0u, 0u, 5u, 0u): // ID_AA64DFR0_EL1
-      case sysreg_key(3u, 0u, 0u, 5u, 1u): // ID_AA64DFR1_EL1
-      case sysreg_key(3u, 0u, 0u, 6u, 0u): // ID_AA64ISAR0_EL1
-      case sysreg_key(3u, 0u, 0u, 6u, 1u): // ID_AA64ISAR1_EL1
-      case sysreg_key(3u, 0u, 0u, 6u, 2u): // ID_AA64ISAR2_EL1
-      case sysreg_key(3u, 0u, 0u, 6u, 3u): // ID_AA64ISAR3_EL1
-      case sysreg_key(3u, 0u, 0u, 7u, 0u): // ID_AA64MMFR0_EL1
-      case sysreg_key(3u, 0u, 0u, 7u, 1u): // ID_AA64MMFR1_EL1
-      case sysreg_key(3u, 0u, 0u, 7u, 2u): // ID_AA64MMFR2_EL1
-      case sysreg_key(3u, 0u, 0u, 7u, 3u): // ID_AA64MMFR3_EL1
-      case sysreg_key(3u, 0u, 0u, 7u, 4u): // ID_AA64MMFR4_EL1
-        return true;
-      default:
-        return false;
+  const auto linux_el0_cpuid_trap_sysreg = [&](std::uint32_t key) -> bool {
+    const std::uint32_t op0 = (key >> 14) & 0x3u;
+    const std::uint32_t op1 = (key >> 11) & 0x7u;
+    const std::uint32_t crn = (key >> 7) & 0xFu;
+    const std::uint32_t crm = (key >> 3) & 0xFu;
+    const std::uint32_t op2 = key & 0x7u;
+
+    // Match Linux arm64's EL0 CPUID emulation space in do_emulate_mrs():
+    // Op0=3, Op1=0, CRn=0, CRm={0,2..7}. Only MIDR/MPIDR/REVIDR are defined
+    // in CRm==0; the remaining CRm==2..7 space is sanitized/RAZ by the guest.
+    if (op0 != 3u || op1 != 0u || crn != 0u) {
+      return false;
     }
+    if (crm == 0u) {
+      return op2 == 0u || op2 == 5u || op2 == 6u;
+    }
+    return crm >= 2u && crm <= 7u;
   };
 
   const auto el0_sysreg_undefined = [&](std::uint32_t key, bool write) -> bool {
@@ -5381,9 +5370,33 @@ bool Cpu::exec_system(std::uint32_t insn) {
         key == sysreg_key(3u, 3u, 4u, 5u, 1u)) {   // DLR_EL0
       return true;
     }
-    // FEAT_IDST is not implemented in this model, so direct EL0 reads of the
-    // identification space are UNDEFINED rather than system access traps.
-    return !write && id_group_sysreg(key);
+    // Linux arm64 exposes HWCAP_CPUID by trapping a sanitized subset of MRS
+    // ID-space reads from EL0 and emulating them in the kernel. Keep that
+    // space as a system-access trap instead of collapsing it to UNDEFINED so
+    // guest userspace observes the expected Linux behaviour.
+    return !write && !linux_el0_cpuid_trap_sysreg(key) &&
+           (key == sysreg_key(3u, 0u, 0u, 0u, 0u) ||  // MIDR_EL1
+            key == sysreg_key(3u, 0u, 0u, 0u, 5u) ||  // MPIDR_EL1
+            key == sysreg_key(3u, 0u, 0u, 0u, 6u) ||  // REVIDR_EL1
+            key == sysreg_key(3u, 1u, 0u, 0u, 0u) ||  // CCSIDR_EL1
+            key == sysreg_key(3u, 1u, 0u, 0u, 1u) ||  // CLIDR_EL1
+            key == sysreg_key(3u, 0u, 0u, 4u, 0u) ||  // ID_AA64PFR0_EL1
+            key == sysreg_key(3u, 0u, 0u, 4u, 1u) ||  // ID_AA64PFR1_EL1
+            key == sysreg_key(3u, 0u, 0u, 4u, 2u) ||  // ID_AA64PFR2_EL1
+            key == sysreg_key(3u, 0u, 0u, 4u, 4u) ||  // ID_AA64ZFR0_EL1
+            key == sysreg_key(3u, 0u, 0u, 4u, 5u) ||  // ID_AA64SMFR0_EL1
+            key == sysreg_key(3u, 0u, 0u, 4u, 7u) ||  // reserved ID space
+            key == sysreg_key(3u, 0u, 0u, 5u, 0u) ||  // ID_AA64DFR0_EL1
+            key == sysreg_key(3u, 0u, 0u, 5u, 1u) ||  // ID_AA64DFR1_EL1
+            key == sysreg_key(3u, 0u, 0u, 6u, 0u) ||  // ID_AA64ISAR0_EL1
+            key == sysreg_key(3u, 0u, 0u, 6u, 1u) ||  // ID_AA64ISAR1_EL1
+            key == sysreg_key(3u, 0u, 0u, 6u, 2u) ||  // ID_AA64ISAR2_EL1
+            key == sysreg_key(3u, 0u, 0u, 6u, 3u) ||  // ID_AA64ISAR3_EL1
+            key == sysreg_key(3u, 0u, 0u, 7u, 0u) ||  // ID_AA64MMFR0_EL1
+            key == sysreg_key(3u, 0u, 0u, 7u, 1u) ||  // ID_AA64MMFR1_EL1
+            key == sysreg_key(3u, 0u, 0u, 7u, 2u) ||  // ID_AA64MMFR2_EL1
+            key == sysreg_key(3u, 0u, 0u, 7u, 3u) ||  // ID_AA64MMFR3_EL1
+            key == sysreg_key(3u, 0u, 0u, 7u, 4u));   // ID_AA64MMFR4_EL1
   };
 
   // TLBI VMALLE1 / VMALLE1IS
@@ -6309,39 +6322,38 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
   }
 
   if ((insn & 0x9F80FC00u) == 0x0F00A400u) { // SSHLL/USHLL/SSHLL2/USHLL2, including SXTL/UXTL aliases
-    const bool is_unsigned = ((insn >> 29) & 1u) != 0u;
-    const bool upper_half = ((insn >> 30) & 1u) != 0u;
     const std::uint32_t immh = (insn >> 19) & 0xFu;
-    const std::uint32_t immb = (insn >> 16) & 0x7u;
-    if (immh == 0u) {
-      return false;
-    }
-    const std::uint32_t src_esize_bits = 8u << highest_set_bit(immh);
-    if (src_esize_bits < 8u || src_esize_bits > 32u) {
-      return false;
-    }
-    const std::uint32_t immhb = (immh << 3u) | immb;
-    if (immhb < src_esize_bits || immhb >= (src_esize_bits * 2u)) {
-      return false;
-    }
-    const std::uint32_t shift = immhb - src_esize_bits;
-    const std::uint32_t dst_esize_bits = src_esize_bits * 2u;
-    const std::uint32_t lanes = 64u / src_esize_bits;
-    const std::uint32_t src_base = upper_half ? lanes : 0u;
-    const auto src = qregs_[rn];
-    std::array<std::uint64_t, 2> dst = {0, 0};
-    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
-      const std::uint64_t value = vector_get_elem(src, src_esize_bits, lane + src_base);
-      std::uint64_t widened = 0;
-      if (is_unsigned) {
-        widened = (value & ones(src_esize_bits)) << shift;
-      } else {
-        widened = static_cast<std::uint64_t>(sign_extend(value, src_esize_bits) << shift);
+    if (immh != 0u) {
+      const bool is_unsigned = ((insn >> 29) & 1u) != 0u;
+      const bool upper_half = ((insn >> 30) & 1u) != 0u;
+      const std::uint32_t immb = (insn >> 16) & 0x7u;
+      const std::uint32_t src_esize_bits = 8u << highest_set_bit(immh);
+      if (src_esize_bits < 8u || src_esize_bits > 32u) {
+        return false;
       }
-      vector_set_elem(dst, dst_esize_bits, lane, widened);
+      const std::uint32_t immhb = (immh << 3u) | immb;
+      if (immhb < src_esize_bits || immhb >= (src_esize_bits * 2u)) {
+        return false;
+      }
+      const std::uint32_t shift = immhb - src_esize_bits;
+      const std::uint32_t dst_esize_bits = src_esize_bits * 2u;
+      const std::uint32_t lanes = 64u / src_esize_bits;
+      const std::uint32_t src_base = upper_half ? lanes : 0u;
+      const auto src = qregs_[rn];
+      std::array<std::uint64_t, 2> dst = {0, 0};
+      for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+        const std::uint64_t value = vector_get_elem(src, src_esize_bits, lane + src_base);
+        std::uint64_t widened = 0;
+        if (is_unsigned) {
+          widened = (value & ones(src_esize_bits)) << shift;
+        } else {
+          widened = static_cast<std::uint64_t>(sign_extend(value, src_esize_bits) << shift);
+        }
+        vector_set_elem(dst, dst_esize_bits, lane, widened);
+      }
+      qregs_[rd] = dst;
+      return true;
     }
-    qregs_[rd] = dst;
-    return true;
   }
 
   if ((insn & 0xBF808400u) == 0x2F000400u || (insn & 0xBF808400u) == 0x0F000400u) { // USHR/SSHR
@@ -6493,6 +6505,55 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
+  if ((insn & 0xBF20FC00u) == 0x0E201800u) { // REV16 (vector)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    if (size != 0u) {
+      return false;
+    }
+    const std::uint32_t total_bits = q ? 128u : 64u;
+    const std::uint32_t esize_bits = 8u;
+    const std::uint32_t container_bits = 16u;
+    const std::uint32_t containers = total_bits / container_bits;
+    const std::uint32_t elems_per_container = container_bits / esize_bits;
+    const auto src = qregs_[rn];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t c = 0; c < containers; ++c) {
+      for (std::uint32_t i = 0; i < elems_per_container; ++i) {
+        const std::uint32_t src_lane = c * elems_per_container + (elems_per_container - 1u - i);
+        const std::uint32_t dst_lane = c * elems_per_container + i;
+        vector_set_elem(dst, esize_bits, dst_lane, vector_get_elem(src, esize_bits, src_lane));
+      }
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xBF20FC00u) == 0x0E200800u || (insn & 0xBF20FC00u) == 0x2E200800u) { // REV32/REV64 (vector)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const bool rev32 = ((insn >> 29) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    const std::uint32_t total_bits = q ? 128u : 64u;
+    const std::uint32_t esize_bits = 8u << size;
+    const std::uint32_t container_bits = rev32 ? 32u : 64u;
+    if ((rev32 && size > 1u) || (!rev32 && size > 2u) || esize_bits >= container_bits) {
+      return false;
+    }
+    const std::uint32_t containers = total_bits / container_bits;
+    const std::uint32_t elems_per_container = container_bits / esize_bits;
+    const auto src = qregs_[rn];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t c = 0; c < containers; ++c) {
+      for (std::uint32_t i = 0; i < elems_per_container; ++i) {
+        const std::uint32_t src_lane = c * elems_per_container + (elems_per_container - 1u - i);
+        const std::uint32_t dst_lane = c * elems_per_container + i;
+        vector_set_elem(dst, esize_bits, dst_lane, vector_get_elem(src, esize_bits, src_lane));
+      }
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
   if ((insn & 0x9F21FC00u) == 0x0E209800u) { // CMEQ (zero)
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::uint32_t size = (insn >> 22) & 0x3u;
@@ -6511,7 +6572,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
-  if ((insn & 0x9F20FC00u) == 0x0E208C00u) { // CMEQ (register)
+  if ((insn & 0xBF20FC00u) == 0x2E208C00u) { // CMEQ (register)
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::uint32_t size = (insn >> 22) & 0x3u;
     const std::uint32_t esize_bits = 8u << size;
@@ -6526,6 +6587,26 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     for (std::uint32_t lane = 0; lane < lanes; ++lane) {
       const bool equal = vector_get_elem(lhs, esize_bits, lane) == vector_get_elem(rhs, esize_bits, lane);
       vector_set_elem(dst, esize_bits, lane, equal ? ones(esize_bits) : 0u);
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xBF20FC00u) == 0x0E208C00u) { // CMTST (register)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    const std::uint32_t esize_bits = 8u << size;
+    if (esize_bits == 0u || (!q && esize_bits == 64u)) {
+      return false;
+    }
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t lanes = (q ? 128u : 64u) / esize_bits;
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+      const std::uint64_t value = vector_get_elem(lhs, esize_bits, lane) & vector_get_elem(rhs, esize_bits, lane);
+      vector_set_elem(dst, esize_bits, lane, value != 0u ? ones(esize_bits) : 0u);
     }
     qregs_[rd] = dst;
     return true;
@@ -6551,6 +6632,57 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
+  if ((insn & 0xBF20FC00u) == 0x0E200800u || // REV64 (vector)
+      (insn & 0xBF20FC00u) == 0x2E200800u || // REV32 (vector)
+      (insn & 0xBF20FC00u) == 0x0E201800u) { // REV16 (vector)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    const std::uint32_t esize_bits = 8u << size;
+    const std::uint32_t total_bits = q ? 128u : 64u;
+    std::uint32_t container_bits = 0u;
+    std::uint32_t max_size = 0u;
+    const std::uint32_t tag = insn & 0xBF20FC00u;
+    if (tag == 0x0E200800u) {
+      container_bits = 64u;
+      max_size = 2u;
+    } else if (tag == 0x2E200800u) {
+      container_bits = 32u;
+      max_size = 1u;
+    } else {
+      container_bits = 16u;
+      max_size = 0u;
+    }
+    if (size > max_size || esize_bits >= container_bits || container_bits > total_bits) {
+      return false;
+    }
+    const std::uint32_t elems_per_group = container_bits / esize_bits;
+    const std::uint32_t groups = total_bits / container_bits;
+    const auto src = qregs_[rn];
+    std::array<std::uint64_t, 2> dst = {0u, 0u};
+    for (std::uint32_t group = 0; group < groups; ++group) {
+      const std::uint32_t base_lane = group * elems_per_group;
+      for (std::uint32_t lane = 0; lane < elems_per_group; ++lane) {
+        const std::uint32_t src_lane = base_lane + (elems_per_group - 1u - lane);
+        vector_set_elem(dst, esize_bits, base_lane + lane, vector_get_elem(src, esize_bits, src_lane));
+      }
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xBF3FFC00u) == 0x0E205800u) { // CNT (vector)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t lanes = q ? 16u : 8u;
+    const auto src = qregs_[rn];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+      const auto value = static_cast<std::uint8_t>(vector_get_elem(src, 8u, lane));
+      vector_set_elem(dst, 8u, lane, static_cast<std::uint64_t>(std::popcount(value)));
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
   if ((insn & 0xBFE0FC00u) == 0x0E201C00u) { // AND (vector)
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
@@ -6558,6 +6690,16 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     const auto rhs = qregs_[rm];
     qregs_[rd][0] = lhs[0] & rhs[0];
     qregs_[rd][1] = q ? (lhs[1] & rhs[1]) : 0u;
+    return true;
+  }
+
+  if ((insn & 0xBFE0FC00u) == 0x0E601C00u) { // BIC (vector)
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    qregs_[rd][0] = lhs[0] & ~rhs[0];
+    qregs_[rd][1] = q ? (lhs[1] & ~rhs[1]) : 0u;
     return true;
   }
 
@@ -6614,7 +6756,10 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
-  if ((insn & 0x9F20FC00u) == 0x0E203C00u) { // CMHS (register)
+  if ((insn & 0xBF20FC00u) == 0x2E203400u || // CMHI (register)
+      (insn & 0xBF20FC00u) == 0x0E203400u || // CMGT (register)
+      (insn & 0xBF20FC00u) == 0x2E203C00u || // CMHS (register)
+      (insn & 0xBF20FC00u) == 0x0E203C00u) { // CMGE (register)
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::uint32_t size = (insn >> 22) & 0x3u;
     const std::uint32_t esize_bits = 8u << size;
@@ -6625,10 +6770,29 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     const std::uint32_t lanes = (q ? 128u : 64u) / esize_bits;
     const auto lhs = qregs_[rn];
     const auto rhs = qregs_[rm];
+    const std::uint32_t tag = insn & 0xBF20FC00u;
     std::array<std::uint64_t, 2> dst = {0, 0};
     for (std::uint32_t lane = 0; lane < lanes; ++lane) {
-      const bool ge = vector_get_elem(lhs, esize_bits, lane) >= vector_get_elem(rhs, esize_bits, lane);
-      vector_set_elem(dst, esize_bits, lane, ge ? ones(esize_bits) : 0u);
+      const std::uint64_t lhs_elem = vector_get_elem(lhs, esize_bits, lane);
+      const std::uint64_t rhs_elem = vector_get_elem(rhs, esize_bits, lane);
+      bool predicate = false;
+      switch (tag) {
+        case 0x2E203400u: // CMHI
+          predicate = lhs_elem > rhs_elem;
+          break;
+        case 0x0E203400u: // CMGT
+          predicate = sign_extend(lhs_elem, esize_bits) > sign_extend(rhs_elem, esize_bits);
+          break;
+        case 0x2E203C00u: // CMHS
+          predicate = lhs_elem >= rhs_elem;
+          break;
+        case 0x0E203C00u: // CMGE
+          predicate = sign_extend(lhs_elem, esize_bits) >= sign_extend(rhs_elem, esize_bits);
+          break;
+        default:
+          return false;
+      }
+      vector_set_elem(dst, esize_bits, lane, predicate ? ones(esize_bits) : 0u);
     }
     qregs_[rd] = dst;
     return true;
@@ -6818,6 +6982,27 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
   if ((insn & 0xFFFFFC00u) == 0x7E616800u) { // FCVTXN Sd, Dn
     std::uint64_t fpsr_bits = 0u;
     const std::uint32_t result = fp64_to_fp32_bits_round_to_odd(qregs_[rn][0], current_fpcr_ctl(), fpsr_bits);
+    sysregs_.fp_or_fpsr(fpsr_bits);
+    qregs_[rd][0] = result;
+    qregs_[rd][1] = 0u;
+    return true;
+  }
+
+  if ((insn & 0xFFFFFC00u) == 0x1E22C000u) { // FCVT Dd, Sn
+    std::uint64_t fpsr_bits = 0u;
+    const std::uint64_t result = fp32_to_fp64_bits(
+        static_cast<std::uint32_t>(qregs_[rn][0] & 0xFFFFFFFFu),
+        current_fpcr_ctl(),
+        fpsr_bits);
+    sysregs_.fp_or_fpsr(fpsr_bits);
+    qregs_[rd][0] = result;
+    qregs_[rd][1] = 0u;
+    return true;
+  }
+
+  if ((insn & 0xFFFFFC00u) == 0x1E624000u) { // FCVT Sd, Dn
+    std::uint64_t fpsr_bits = 0u;
+    const std::uint32_t result = fp64_to_fp32_bits(qregs_[rn][0], current_fpcr_ctl(), fpsr_bits);
     sysregs_.fp_or_fpsr(fpsr_bits);
     qregs_[rd][0] = result;
     qregs_[rd][1] = 0u;
@@ -8015,6 +8200,26 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     }
   }
 
+  if ((insn & 0xBF00FC00u) == 0x0E002800u) { // XTN/XTN2
+    const bool upper_half = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    const std::uint32_t src_esize_bits = 16u << size;
+    if (src_esize_bits < 16u || src_esize_bits > 64u) {
+      return false;
+    }
+    const std::uint32_t dst_esize_bits = src_esize_bits / 2u;
+    const std::uint32_t lanes = 64u / dst_esize_bits;
+    const auto src = qregs_[rn];
+    auto dst = upper_half ? qregs_[rd] : std::array<std::uint64_t, 2>{0, 0};
+    const std::uint32_t dst_base = upper_half ? lanes : 0u;
+    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+      const std::uint64_t narrowed = vector_get_elem(src, src_esize_bits, lane) & ones(dst_esize_bits);
+      vector_set_elem(dst, dst_esize_bits, dst_base + lane, narrowed);
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
   if ((insn & 0x9F80FC00u) == 0x0E004800u) { // SQXTN/UQXTN and *2 variants
     const bool is_unsigned = ((insn >> 29) & 1u) != 0u;
     const bool upper_half = ((insn >> 30) & 1u) != 0u;
@@ -8114,7 +8319,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
-  if ((insn & 0x9F80FC00u) == 0x0E001000u) { // SADDW/UADDW and *2 variants
+  if ((insn & 0x9F20FC00u) == 0x0E201000u) { // SADDW/UADDW and *2 variants
     const bool is_unsigned = ((insn >> 29) & 1u) != 0u;
     const bool upper_half = ((insn >> 30) & 1u) != 0u;
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
@@ -12996,8 +13201,14 @@ void Cpu::set_flags_logic(std::uint64_t result, bool is_32bit) {
 }
 
 std::int64_t Cpu::sign_extend(std::uint64_t value, std::uint32_t bits) {
+  if (bits == 0u) {
+    return 0;
+  }
+  if (bits >= 64u) {
+    return static_cast<std::int64_t>(value);
+  }
   const std::uint64_t sign = 1ull << (bits - 1);
-  const std::uint64_t mask = (1ull << bits) - 1;
+  const std::uint64_t mask = ones(bits);
   value &= mask;
   return static_cast<std::int64_t>((value ^ sign) - sign);
 }

@@ -335,6 +335,8 @@ run_expect fpsimd_mov_elem.bin 300000 ME
 run_expect fpsimd_arith_shift_perm.bin 300000 V
 run_expect fpsimd_fp_vector.bin 400000 V
 run_expect fpsimd_more_perm_fp.bin 400000 M
+run_expect fpsimd_cmp_reg_family.bin 300000 C
+run_expect fpsimd_xtn.bin 400000 N
 run_expect fpsimd_structured_ls.bin 400000 T
 run_expect fpsimd_structured_ls_more.bin 600000 Y
 run_expect fpsimd_structured_ls_regpost.bin 900000 T

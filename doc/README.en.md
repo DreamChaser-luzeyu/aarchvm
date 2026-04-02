@@ -295,12 +295,13 @@ This script will:
 ./tests/linux/build_debian_rootfs_image.sh
 ```
 
-The script now prefers a local `debootstrap` path when available and falls back to Docker export otherwise.
-When running as a non-root user, it automatically wraps `debootstrap` in `fakeroot` if available.
-The default `debootstrap` flow uses `--foreign` and is meant for block-device mount / inspection smoke rather than booting Debian `init`.
+The script now runs directly on the host with native `debootstrap` only.
+It no longer falls back to Docker or `--foreign` / second-stage flows.
+On non-arm64 hosts, native arm64 bootstrapping requires `qemu-aarch64` binfmt support.
+Run it as `root` or via `sudo`; the script will restore output ownership when invoked through `sudo`.
 
 Useful knobs:
-- `AARCHVM_DEBIAN_ROOTFS_SOURCE=auto|debootstrap|docker`
+- `AARCHVM_DEBIAN_DEBOOTSTRAP_MODE=auto|native`
 - `AARCHVM_DEBIAN_SUITE=<suite>`
 - `AARCHVM_DEBIAN_ARCH=<arch>`
 - `AARCHVM_DEBIAN_MIRROR=<mirror>`
@@ -439,17 +440,22 @@ This script automatically:
 ./tests/linux/run_gui_tty1.sh
 ```
 
-This path boots with a command line of the form:
+This path now cold-boots the Debian `systemd` block-image through the Debian handoff initramfs, with a command line of the form:
 
 ```text
-console=ttyAMA0,115200 console=tty1 earlycon=pl011,0x09000000 rdinit=/init initramfs_async=0
+console=ttyAMA0,115200 console=tty1 earlycon=pl011,0x09000000 rdinit=/init root=/dev/vda rw rootfstype=ext4 initramfs_async=0 systemd.unit=multi-user.target systemd.log_level=info systemd.log_target=console
 ```
 
 Meaning:
 - keep serial logging for debugging
-- make `tty1` the active Linux console so the shell appears on the framebuffer
+- make `tty1` the active Linux console so the Debian login prompt appears on the framebuffer
 - boot the GUI path with the 2-core SMP DTB, matching the script
+- let the initramfs mount `/dev/vda` and switch into the Debian rootfs
 - deliver SDL window keyboard input through the PL050 PS/2 keyboard device
+
+Default credentials:
+- framebuffer `tty1`: log in as `root` with password `000000`
+- serial `ttyAMA0`: the generated Debian test image still enables `root` autologin
 
 `run_gui_tty1.sh` is the cold-boot GUI path and saves a snapshot at the end by default. `run_gui_tty1_from_snapshot.sh` is the matching fast-restore helper once that snapshot already exists.
 Both GUI helpers default to `-arch-timer-mode host` for the same reason as `run_interactive.sh`: the framebuffer shell should see normal wall-clock progression during manual use.

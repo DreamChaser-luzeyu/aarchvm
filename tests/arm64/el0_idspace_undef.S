@@ -7,7 +7,7 @@ _start:
     adr  x10, vectors
     msr  vbar_el1, x10
 
-    adr  x11, trap_count
+    adr  x11, stage_flags
     str  xzr, [x11]
 
     adr  x3, el0_mrs_midr
@@ -16,7 +16,7 @@ _start:
     eret
 
 after_midr:
-    adr  x11, trap_count
+    adr  x11, stage_flags
     ldr  x12, [x11]
     movz x13, #1
     cmp  x12, x13
@@ -28,9 +28,9 @@ after_midr:
     eret
 
 after_clidr:
-    adr  x11, trap_count
+    adr  x11, stage_flags
     ldr  x12, [x11]
-    movz x13, #2
+    movz x13, #3
     cmp  x12, x13
     b.ne fail2
 
@@ -40,9 +40,9 @@ after_clidr:
     eret
 
 after_mmfr0:
-    adr  x11, trap_count
+    adr  x11, stage_flags
     ldr  x12, [x11]
-    movz x13, #3
+    movz x13, #7
     cmp  x12, x13
     b.ne fail3
 
@@ -104,55 +104,61 @@ sync_lower:
 lower_sync_handler:
     mrs  x20, esr_el1
     ubfx x21, x20, #26, #6
-    cbnz x21, handler_fail
 
     mrs  x22, elr_el1
     adr  x23, el0_mrs_midr_insn
     cmp  x22, x23
-    b.eq undef_midr
+    b.eq handle_midr
     adr  x23, el0_mrs_clidr_insn
     cmp  x22, x23
-    b.eq undef_clidr
+    b.eq handle_clidr
     adr  x23, el0_mrs_mmfr0_insn
     cmp  x22, x23
-    b.eq undef_mmfr0
+    b.eq handle_mmfr0
     b handler_fail
 
-undef_midr:
+handle_midr:
+    movz x24, #0x18
+    cmp  x21, x24
+    b.ne handler_fail
     movz x24, #0x4321
     movk x24, #0x8765, lsl #16
     movk x24, #0xcba9, lsl #32
     movk x24, #0x0fed, lsl #48
     cmp  x0, x24
     b.ne handler_fail
-    adr  x25, trap_count
+    adr  x25, stage_flags
     movz x26, #1
     str  x26, [x25]
     adr  x27, after_midr
     b return_to_el1
 
-undef_clidr:
+handle_clidr:
+    cbnz x21, handler_fail
     movz x24, #0x1111
     movk x24, #0x2222, lsl #16
     movk x24, #0x3333, lsl #32
     movk x24, #0x4444, lsl #48
     cmp  x0, x24
     b.ne handler_fail
-    adr  x25, trap_count
-    movz x26, #2
+    adr  x25, stage_flags
+    movz x26, #3
     str  x26, [x25]
     adr  x27, after_clidr
     b return_to_el1
 
-undef_mmfr0:
+handle_mmfr0:
+    movz x24, #0x18
+    cmp  x21, x24
+    b.ne handler_fail
     movz x24, #0xaaaa
     movk x24, #0xbbbb, lsl #16
     movk x24, #0xcccc, lsl #32
     movk x24, #0xdddd, lsl #48
     cmp  x0, x24
     b.ne handler_fail
-    adr  x25, trap_count
-    movz x26, #3
+    adr  x25, stage_flags
+    movz x26, #7
     str  x26, [x25]
     adr  x27, after_mmfr0
 
@@ -172,5 +178,5 @@ handler_fail:
 
     .data
     .balign 8
-trap_count:
+stage_flags:
     .quad 0

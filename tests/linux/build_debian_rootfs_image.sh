@@ -4,35 +4,40 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-ROOTFS_DIR="${AARCHVM_DEBIAN_ROOTFS_DIR:-out/debian-arm64-bookworm-rootfs}"
-IMAGE_PATH="${AARCHVM_DEBIAN_ROOTFS_IMAGE:-out/debian-arm64-bookworm.ext4}"
-ROOTFS_SOURCE="${AARCHVM_DEBIAN_ROOTFS_SOURCE:-auto}"
+PROFILE="${AARCHVM_DEBIAN_PROFILE:-smoke}"
+if [[ "$PROFILE" == "systemd" ]]; then
+  ROOTFS_DIR_DEFAULT="out/debian-arm64-bookworm-systemd-rootfs"
+  IMAGE_PATH_DEFAULT="out/debian-arm64-bookworm-systemd.ext4"
+  VARIANT_DEFAULT="minbase"
+  EXTRA_MB_DEFAULT="512"
+  INCLUDE_DEFAULT="systemd-sysv,dbus,udev"
+else
+  ROOTFS_DIR_DEFAULT="out/debian-arm64-bookworm-rootfs"
+  IMAGE_PATH_DEFAULT="out/debian-arm64-bookworm.ext4"
+  VARIANT_DEFAULT="minbase"
+  EXTRA_MB_DEFAULT="256"
+  INCLUDE_DEFAULT=""
+fi
+
+ROOTFS_DIR="${AARCHVM_DEBIAN_ROOTFS_DIR:-$ROOTFS_DIR_DEFAULT}"
+IMAGE_PATH="${AARCHVM_DEBIAN_ROOTFS_IMAGE:-$IMAGE_PATH_DEFAULT}"
+DEBOOTSTRAP_MODE="${AARCHVM_DEBIAN_DEBOOTSTRAP_MODE:-auto}"
 SUITE="${AARCHVM_DEBIAN_SUITE:-bookworm}"
 ARCH="${AARCHVM_DEBIAN_ARCH:-arm64}"
+DEBOOTSTRAP_CACHE_DIR="${AARCHVM_DEBIAN_CACHE_DIR:-out/debootstrap-cache-$PROFILE-$ARCH}"
 MIRROR="${AARCHVM_DEBIAN_MIRROR:-http://deb.debian.org/debian}"
-VARIANT="${AARCHVM_DEBIAN_VARIANT:-minbase}"
-DOCKER_IMAGE="${AARCHVM_DEBIAN_DOCKER_IMAGE:-debian:bookworm-slim}"
-HELPER_IMAGE="${AARCHVM_DEBIAN_HELPER_IMAGE:-debian:bookworm-slim}"
-PLATFORM="${AARCHVM_DEBIAN_PLATFORM:-linux/arm64}"
-EXTRA_MB="${AARCHVM_DEBIAN_IMAGE_EXTRA_MB:-256}"
-
-HOST_HELPER_PLATFORM="${AARCHVM_DEBIAN_HELPER_PLATFORM:-}"
-if [[ -z "$HOST_HELPER_PLATFORM" ]]; then
-  case "$(uname -m)" in
-    x86_64) HOST_HELPER_PLATFORM="linux/amd64" ;;
-    aarch64) HOST_HELPER_PLATFORM="linux/arm64" ;;
-    *) HOST_HELPER_PLATFORM="" ;;
-  esac
-fi
-
-HELPER_ARGS=()
-if [[ -n "$HOST_HELPER_PLATFORM" ]]; then
-  HELPER_ARGS+=(--platform "$HOST_HELPER_PLATFORM")
-fi
+VARIANT="${AARCHVM_DEBIAN_VARIANT:-$VARIANT_DEFAULT}"
+INCLUDE_PACKAGES="${AARCHVM_DEBIAN_INCLUDE:-$INCLUDE_DEFAULT}"
+EXTRA_MB="${AARCHVM_DEBIAN_IMAGE_EXTRA_MB:-$EXTRA_MB_DEFAULT}"
 
 mkdir -p out
-rm -rf "$ROOTFS_DIR"
-mkdir -p "$ROOTFS_DIR"
+mkdir -p "$(dirname "$ROOTFS_DIR")" "$(dirname "$IMAGE_PATH")" "$(dirname "$DEBOOTSTRAP_CACHE_DIR")"
+ROOTFS_DIR_ABS="$(cd "$(dirname "$ROOTFS_DIR")" && pwd)/$(basename "$ROOTFS_DIR")"
+IMAGE_PATH_ABS="$(cd "$(dirname "$IMAGE_PATH")" && pwd)/$(basename "$IMAGE_PATH")"
+DEBOOTSTRAP_CACHE_DIR_ABS="$(cd "$(dirname "$DEBOOTSTRAP_CACHE_DIR")" && pwd)/$(basename "$DEBOOTSTRAP_CACHE_DIR")"
+mkdir -p "$DEBOOTSTRAP_CACHE_DIR_ABS"
+rm -rf "$ROOTFS_DIR_ABS"
+mkdir -p "$ROOTFS_DIR_ABS"
 
 find_debootstrap() {
   if command -v debootstrap >/dev/null 2>&1; then
@@ -43,102 +48,93 @@ find_debootstrap() {
   PATH="$PATH:/sbin" command -v debootstrap
 }
 
-select_rootfs_source() {
-  case "$ROOTFS_SOURCE" in
+select_debootstrap_mode() {
+  case "$DEBOOTSTRAP_MODE" in
     auto)
-      if find_debootstrap >/dev/null 2>&1; then
-        printf 'debootstrap\n'
-      else
-        printf 'docker\n'
-      fi
+      case "$(uname -m):$ARCH" in
+        aarch64:arm64|arm64:arm64)
+          printf 'native\n'
+          ;;
+        *)
+          if [[ -e /proc/sys/fs/binfmt_misc/qemu-aarch64 ]]; then
+            printf 'native\n'
+          else
+            echo "native arm64 debootstrap requires either an arm64 host or qemu-aarch64 binfmt support; foreign/second-stage mode is no longer used" >&2
+            exit 1
+          fi
+          ;;
+      esac
       ;;
-    debootstrap|docker)
-      printf '%s\n' "$ROOTFS_SOURCE"
+    native)
+      printf 'native\n'
       ;;
     *)
-      echo "unsupported AARCHVM_DEBIAN_ROOTFS_SOURCE: $ROOTFS_SOURCE" >&2
+      echo "unsupported AARCHVM_DEBIAN_DEBOOTSTRAP_MODE: $DEBOOTSTRAP_MODE (only 'native' or 'auto' are supported)" >&2
       exit 1
       ;;
   esac
 }
 
-cleanup_container() {
-  if [[ -n "${CONTAINER_ID:-}" ]]; then
-    docker rm -f "$CONTAINER_ID" >/dev/null 2>&1 || true
-  fi
-}
-trap cleanup_container EXIT
-
-ROOTFS_SOURCE_SELECTED="$(select_rootfs_source)"
-
-if [[ "$ROOTFS_SOURCE_SELECTED" == "debootstrap" ]]; then
-  DEBOOTSTRAP_BIN="$(find_debootstrap)"
-  echo "building Debian rootfs with debootstrap..."
-  DEBOOTSTRAP_CMD=(
-    env "PATH=$(dirname "$DEBOOTSTRAP_BIN"):$PATH:/sbin"
-    "$DEBOOTSTRAP_BIN"
-    --arch="$ARCH"
-    --foreign
-    --variant="$VARIANT"
-    "$SUITE"
-    "$ROOTFS_DIR"
-    "$MIRROR"
-  )
-  if [[ "$(id -u)" -ne 0 ]]; then
-    if command -v fakeroot >/dev/null 2>&1; then
-      DEBOOTSTRAP_CMD=(fakeroot "${DEBOOTSTRAP_CMD[@]}")
-    else
-      echo "debootstrap requires root or fakeroot" >&2
-      exit 1
+restore_output_owner() {
+  if [[ -n "${SUDO_UID:-}" && -n "${SUDO_GID:-}" ]]; then
+    chown -R "$SUDO_UID:$SUDO_GID" "$ROOTFS_DIR_ABS" "$DEBOOTSTRAP_CACHE_DIR_ABS" 2>/dev/null || true
+    if [[ -e "$IMAGE_PATH_ABS" ]]; then
+      chown "$SUDO_UID:$SUDO_GID" "$IMAGE_PATH_ABS" 2>/dev/null || true
     fi
   fi
-  "${DEBOOTSTRAP_CMD[@]}"
-else
-  echo "exporting Debian rootfs from docker image..."
-  CONTAINER_ID="$(docker create --platform "$PLATFORM" "$DOCKER_IMAGE")"
-  docker export "$CONTAINER_ID" | tar \
-    --extract \
-    --file - \
-    --directory "$ROOTFS_DIR" \
-    --no-same-owner \
-    --exclude='./dev/*' \
-    --exclude='./proc/*' \
-    --exclude='./sys/*' \
-    --exclude='./tmp/*'
-  docker rm -f "$CONTAINER_ID" >/dev/null
-  CONTAINER_ID=""
+}
+
+if ! find_debootstrap >/dev/null 2>&1; then
+  echo "missing host debootstrap; install it on the host and rerun this script" >&2
+  exit 1
 fi
 
-USED_KB="$(du -sk "$ROOTFS_DIR" | awk '{print $1}')"
+DEBOOTSTRAP_BIN="$(find_debootstrap)"
+DEBOOTSTRAP_MODE_SELECTED="$(select_debootstrap_mode)"
+echo "building Debian rootfs with host-native debootstrap..."
+DEBOOTSTRAP_CMD=(
+  env "PATH=$(dirname "$DEBOOTSTRAP_BIN"):$PATH:/sbin"
+  "$DEBOOTSTRAP_BIN"
+  --arch="$ARCH"
+  --variant="$VARIANT"
+  --cache-dir="$DEBOOTSTRAP_CACHE_DIR_ABS"
+)
+if [[ -n "$INCLUDE_PACKAGES" ]]; then
+  DEBOOTSTRAP_CMD+=("--include=$INCLUDE_PACKAGES")
+fi
+DEBOOTSTRAP_CMD+=(
+  "$SUITE"
+  "$ROOTFS_DIR_ABS"
+  "$MIRROR"
+)
+if [[ "$(id -u)" -ne 0 ]]; then
+  echo "native debootstrap requires running directly on the host with root privileges; rerun this script outside the sandbox via sudo or as root" >&2
+  exit 1
+fi
+"${DEBOOTSTRAP_CMD[@]}"
+mkdir -p "$ROOTFS_DIR_ABS/etc"
+: > "$ROOTFS_DIR_ABS/etc/.aarchvm-debootstrap-second-stage-done"
+
+USED_KB="$(du -sk "$ROOTFS_DIR_ABS" | awk '{print $1}')"
 SIZE_KB="$((USED_KB + EXTRA_MB * 1024))"
 SIZE_MB="$(((SIZE_KB + 1023) / 1024))"
 
-rm -f "$IMAGE_PATH"
+rm -f "$IMAGE_PATH_ABS"
 
 echo "building ext4 image..."
-if PATH="$PATH:/sbin" command -v mke2fs >/dev/null 2>&1; then
-  truncate -s "${SIZE_MB}M" "$IMAGE_PATH"
-  PATH="$PATH:/sbin" mke2fs -q -t ext4 -F -L aarchvm-debian -d "$ROOTFS_DIR" "$IMAGE_PATH" "${SIZE_KB}K"
-else
-  docker run --rm \
-    "${HELPER_ARGS[@]}" \
-    -v "$ROOT_DIR:/work" \
-    -w /work \
-    "$HELPER_IMAGE" \
-    bash -lc '
-      set -euo pipefail
-      export DEBIAN_FRONTEND=noninteractive
-      if ! command -v mke2fs >/dev/null 2>&1; then
-        apt-get update >/dev/null
-        apt-get install -y e2fsprogs >/dev/null
-      fi
-      truncate -s "'"${SIZE_MB}"'M" "'"${IMAGE_PATH}"'"
-      mke2fs -q -t ext4 -F -L aarchvm-debian -d "'"${ROOTFS_DIR}"'" "'"${IMAGE_PATH}"'" "'"${SIZE_KB}"'K"
-    '
+if ! PATH="$PATH:/sbin" command -v mke2fs >/dev/null 2>&1; then
+  echo "missing host mke2fs; install e2fsprogs on the host and rerun this script" >&2
+  exit 1
 fi
+truncate -s "${SIZE_MB}M" "$IMAGE_PATH_ABS"
+PATH="$PATH:/sbin" mke2fs -q -t ext4 -F -L aarchvm-debian -d "$ROOTFS_DIR_ABS" "$IMAGE_PATH_ABS" "${SIZE_KB}K"
+restore_output_owner
 
-printf 'Debian arm64 rootfs ready\nrootfs: %s\nimage: %s\nsize: %s MiB\nsource: %s\nsuite: %s\narch: %s\nmirror: %s\n' \
-  "$ROOTFS_DIR" "$IMAGE_PATH" "$SIZE_MB" "$ROOTFS_SOURCE_SELECTED" "$SUITE" "$ARCH" "$MIRROR"
-if [[ "$ROOTFS_SOURCE_SELECTED" == "docker" ]]; then
-  printf 'docker image: %s\nplatform: %s\n' "$DOCKER_IMAGE" "$PLATFORM"
+printf 'Debian arm64 rootfs ready\nrootfs: %s\nimage: %s\nsize: %s MiB\nsuite: %s\narch: %s\nmirror: %s\n' \
+  "$ROOTFS_DIR_ABS" "$IMAGE_PATH_ABS" "$SIZE_MB" "$SUITE" "$ARCH" "$MIRROR"
+printf 'profile: %s\nvariant: %s\n' "$PROFILE" "$VARIANT"
+printf 'debootstrap mode: %s\n' "$DEBOOTSTRAP_MODE_SELECTED"
+if [[ -n "$INCLUDE_PACKAGES" ]]; then
+  printf 'include: %s\n' "$INCLUDE_PACKAGES"
 fi
+printf 'cache dir: %s\n' "$DEBOOTSTRAP_CACHE_DIR_ABS"

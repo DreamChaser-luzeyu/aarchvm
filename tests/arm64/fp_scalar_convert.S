@@ -38,6 +38,22 @@ _start:
     cmp x10, x11
     b.ne fail
 
+    ldr w12, =0x40600000 // 3.5f
+    fmov s7, w12
+    fcvt d8, s7
+    fmov x13, d8
+    ldr x14, =0x400c000000000000 // 3.5
+    cmp x13, x14
+    b.ne fail
+
+    ldr x15, =0xc004000000000000 // -2.5
+    fmov d9, x15
+    fcvt s10, d9
+    fmov w16, s10
+    ldr w17, =0xc0200000 // -2.5f
+    cmp w16, w17
+    b.ne fail
+
     movz x0, #'W'
     str  x0, [x20]
     movz x0, #'\n'

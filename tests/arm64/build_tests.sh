@@ -105,6 +105,9 @@ build_asm_prog fpsimd_mov_elem
 build_asm_prog fpsimd_arith_shift_perm
 build_asm_prog fpsimd_fp_vector
 build_asm_prog fpsimd_more_perm_fp
+build_asm_prog fpsimd_cmp_reg_family
+build_asm_prog fpsimd_debian_unimpl
+build_asm_prog fpsimd_xtn
 build_asm_prog fpsimd_structured_ls
 build_asm_prog fpsimd_structured_ls_more
 build_asm_prog fpsimd_structured_ls_regpost

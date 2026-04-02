@@ -1,3 +1,79 @@
+# 修改日志 2026-04-02 22:08
+
+## 本轮修改
+
+- 为 Debian `systemd` 启动路径补上明确的 root 默认密码：
+  - [tests/linux/build_debian_systemd_initramfs.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/build_debian_systemd_initramfs.sh)
+  - [doc/README.en.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/README.en.md)
+  - [doc/README.zh.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/README.zh.md)
+  - [CHANGELOG.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/CHANGELOG.md)
+- 生成的 Debian handoff `initramfs` 现在会在切换根文件系统前检查 `/etc/.aarchvm-root-password-v1`：
+  - 若标记不存在，则在 guest 内对 `/dev/vda` 上的 Debian rootfs 执行 `root:000000` 的一次性密码设置；
+  - 该步骤与现有的 `.aarchvm-systemd-configured` 分离，因此旧镜像即使已经完成过首次配置，也会在下次启动时补上这次新增的 root 密码；
+  - 设置完成后写入单独标记，避免后续每次启动都覆盖用户在 guest 内自行修改过的密码。
+- 文档同步更新了 GUI Debian 启动路径的说明，并明确：
+  - framebuffer `tty1` 默认可用 `root / 000000` 登录；
+  - 串口 `ttyAMA0` 仍保留 `root` 自动登录。
+
+## 本轮测试
+
+- `timeout 30s bash -n tests/linux/build_debian_systemd_initramfs.sh tests/linux/run_gui_tty1.sh`
+- `timeout 120s ./tests/linux/build_debian_systemd_initramfs.sh`
+
+## 当前结论
+
+- 重新生成的 [out/initramfs-debian-systemd.cpio.gz](/media/luzeyu/Storage2/FOSS_src/aarchvm/out/initramfs-debian-systemd.cpio.gz) 已包含 root 密码初始化逻辑。
+- 之后通过 `run_gui_tty1.sh` 进入 Debian 时，`tty1` 登录应使用：
+  - 用户名：`root`
+  - 密码：`000000`
+
+# 修改日志 2026-04-02 21:49
+
+## 本轮修改
+
+- 将 [tests/linux/run_gui_tty1.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/run_gui_tty1.sh) 的默认启动目标切换为 Debian `systemd` 路径：
+  - 默认 `initramfs` 改为 `out/initramfs-debian-systemd.cpio.gz`；
+  - 默认块设备镜像改为 `out/debian-arm64-bookworm-systemd.ext4`；
+  - 缺失默认 `initramfs` 时自动调用 `tests/linux/build_debian_systemd_initramfs.sh`；
+  - 缺失默认 Debian 镜像时自动调用 `AARCHVM_DEBIAN_PROFILE=systemd tests/linux/build_debian_rootfs_image.sh`；
+  - 默认 `bootargs` 改为 Debian rootfs 所需的 `rdinit=/init root=/dev/vda rw rootfstype=ext4 systemd.*` 组合，并保留 `console=tty1` 作为图形控制台。
+- 同时修正了该脚本里重复追加 `-arch-timer-mode` 的问题，避免末尾固定的 `host` 覆盖环境变量 `AARCHVM_ARCH_TIMER_MODE`。
+
+## 本轮测试
+
+- 按你的要求，本轮未执行测试。
+
+## 当前结论
+
+- 现在 `tests/linux/run_gui_tty1.sh` 默认会直接走 Debian `systemd` 启动路径；对应的引导 `initramfs` 是 `out/initramfs-debian-systemd.cpio.gz`。
+
+# 修改日志 2026-04-02 21:39
+
+## 本轮修改
+
+- 收敛 Debian rootfs 构建路径到宿主机原生 `debootstrap`：
+  - [tests/linux/build_debian_rootfs_image.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/build_debian_rootfs_image.sh)
+  - [doc/README.en.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/README.en.md)
+  - [doc/README.zh.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/README.zh.md)
+  - [CHANGELOG.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/CHANGELOG.md)
+- `tests/linux/build_debian_rootfs_image.sh` 不再回退到 Docker，也不再使用 `--foreign` / second-stage 路径；现在只允许宿主机原生 `debootstrap`，并在缺少 `binfmt`、`debootstrap`、`mke2fs` 或 root 权限时给出明确错误。
+- 文档中的 Debian rootfs 构建说明同步更新为“宿主机原生执行”模型，并明确：
+  - 非 arm64 宿主机需要 `qemu-aarch64` 的 `binfmt` 支持；
+  - 推荐直接用 `sudo` 运行，脚本会恢复输出文件属主。
+
+## 本轮测试
+
+- `timeout 30s bash -n tests/linux/build_debian_rootfs_image.sh tests/linux/build_debian_systemd_initramfs.sh tests/linux/run_debian_systemd_boot.sh`
+- `timeout 30s env AARCHVM_DEBIAN_PROFILE=systemd AARCHVM_DEBIAN_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian ./tests/linux/build_debian_rootfs_image.sh`
+- `sudo -n timeout 5400s env PATH="$PATH:/sbin" AARCHVM_DEBIAN_PROFILE=systemd AARCHVM_DEBIAN_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian ./tests/linux/build_debian_rootfs_image.sh`
+
+## 当前结论
+
+- 宿主机原生 `debootstrap` 路径已经在当前机器上实际跑通，并成功生成：
+  - `out/debian-arm64-bookworm-systemd-rootfs`
+  - `out/debian-arm64-bookworm-systemd.ext4`
+- 后续若需要重建 Debian `systemd` rootfs，应优先直接在宿主机上用 `sudo ./tests/linux/build_debian_rootfs_image.sh`，而不是再走 Docker/second-stage 变通路径。
+
 # 修改日志 2026-04-02 00:39
 
 ## 本轮修改
@@ -6590,3 +6666,36 @@
 
 - 这次 `chroot` 残留 `SIGILL` 的真实根因不是 `/bin/sh`，而是默认 `chroot` 进入的交互式 `bash` 路径命中了此前未实现的 AdvSIMD 元素复制指令。
 - 现在默认 `chroot` 的交互式 bash 路径与显式 `/bin/sh -c` 路径都已通过验证，裸机全回归、Linux UMP 回归、Linux SMP 回归也已全部通过。
+
+# 修改日志 2026-04-03 00:47
+
+## 本轮修改
+
+- 继续审计 AArch64/Armv8-A 浮点与 AdvSIMD 解码边界，定位到一个真实的“掩码过宽误截获”问题：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp#L6991) 中 `FCVT Dd, Sn` / `FCVT Sd, Dn` 原先共用 `insn & 0xFF3FFC00u` 分组，导致 `fcvt s?, d?` 会被错误落入其他路径并表现为未实现。
+- 将这两个标量格式转换指令改为独立的精确匹配：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp#L6991)
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp#L7003)
+- 扩展裸机回归 [tests/arm64/fp_scalar_convert.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_scalar_convert.S#L41)，新增对：
+  - `FCVT Dd, Sn`
+  - `FCVT Sd, Dn`
+  的直接结果检查，避免这类解码回归再次只在 Linux 用户态路径里暴露。
+- 修正 [tests/arm64/fpsimd_debian_unimpl.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_debian_unimpl.S#L230) 中 `CNT` 的一处错误期望值：
+  - `0x88` 的 bitcount 应为 `2`，原测试误写成了 `1`。
+
+## 本轮测试
+
+- `timeout 1800s cmake --build build -j4`
+- `timeout 1800s ./tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -decode slow -bin tests/arm64/out/fp_scalar_convert.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -decode slow -bin tests/arm64/out/fpsimd_debian_unimpl.bin -load 0x0 -entry 0x0 -steps 1200000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+- `timeout 2400s ./tests/linux/run_block_mount_smoke.sh`
+
+## 当前结论
+
+- 这次 Debian 路径里的 `SIGILL` / `UNIMPL` 根因是标量 `FCVT` 解码掩码过宽，而不是后续 `CNT`/`CMHI`/`SADDW` 一类指令本身实现错误。
+- 修复后，定向裸机用例、裸机全回归、Linux UMP 功能回归、Linux SMP 功能回归、Debian 块设备与 `chroot` smoke 都已通过。
+- 额外试跑了 Debian `systemd` 启动路径，系统已能进入 `multi-user.target` 并完成 `aarchvm-ready.service`；当前卡点不在 ISA，而是脚本使用的串口 stop pattern 没有真正落到日志中，这个属于测试脚本路径问题，未在本轮改动。

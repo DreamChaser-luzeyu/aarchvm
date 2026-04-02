@@ -295,12 +295,13 @@ mkdir -p out/initramfs-full-root/{dev,proc,sys,tmp,run,root,mnt,etc}
 ./tests/linux/build_debian_rootfs_image.sh
 ```
 
-该脚本现在会优先使用本机 `debootstrap`；若本机不可用，再回退到 Docker 导出。
-当以非 root 身份运行且宿主机存在 `fakeroot` 时，脚本会自动用 `fakeroot` 包裹 `debootstrap`。
-默认的 `debootstrap` 路径使用 `--foreign`，目标是块设备挂载/检查冒烟，而不是直接启动 Debian `init`。
+该脚本现在只走宿主机原生 `debootstrap` 路径。
+它不再回退到 Docker，也不再使用 `--foreign` / second-stage 流程。
+若宿主机不是 arm64，则需要事先配置好 `qemu-aarch64` 的 `binfmt` 支持。
+请以 `root` 或 `sudo` 方式运行；若通过 `sudo` 调用，脚本会在结束后恢复输出文件属主。
 
 常用环境变量：
-- `AARCHVM_DEBIAN_ROOTFS_SOURCE=auto|debootstrap|docker`
+- `AARCHVM_DEBIAN_DEBOOTSTRAP_MODE=auto|native`
 - `AARCHVM_DEBIAN_SUITE=<suite>`
 - `AARCHVM_DEBIAN_ARCH=<arch>`
 - `AARCHVM_DEBIAN_MIRROR=<mirror>`
@@ -439,17 +440,22 @@ mkdir -p out/initramfs-full-root/{dev,proc,sys,tmp,run,root,mnt,etc}
 ./tests/linux/run_gui_tty1.sh
 ```
 
-该脚本会使用如下命令行风格启动：
+该脚本现在会通过 Debian 交接 `initramfs` 冷启动 Debian `systemd` 块设备镜像，命令行风格如下：
 
 ```text
-console=ttyAMA0,115200 console=tty1 earlycon=pl011,0x09000000 rdinit=/init initramfs_async=0
+console=ttyAMA0,115200 console=tty1 earlycon=pl011,0x09000000 rdinit=/init root=/dev/vda rw rootfstype=ext4 initramfs_async=0 systemd.unit=multi-user.target systemd.log_level=info systemd.log_target=console
 ```
 
 含义是：
 - 保留串口日志，便于排错
-- 让 `tty1` 成为当前 Linux 控制台，使 shell 直接显示到 framebuffer
+- 让 `tty1` 成为当前 Linux 控制台，使 Debian 登录界面直接显示到 framebuffer
 - GUI 路径使用与脚本一致的 2 核 SMP 设备树
+- 让 `initramfs` 挂载 `/dev/vda` 并切换进入 Debian rootfs
 - SDL 窗口中的键盘输入通过 PL050 PS/2 键盘送入 Linux
+
+默认凭据：
+- framebuffer `tty1`：用户名 `root`，密码 `000000`
+- 串口 `ttyAMA0`：生成的 Debian 测试镜像仍保留 `root` 自动登录
 
 `run_gui_tty1.sh` 负责完整冷启动 GUI 路径，并默认在结束时保存一个快照；`run_gui_tty1_from_snapshot.sh` 则是在该快照已经存在时的快速恢复入口。
 这两个 GUI 脚本也默认启用 `-arch-timer-mode host`，以便 framebuffer shell 在手工使用时拥有正常的时间流速。
