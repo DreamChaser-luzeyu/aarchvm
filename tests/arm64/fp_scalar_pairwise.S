@@ -69,6 +69,51 @@ _start:
     cmp  x2, #1
     b.ne fail6
 
+    msr  fpsr, xzr
+    adr  x22, src_maxp_d
+    ldr  q12, [x22]
+    fmaxp d13, v12.2d
+    str  d13, [x21, #48]
+    add  x0, x21, #48
+    adr  x1, exp_maxp_d
+    bl   check8_7
+    mrs  x2, fpsr
+    cbnz x2, fail7
+
+    msr  fpsr, xzr
+    adr  x22, src_minp_s
+    ldr  d14, [x22]
+    fminp s15, v14.2s
+    str  s15, [x21, #56]
+    add  x0, x21, #56
+    adr  x1, exp_minp_s
+    bl   check4_8
+    mrs  x2, fpsr
+    cbnz x2, fail8
+
+    msr  fpsr, xzr
+    adr  x22, src_maxnmp_d
+    ldr  q16, [x22]
+    fmaxnmp d17, v16.2d
+    str  d17, [x21, #64]
+    add  x0, x21, #64
+    adr  x1, exp_maxnmp_d
+    bl   check8_9
+    mrs  x2, fpsr
+    cmp  x2, #1
+    b.ne fail9
+
+    msr  fpsr, xzr
+    adr  x22, src_minnmp_s
+    ldr  d18, [x22]
+    fminnmp s19, v18.2s
+    str  s19, [x21, #72]
+    add  x0, x21, #72
+    adr  x1, exp_minnmp_s
+    bl   check4_10
+    mrs  x2, fpsr
+    cbnz x2, fail10
+
     movz x0, #'Y'
     str  x0, [x20]
     brk  #0
@@ -115,6 +160,34 @@ check8_6:
     b.ne fail6
     ret
 
+check8_7:
+    ldr  x2, [x0]
+    ldr  x3, [x1]
+    cmp  x2, x3
+    b.ne fail7
+    ret
+
+check4_8:
+    ldr  w2, [x0]
+    ldr  w3, [x1]
+    cmp  w2, w3
+    b.ne fail8
+    ret
+
+check8_9:
+    ldr  x2, [x0]
+    ldr  x3, [x1]
+    cmp  x2, x3
+    b.ne fail9
+    ret
+
+check4_10:
+    ldr  w2, [x0]
+    ldr  w3, [x1]
+    cmp  w2, w3
+    b.ne fail10
+    ret
+
 fail1:
     movz x0, #'1'
     b done
@@ -132,6 +205,18 @@ fail5:
     b done
 fail6:
     movz x0, #'6'
+    b done
+fail7:
+    movz x0, #'7'
+    b done
+fail8:
+    movz x0, #'8'
+    b done
+fail9:
+    movz x0, #'9'
+    b done
+fail10:
+    movz x0, #'A'
 done:
     str  x0, [x20]
     brk  #0
@@ -173,5 +258,29 @@ src_minnmp_d:
 exp_minnmp_d:
     .quad 0x7ff8123456789abc
 
+    .balign 16
+src_maxp_d:
+    .quad 0xfff0000000000000, 0x3ff0000000000000
+exp_maxp_d:
+    .quad 0x3ff0000000000000
+
+    .balign 16
+src_minp_s:
+    .word 0x40400000, 0xc0200000
+exp_minp_s:
+    .word 0xc0200000
+
+    .balign 16
+src_maxnmp_d:
+    .quad 0x7ff0123456789abc, 0x4008000000000000
+exp_maxnmp_d:
+    .quad 0x7ff8123456789abc
+
+    .balign 16
+src_minnmp_s:
+    .word 0x7fc12345, 0xbf800000
+exp_minnmp_s:
+    .word 0xbf800000
+
 dst:
-    .space 48
+    .space 80

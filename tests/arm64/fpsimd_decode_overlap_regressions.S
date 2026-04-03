@@ -13,6 +13,7 @@ _start:
     ldr  q0, [x22]
     ushr v1.8h, v0.8h, #3
     str  q1, [x21]
+    movz x24, #'1'
     mov  x0, x21
     adr  x1, exp_ushr
     bl   check16
@@ -21,12 +22,14 @@ _start:
     ldr  q2, [x22]
     sshr v3.4s, v2.4s, #5
     str  q3, [x21, #16]
+    movz x24, #'2'
     add  x0, x21, #16
     adr  x1, exp_sshr
     bl   check16
 
     movi v4.4s, #0x34, lsl #8
     str  q4, [x21, #32]
+    movz x24, #'3'
     add  x0, x21, #32
     adr  x1, exp_movi32_8
     bl   check16
@@ -34,12 +37,14 @@ _start:
     movi v5.16b, #0
     orr  v5.8h, #0xf, lsl #8
     str  q5, [x21, #48]
+    movz x24, #'4'
     add  x0, x21, #48
     adr  x1, exp_orr16_8
     bl   check16
 
     mvni v6.4s, #0x34, lsl #8
     str  q6, [x21, #64]
+    movz x24, #'5'
     add  x0, x21, #64
     adr  x1, exp_mvni32_8
     bl   check16
@@ -47,6 +52,7 @@ _start:
     movi v7.16b, #0x33
     bic  v7.8h, #0xf0
     str  q7, [x21, #80]
+    movz x24, #'6'
     add  x0, x21, #80
     adr  x1, exp_bic_lo
     bl   check16
@@ -57,6 +63,7 @@ _start:
     ldr  q17, [x22]
     trn1 v18.4s, v16.4s, v17.4s
     str  q18, [x21, #96]
+    movz x24, #'7'
     add  x0, x21, #96
     adr  x1, exp_trn1
     bl   check16
@@ -65,6 +72,7 @@ _start:
     ldr  q19, [x22]
     xtn  v20.8b, v19.8h
     str  d20, [x21, #112]
+    movz x24, #'8'
     add  x0, x21, #112
     adr  x1, exp_xtn8
     bl   check8
@@ -75,6 +83,7 @@ _start:
     ldr  q22, [x22]
     xtn2 v21.16b, v22.8h
     str  q21, [x21, #128]
+    movz x24, #'9'
     add  x0, x21, #128
     adr  x1, exp_xtn2_8
     bl   check16
@@ -85,6 +94,7 @@ _start:
     ldr  q24, [x22]
     fdiv v25.4s, v23.4s, v24.4s
     str  q25, [x21, #144]
+    movz x24, #'a'
     add  x0, x21, #144
     adr  x1, exp_div_s
     bl   check16
@@ -97,8 +107,36 @@ _start:
     ldr  q27, [x22]
     frecps v28.4s, v26.4s, v27.4s
     str  q28, [x21, #160]
+    movz x24, #'b'
     add  x0, x21, #160
     adr  x1, exp_vec_frecps_s
+    bl   check16
+
+    adr  x22, overlap_fcvt_s_src
+    ldr  q0, [x22]
+    fcvtns v1.4s, v0.4s
+    str  q1, [x21, #176]
+    movz x24, #'c'
+    add  x0, x21, #176
+    adr  x1, exp_overlap_fcvtns_s
+    bl   check16
+
+    adr  x22, overlap_fcvt_2s_src
+    ldr  q0, [x22]
+    fcvtps v2.2s, v0.2s
+    str  q2, [x21, #192]
+    movz x24, #'d'
+    add  x0, x21, #192
+    adr  x1, exp_overlap_fcvtps_2s
+    bl   check16
+
+    adr  x22, overlap_fcvt_d_src
+    ldr  q0, [x22]
+    fcvtns v3.2d, v0.2d
+    str  q3, [x21, #208]
+    movz x24, #'e'
+    add  x0, x21, #208
+    adr  x1, exp_overlap_fcvtns_d
     bl   check16
 
     movz x0, #'O'
@@ -126,8 +164,7 @@ check16:
     ret
 
 fail:
-    movz x0, #'F'
-    str  x0, [x20]
+    str  x24, [x20]
     brk  #0
 
     .data
@@ -190,5 +227,20 @@ src_vec_frecps_s_rhs:
 exp_vec_frecps_s:
     .word 0x3fc00000, 0x00000000, 0x40000000, 0x40800000
 
+overlap_fcvt_s_src:
+    .word 0x3fc00000, 0xc0200000, 0x40600000, 0xbf400000
+exp_overlap_fcvtns_s:
+    .word 0x00000002, 0xfffffffe, 0x00000004, 0xffffffff
+
+overlap_fcvt_2s_src:
+    .word 0x40066666, 0xc0066666, 0x00000000, 0x00000000
+exp_overlap_fcvtps_2s:
+    .word 0x00000003, 0xfffffffe, 0x00000000, 0x00000000
+
+overlap_fcvt_d_src:
+    .quad 0x3ff8000000000000, 0xc004000000000000
+exp_overlap_fcvtns_d:
+    .quad 0x0000000000000002, 0xfffffffffffffffe
+
 scratch:
-    .space 176
+    .space 224

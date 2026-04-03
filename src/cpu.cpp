@@ -236,6 +236,30 @@ std::uint64_t cls64(std::uint64_t value) {
   return static_cast<std::uint64_t>(__builtin_clzll(x) - 1);
 }
 
+std::uint64_t clz_bits(std::uint64_t value, std::uint32_t width) {
+  value &= ones(width);
+  if (value == 0u) {
+    return width;
+  }
+  if (width <= 32u) {
+    return static_cast<std::uint64_t>(__builtin_clz(static_cast<std::uint32_t>(value)) - (32u - width));
+  }
+  return static_cast<std::uint64_t>(__builtin_clzll(value) - (64u - width));
+}
+
+std::uint64_t cls_bits(std::uint64_t value, std::uint32_t width) {
+  value &= ones(width);
+  const std::uint64_t sign = (value >> (width - 1u)) & 1u;
+  std::uint64_t count = 0u;
+  for (int bit = static_cast<int>(width) - 2; bit >= 0; --bit) {
+    if (((value >> static_cast<std::uint32_t>(bit)) & 1u) != sign) {
+      break;
+    }
+    ++count;
+  }
+  return count;
+}
+
 std::uint32_t crc32_update(std::uint32_t crc, std::uint64_t data, std::uint32_t bytes, std::uint32_t poly_reflected) {
   for (std::uint32_t i = 0; i < bytes; ++i) {
     crc ^= static_cast<std::uint8_t>((data >> (8u * i)) & 0xFFu);
@@ -508,6 +532,54 @@ UIntT fp_binary_arith_bits(UIntT lhs_bits,
         return static_cast<FloatT>(a / b);
     }
     return lhs;
+  });
+  fpsr_bits |= host_fp_exceptions_to_fpsr(exceptions);
+  UIntT result_bits = std::bit_cast<UIntT>(result);
+  result_bits = fp_flush_output_denormal_bits(result_bits, fpcr_mode, fpsr_bits);
+  return result_bits;
+}
+
+template <typename UIntT, typename FloatT>
+UIntT fp_mulx_bits(UIntT lhs_bits, UIntT rhs_bits, std::uint32_t fpcr_mode, std::uint64_t& fpsr_bits) {
+  fpsr_bits = 0u;
+  if (const auto nan = fp_process_nan_binary(lhs_bits, rhs_bits, fpcr_mode, fpsr_bits); nan.has_value()) {
+    return *nan;
+  }
+  lhs_bits = fp_flush_input_denormal_bits(lhs_bits, fpcr_mode, fpsr_bits);
+  rhs_bits = fp_flush_input_denormal_bits(rhs_bits, fpcr_mode, fpsr_bits);
+  const UIntT sign_mask = fp_sign_mask_bits<UIntT>();
+  const UIntT exp_mask = []() constexpr -> UIntT {
+    if constexpr (sizeof(UIntT) == 4u) {
+      return 0x7F800000u;
+    } else {
+      return 0x7FF0000000000000ull;
+    }
+  }();
+  const UIntT frac_mask = []() constexpr -> UIntT {
+    if constexpr (sizeof(UIntT) == 4u) {
+      return 0x007FFFFFu;
+    } else {
+      return 0x000FFFFFFFFFFFFFull;
+    }
+  }();
+  const bool lhs_zero = (lhs_bits & ~sign_mask) == 0u;
+  const bool rhs_zero = (rhs_bits & ~sign_mask) == 0u;
+  const bool lhs_inf = (lhs_bits & exp_mask) == exp_mask && (lhs_bits & frac_mask) == 0u;
+  const bool rhs_inf = (rhs_bits & exp_mask) == exp_mask && (rhs_bits & frac_mask) == 0u;
+  if ((lhs_zero && rhs_inf) || (rhs_zero && lhs_inf)) {
+    UIntT result_bits = std::bit_cast<UIntT>(static_cast<FloatT>(2.0));
+    if (((lhs_bits ^ rhs_bits) & sign_mask) != 0u) {
+      result_bits |= sign_mask;
+    }
+    return result_bits;
+  }
+  int exceptions = 0;
+  const FloatT lhs = std::bit_cast<FloatT>(lhs_bits);
+  const FloatT rhs = std::bit_cast<FloatT>(rhs_bits);
+  const FloatT result = host_fp_eval<FloatT>(fpcr_mode, exceptions, [&]() {
+    volatile FloatT a = lhs;
+    volatile FloatT b = rhs;
+    return static_cast<FloatT>(a * b);
   });
   fpsr_bits |= host_fp_exceptions_to_fpsr(exceptions);
   UIntT result_bits = std::bit_cast<UIntT>(result);
@@ -1284,6 +1356,22 @@ std::uint32_t fp_rsqrt_estimate_integer(std::uint32_t a_in, bool increased_preci
   return static_cast<std::uint32_t>((b + 1u) / 2u);
 }
 
+std::uint32_t advsimd_unsigned_recip_estimate_bits(std::uint32_t operand) {
+  if ((operand >> 31u) == 0u) {
+    return 0xFFFFFFFFu;
+  }
+  const std::uint32_t estimate = fp_recip_estimate_integer((operand >> 23u) & 0x1FFu, false);
+  return (estimate & 0x1FFu) << 23u;
+}
+
+std::uint32_t advsimd_unsigned_rsqrt_estimate_bits(std::uint32_t operand) {
+  if (((operand >> 30u) & 0x3u) == 0u) {
+    return 0xFFFFFFFFu;
+  }
+  const std::uint32_t estimate = fp_rsqrt_estimate_integer((operand >> 23u) & 0x1FFu, false);
+  return (estimate & 0x1FFu) << 23u;
+}
+
 template <typename UIntT>
 UIntT fp_recip_estimate_bits(UIntT bits, std::uint32_t fpcr_mode, std::uint64_t& fpsr_bits) {
   static_assert(sizeof(UIntT) == 4u || sizeof(UIntT) == 8u);
@@ -1833,6 +1921,160 @@ UIntT saturate_unsigned_value(WideT value) {
     return std::numeric_limits<UIntT>::max();
   }
   return static_cast<UIntT>(value);
+}
+
+template <typename UIntT, typename WideT>
+UIntT saturate_signed_to_unsigned_value(WideT value) {
+  if (value <= 0) {
+    return 0;
+  }
+  const WideT max_value = static_cast<WideT>(std::numeric_limits<UIntT>::max());
+  if (value > max_value) {
+    return std::numeric_limits<UIntT>::max();
+  }
+  return static_cast<UIntT>(value);
+}
+
+std::uint64_t round_shift_right_unsigned(std::uint64_t value, std::uint32_t shift, bool round) {
+  __uint128_t wide = value;
+  if (round) {
+    wide += (__uint128_t{1} << (shift - 1u));
+  }
+  return static_cast<std::uint64_t>(wide >> shift);
+}
+
+std::int64_t round_shift_right_signed(std::int64_t value, std::uint32_t shift, bool round) {
+  __int128_t wide = value;
+  if (round) {
+    wide += (__int128_t{1} << (shift - 1u));
+  }
+  return static_cast<std::int64_t>(wide >> shift);
+}
+
+std::int64_t sign_extend_bits(std::uint64_t value, std::uint32_t bits) {
+  if (bits == 0u || bits >= 64u) {
+    return static_cast<std::int64_t>(value);
+  }
+  const std::uint32_t shift = 64u - bits;
+  return static_cast<std::int64_t>(value << shift) >> shift;
+}
+
+enum class ShiftRightNarrowMode {
+  PlainUnsigned,
+  SignedToSignedSaturating,
+  UnsignedToUnsignedSaturating,
+  SignedToUnsignedSaturating,
+};
+
+std::uint64_t shift_right_narrow_result(std::uint64_t value,
+                                        std::uint32_t src_esize_bits,
+                                        std::uint32_t dst_esize_bits,
+                                        std::uint32_t shift,
+                                        bool round,
+                                        ShiftRightNarrowMode mode,
+                                        bool& saturated) {
+  saturated = false;
+  if (mode == ShiftRightNarrowMode::PlainUnsigned) {
+    return round_shift_right_unsigned(value, shift, round) & ones(dst_esize_bits);
+  }
+
+  if (mode == ShiftRightNarrowMode::SignedToSignedSaturating) {
+    const std::int64_t shifted = round_shift_right_signed(sign_extend_bits(value, src_esize_bits), shift, round);
+    switch (dst_esize_bits) {
+      case 8u:
+        saturated = shifted < std::numeric_limits<std::int8_t>::min() ||
+                    shifted > std::numeric_limits<std::int8_t>::max();
+        return static_cast<std::uint64_t>(
+            static_cast<std::uint8_t>(saturate_signed_value<std::int8_t>(shifted)));
+      case 16u:
+        saturated = shifted < std::numeric_limits<std::int16_t>::min() ||
+                    shifted > std::numeric_limits<std::int16_t>::max();
+        return static_cast<std::uint64_t>(
+            static_cast<std::uint16_t>(saturate_signed_value<std::int16_t>(shifted)));
+      case 32u:
+        saturated = shifted < std::numeric_limits<std::int32_t>::min() ||
+                    shifted > std::numeric_limits<std::int32_t>::max();
+        return static_cast<std::uint64_t>(
+            static_cast<std::uint32_t>(saturate_signed_value<std::int32_t>(shifted)));
+      default:
+        return 0u;
+    }
+  }
+
+  if (mode == ShiftRightNarrowMode::UnsignedToUnsignedSaturating) {
+    const std::uint64_t shifted = round_shift_right_unsigned(value, shift, round);
+    switch (dst_esize_bits) {
+      case 8u:
+        saturated = shifted > std::numeric_limits<std::uint8_t>::max();
+        return saturate_unsigned_value<std::uint8_t>(shifted);
+      case 16u:
+        saturated = shifted > std::numeric_limits<std::uint16_t>::max();
+        return saturate_unsigned_value<std::uint16_t>(shifted);
+      case 32u:
+        saturated = shifted > std::numeric_limits<std::uint32_t>::max();
+        return saturate_unsigned_value<std::uint32_t>(shifted);
+      default:
+        return 0u;
+    }
+  }
+
+  const std::int64_t shifted = round_shift_right_signed(sign_extend_bits(value, src_esize_bits), shift, round);
+  switch (dst_esize_bits) {
+    case 8u:
+      saturated = shifted < 0 || shifted > std::numeric_limits<std::uint8_t>::max();
+      return saturate_signed_to_unsigned_value<std::uint8_t>(shifted);
+    case 16u:
+      saturated = shifted < 0 || shifted > std::numeric_limits<std::uint16_t>::max();
+      return saturate_signed_to_unsigned_value<std::uint16_t>(shifted);
+    case 32u:
+      saturated = shifted < 0 || shifted > std::numeric_limits<std::uint32_t>::max();
+      return saturate_signed_to_unsigned_value<std::uint32_t>(shifted);
+    default:
+      return 0u;
+  }
+}
+
+std::uint64_t sat_unsigned_add_sub(std::uint64_t lhs,
+                                   std::uint64_t rhs,
+                                   std::uint32_t esize_bits,
+                                   bool subtract,
+                                   bool& saturated) {
+  const std::uint64_t mask = ones(esize_bits);
+  lhs &= mask;
+  rhs &= mask;
+  if (subtract) {
+    saturated = lhs < rhs;
+    return saturated ? 0u : ((lhs - rhs) & mask);
+  }
+
+  const __uint128_t max_value = (esize_bits == 64u)
+      ? static_cast<__uint128_t>(std::numeric_limits<std::uint64_t>::max())
+      : ((__uint128_t{1} << esize_bits) - 1u);
+  __uint128_t sum = static_cast<__uint128_t>(lhs) + static_cast<__uint128_t>(rhs);
+  saturated = sum > max_value;
+  if (saturated) {
+    sum = max_value;
+  }
+  return static_cast<std::uint64_t>(sum) & mask;
+}
+
+std::uint64_t sat_signed_add_sub(std::uint64_t lhs,
+                                 std::uint64_t rhs,
+                                 std::uint32_t esize_bits,
+                                 bool subtract,
+                                 bool& saturated) {
+  const __int128_t lhs_value = static_cast<__int128_t>(sign_extend_bits(lhs, esize_bits));
+  const __int128_t rhs_value = static_cast<__int128_t>(sign_extend_bits(rhs, esize_bits));
+  __int128_t result = subtract ? (lhs_value - rhs_value) : (lhs_value + rhs_value);
+  const __int128_t min_value = -(__int128_t{1} << (esize_bits - 1u));
+  const __int128_t max_value = (__int128_t{1} << (esize_bits - 1u)) - 1u;
+  saturated = result < min_value || result > max_value;
+  if (result < min_value) {
+    result = min_value;
+  } else if (result > max_value) {
+    result = max_value;
+  }
+  return static_cast<std::uint64_t>(result) & ones(esize_bits);
 }
 
 } // namespace
@@ -6103,6 +6345,10 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     qregs_[idx][0] = std::bit_cast<std::uint64_t>(value);
     qregs_[idx][1] = 0u;
   };
+  const auto write_vec_scalar = [&](std::uint32_t idx, std::uint64_t value, std::uint32_t esize_bits) {
+    qregs_[idx][0] = value & ones(esize_bits);
+    qregs_[idx][1] = 0u;
+  };
   const auto write_fp_compare_result = [&](std::uint32_t idx, bool predicate, std::uint32_t esize_bits) {
     qregs_[idx][0] = predicate ? ones(esize_bits) : 0u;
     qregs_[idx][1] = 0u;
@@ -6220,7 +6466,14 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     }
     const std::uint32_t size_shift = static_cast<std::uint32_t>(__builtin_ctz(imm5));
     const std::uint32_t esize_bits = 8u << size_shift;
+    if (esize_bits > 64u) {
+      return false;
+    }
     const std::uint32_t lane = imm5 >> (size_shift + 1u);
+    const std::uint32_t lanes = 128u / esize_bits;
+    if (lane >= lanes) {
+      return false;
+    }
     const std::uint64_t elem = vector_get_elem(qregs_[rn], esize_bits, lane);
     if (esize_bits < 64u) {
       set_reg32(rd, static_cast<std::uint32_t>(elem));
@@ -6239,7 +6492,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     }
     const std::uint32_t size_shift = static_cast<std::uint32_t>(__builtin_ctz(imm5));
     const std::uint32_t esize_bits = 8u << size_shift;
-    if (esize_bits > (q ? 128u : 64u)) {
+    if (esize_bits > 64u || esize_bits > (q ? 128u : 64u)) {
       return false;
     }
     const std::uint32_t lane = imm5 >> (size_shift + 1u);
@@ -6263,6 +6516,9 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
       return false;
     }
     const std::uint32_t esize_bits = 8u << __builtin_ctz(imm5);
+    if (esize_bits > 64u) {
+      return false;
+    }
     const std::uint32_t lanes = (q ? 128u : 64u) / esize_bits;
     const std::uint32_t rm = (insn >> 5) & 0x1Fu;
     const std::uint64_t elem = (esize_bits == 64u) ? reg(rm) : (static_cast<std::uint64_t>(reg32(rm)) & ones(esize_bits));
@@ -6315,7 +6571,14 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     }
     const std::uint32_t size_shift = static_cast<std::uint32_t>(__builtin_ctz(imm5));
     const std::uint32_t esize_bits = 8u << size_shift;
+    if (esize_bits > 64u) {
+      return false;
+    }
     const std::uint32_t lane = imm5 >> (size_shift + 1u);
+    const std::uint32_t lanes = 128u / esize_bits;
+    if (lane >= lanes) {
+      return false;
+    }
     const std::uint64_t elem = (esize_bits == 64u) ? reg(rn) : (static_cast<std::uint64_t>(reg32(rn)) & ones(esize_bits));
     vector_set_elem(qregs_[rd], esize_bits, lane, elem);
     return true;
@@ -6356,7 +6619,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     }
   }
 
-  if ((insn & 0xBF808400u) == 0x2F000400u || (insn & 0xBF808400u) == 0x0F000400u) { // USHR/SSHR
+  if ((insn & 0xBF80FC00u) == 0x2F000400u || (insn & 0xBF80FC00u) == 0x0F000400u) { // USHR/SSHR
     const std::uint32_t immh = (insn >> 19) & 0xFu;
     if (immh != 0u) {
       const bool is_unsigned = ((insn >> 29) & 1u) != 0u;
@@ -6437,124 +6700,78 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     }
   }
 
-  if ((insn & 0xBF80FC00u) == 0x2F000400u) { // MVNI (2S/4S immediate)
-    const bool q = ((insn >> 30) & 1u) != 0u;
-    const bool op = ((insn >> 29) & 1u) != 0u;
-    const std::uint32_t cmode = (insn >> 12) & 0xFu;
-    const std::uint8_t imm8 = static_cast<std::uint8_t>((((insn >> 16) & 0x7u) << 5u) | ((insn >> 5) & 0x1Fu));
-    const std::uint64_t imm64 = advsimd_expand_imm(op, cmode, imm8);
-    auto& dst = qregs_[rd];
-    dst[0] = ~imm64;
-    dst[1] = q ? ~imm64 : 0u;
-    return true;
-  }
-
-  if ((insn & 0xBF80FC00u) == 0x2F001400u) { // BIC (2S/4S immediate)
-    const bool q = ((insn >> 30) & 1u) != 0u;
-    const bool op = ((insn >> 29) & 1u) != 0u;
-    const std::uint32_t cmode = (insn >> 12) & 0xFu;
-    const std::uint8_t imm8 = static_cast<std::uint8_t>((((insn >> 16) & 0x7u) << 5u) | ((insn >> 5) & 0x1Fu));
-    const std::uint64_t imm64 = advsimd_expand_imm(op, cmode, imm8);
-    const auto old = qregs_[rd];
-    qregs_[rd][0] = old[0] & ~imm64;
-    qregs_[rd][1] = q ? (old[1] & ~imm64) : 0u;
-    return true;
-  }
-
-  if ((insn & 0xBF80FC00u) == 0x2F009400u) { // BIC (4H/8H immediate, low byte)
-    const bool q = ((insn >> 30) & 1u) != 0u;
-    const auto old = qregs_[rd];
-    const std::uint8_t imm8 = static_cast<std::uint8_t>((((insn >> 16) & 0x7u) << 5u) | ((insn >> 5) & 0x1Fu));
-    const std::uint64_t mask64 = replicate(static_cast<std::uint64_t>(imm8), 16u, 64u);
-    qregs_[rd][0] = old[0] & ~mask64;
-    qregs_[rd][1] = q ? (old[1] & ~mask64) : 0u;
-    return true;
-  }
-
-  if ((insn & 0xBF80FC00u) == 0x2F00B400u) { // BIC (4H/8H immediate, high byte)
-    const bool q = ((insn >> 30) & 1u) != 0u;
-    const auto old = qregs_[rd];
-    const std::uint8_t imm8 = static_cast<std::uint8_t>((((insn >> 16) & 0x7u) << 5u) | ((insn >> 5) & 0x1Fu));
-    const std::uint64_t mask64 = replicate(static_cast<std::uint64_t>(imm8) << 8u, 16u, 64u);
-    qregs_[rd][0] = old[0] & ~mask64;
-    qregs_[rd][1] = q ? (old[1] & ~mask64) : 0u;
-    return true;
-  }
-
-  if ((insn & 0xBF80FC00u) == 0x2F008400u) { // MVNI (4H/8H immediate)
-    const bool q = ((insn >> 30) & 1u) != 0u;
-    const bool op = ((insn >> 29) & 1u) != 0u;
-    const std::uint32_t cmode = (insn >> 12) & 0xFu;
-    const std::uint8_t imm8 = static_cast<std::uint8_t>((((insn >> 16) & 0x7u) << 5u) | ((insn >> 5) & 0x1Fu));
-    const std::uint64_t imm64 = advsimd_expand_imm(op, cmode, imm8);
-    auto& dst = qregs_[rd];
-    dst[0] = ~imm64;
-    dst[1] = q ? ~imm64 : 0u;
-    return true;
-  }
-
-  if ((insn & 0xBF80FC00u) == 0x0F000400u) { // MOVI (2S/4S immediate)
-    const bool q = ((insn >> 30) & 1u) != 0u;
-    const std::uint64_t imm8 = (((insn >> 16) & 0x7u) << 5u) | ((insn >> 5) & 0x1Fu);
-    auto& dst = qregs_[rd];
-    dst = {0, 0};
-    const std::uint32_t lanes = q ? 4u : 2u;
-    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
-      vector_set_elem(dst, 32u, lane, imm8);
-    }
-    return true;
-  }
-
   if ((insn & 0xBF20FC00u) == 0x0E201800u) { // REV16 (vector)
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::uint32_t size = (insn >> 22) & 0x3u;
-    if (size != 0u) {
-      return false;
-    }
-    const std::uint32_t total_bits = q ? 128u : 64u;
-    const std::uint32_t esize_bits = 8u;
-    const std::uint32_t container_bits = 16u;
-    const std::uint32_t containers = total_bits / container_bits;
-    const std::uint32_t elems_per_container = container_bits / esize_bits;
-    const auto src = qregs_[rn];
-    std::array<std::uint64_t, 2> dst = {0, 0};
-    for (std::uint32_t c = 0; c < containers; ++c) {
-      for (std::uint32_t i = 0; i < elems_per_container; ++i) {
-        const std::uint32_t src_lane = c * elems_per_container + (elems_per_container - 1u - i);
-        const std::uint32_t dst_lane = c * elems_per_container + i;
-        vector_set_elem(dst, esize_bits, dst_lane, vector_get_elem(src, esize_bits, src_lane));
+    if (((insn >> 16) & 0x1Fu) == 0u && size == 0u) {
+      const std::uint32_t total_bits = q ? 128u : 64u;
+      const std::uint32_t esize_bits = 8u;
+      const std::uint32_t container_bits = 16u;
+      const std::uint32_t containers = total_bits / container_bits;
+      const std::uint32_t elems_per_container = container_bits / esize_bits;
+      const auto src = qregs_[rn];
+      std::array<std::uint64_t, 2> dst = {0, 0};
+      for (std::uint32_t c = 0; c < containers; ++c) {
+        for (std::uint32_t i = 0; i < elems_per_container; ++i) {
+          const std::uint32_t src_lane = c * elems_per_container + (elems_per_container - 1u - i);
+          const std::uint32_t dst_lane = c * elems_per_container + i;
+          vector_set_elem(dst, esize_bits, dst_lane, vector_get_elem(src, esize_bits, src_lane));
+        }
       }
+      qregs_[rd] = dst;
+      return true;
     }
-    qregs_[rd] = dst;
-    return true;
   }
 
   if ((insn & 0xBF20FC00u) == 0x0E200800u || (insn & 0xBF20FC00u) == 0x2E200800u) { // REV32/REV64 (vector)
     const bool q = ((insn >> 30) & 1u) != 0u;
     const bool rev32 = ((insn >> 29) & 1u) != 0u;
     const std::uint32_t size = (insn >> 22) & 0x3u;
-    const std::uint32_t total_bits = q ? 128u : 64u;
     const std::uint32_t esize_bits = 8u << size;
-    const std::uint32_t container_bits = rev32 ? 32u : 64u;
-    if ((rev32 && size > 1u) || (!rev32 && size > 2u) || esize_bits >= container_bits) {
-      return false;
-    }
-    const std::uint32_t containers = total_bits / container_bits;
-    const std::uint32_t elems_per_container = container_bits / esize_bits;
-    const auto src = qregs_[rn];
-    std::array<std::uint64_t, 2> dst = {0, 0};
-    for (std::uint32_t c = 0; c < containers; ++c) {
-      for (std::uint32_t i = 0; i < elems_per_container; ++i) {
-        const std::uint32_t src_lane = c * elems_per_container + (elems_per_container - 1u - i);
-        const std::uint32_t dst_lane = c * elems_per_container + i;
-        vector_set_elem(dst, esize_bits, dst_lane, vector_get_elem(src, esize_bits, src_lane));
+    if (((insn >> 16) & 0x1Fu) == 0u &&
+        !((rev32 && size > 1u) || (!rev32 && size > 2u) || esize_bits >= (rev32 ? 32u : 64u))) {
+      const std::uint32_t total_bits = q ? 128u : 64u;
+      const std::uint32_t container_bits = rev32 ? 32u : 64u;
+      const std::uint32_t containers = total_bits / container_bits;
+      const std::uint32_t elems_per_container = container_bits / esize_bits;
+      const auto src = qregs_[rn];
+      std::array<std::uint64_t, 2> dst = {0, 0};
+      for (std::uint32_t c = 0; c < containers; ++c) {
+        for (std::uint32_t i = 0; i < elems_per_container; ++i) {
+          const std::uint32_t src_lane = c * elems_per_container + (elems_per_container - 1u - i);
+          const std::uint32_t dst_lane = c * elems_per_container + i;
+          vector_set_elem(dst, esize_bits, dst_lane, vector_get_elem(src, esize_bits, src_lane));
+        }
       }
+      qregs_[rd] = dst;
+      return true;
     }
-    qregs_[rd] = dst;
-    return true;
   }
 
-  if ((insn & 0x9F21FC00u) == 0x0E209800u) { // CMEQ (zero)
+  if ((insn & 0xBF21FC00u) == 0x0E204800u || (insn & 0xBF21FC00u) == 0x2E204800u) { // CLS/CLZ (vector)
+    const bool is_clz = ((insn >> 29) & 1u) != 0u;
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    if (((insn >> 16) & 0x1Fu) == 0u && size <= 2u) {
+      const std::uint32_t esize_bits = 8u << size;
+      const std::uint32_t lanes = (q ? 128u : 64u) / esize_bits;
+      const auto src = qregs_[rn];
+      std::array<std::uint64_t, 2> dst = {0u, 0u};
+      for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+        const std::uint64_t value = vector_get_elem(src, esize_bits, lane);
+        vector_set_elem(dst, esize_bits, lane, is_clz ? clz_bits(value, esize_bits) : cls_bits(value, esize_bits));
+      }
+      qregs_[rd] = dst;
+      return true;
+    }
+  }
+
+  if ((insn & 0xBF3FFC00u) == 0x0E208800u || // CMGT (zero)
+      (insn & 0xBF3FFC00u) == 0x2E208800u || // CMGE (zero)
+      (insn & 0xBF3FFC00u) == 0x0E209800u || // CMEQ (zero)
+      (insn & 0xBF3FFC00u) == 0x2E209800u || // CMLE (zero)
+      (insn & 0xBF3FFC00u) == 0x0E20A800u) { // CMLT (zero)
+    const std::uint32_t tag = insn & 0xBF3FFC00u;
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::uint32_t size = (insn >> 22) & 0x3u;
     const std::uint32_t esize_bits = 8u << size;
@@ -6566,7 +6783,28 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     std::array<std::uint64_t, 2> dst = {0, 0};
     for (std::uint32_t lane = 0; lane < lanes; ++lane) {
       const std::uint64_t elem = vector_get_elem(src, esize_bits, lane);
-      vector_set_elem(dst, esize_bits, lane, elem == 0u ? ones(esize_bits) : 0u);
+      const std::int64_t signed_elem = sign_extend(elem, esize_bits);
+      bool predicate = false;
+      switch (tag) {
+        case 0x0E208800u:
+          predicate = signed_elem > 0;
+          break;
+        case 0x2E208800u:
+          predicate = signed_elem >= 0;
+          break;
+        case 0x0E209800u:
+          predicate = elem == 0u;
+          break;
+        case 0x2E209800u:
+          predicate = signed_elem <= 0;
+          break;
+        case 0x0E20A800u:
+          predicate = signed_elem < 0;
+          break;
+        default:
+          return false;
+      }
+      vector_set_elem(dst, esize_bits, lane, predicate ? ones(esize_bits) : 0u);
     }
     qregs_[rd] = dst;
     return true;
@@ -6612,59 +6850,50 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
-  if ((insn & 0xBF208400u) == 0x2E000000u) { // EXT (vector extract)
+  if ((insn & 0xBFE08C00u) == 0x0E000000u) { // TBL/TBX
     const bool q = ((insn >> 30) & 1u) != 0u;
-    if (!q) {
-      return false;
-    }
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
-    const std::uint32_t imm4 = (insn >> 11) & 0xFu;
-    std::array<std::uint8_t, 32> bytes{};
-    for (std::uint32_t i = 0; i < 16u; ++i) {
-      bytes[i] = static_cast<std::uint8_t>(vector_get_elem(qregs_[rn], 8u, i));
-      bytes[16u + i] = static_cast<std::uint8_t>(vector_get_elem(qregs_[rm], 8u, i));
+    const std::uint32_t len = (insn >> 13) & 0x3u;
+    const bool is_tbx = ((insn >> 12) & 1u) != 0u;
+    const std::uint32_t regs = len + 1u;
+    const std::uint32_t datasize = q ? 128u : 64u;
+    const std::uint32_t elements = datasize / 8u;
+    std::array<std::uint8_t, 64> table{};
+    for (std::uint32_t reg_idx = 0; reg_idx < regs; ++reg_idx) {
+      const auto& table_reg = qregs_[(rn + reg_idx) & 31u];
+      for (std::uint32_t byte = 0; byte < 16u; ++byte) {
+        table[reg_idx * 16u + byte] = static_cast<std::uint8_t>(vector_get_elem(table_reg, 8u, byte));
+      }
     }
-    std::array<std::uint64_t, 2> dst = {0, 0};
-    for (std::uint32_t i = 0; i < 16u; ++i) {
-      vector_set_elem(dst, 8u, i, bytes[imm4 + i]);
+    std::array<std::uint64_t, 2> dst =
+        q ? (is_tbx ? qregs_[rd] : std::array<std::uint64_t, 2>{0u, 0u})
+          : std::array<std::uint64_t, 2>{is_tbx ? qregs_[rd][0] : 0u, 0u};
+    for (std::uint32_t lane = 0; lane < elements; ++lane) {
+      const std::uint32_t index = static_cast<std::uint32_t>(vector_get_elem(qregs_[rm], 8u, lane) & 0xFFu);
+      if (index < regs * 16u) {
+        vector_set_elem(dst, 8u, lane, table[index]);
+      }
     }
     qregs_[rd] = dst;
     return true;
   }
 
-  if ((insn & 0xBF20FC00u) == 0x0E200800u || // REV64 (vector)
-      (insn & 0xBF20FC00u) == 0x2E200800u || // REV32 (vector)
-      (insn & 0xBF20FC00u) == 0x0E201800u) { // REV16 (vector)
+  if ((insn & 0xBFE08400u) == 0x2E000000u) { // EXT (vector extract)
     const bool q = ((insn >> 30) & 1u) != 0u;
-    const std::uint32_t size = (insn >> 22) & 0x3u;
-    const std::uint32_t esize_bits = 8u << size;
-    const std::uint32_t total_bits = q ? 128u : 64u;
-    std::uint32_t container_bits = 0u;
-    std::uint32_t max_size = 0u;
-    const std::uint32_t tag = insn & 0xBF20FC00u;
-    if (tag == 0x0E200800u) {
-      container_bits = 64u;
-      max_size = 2u;
-    } else if (tag == 0x2E200800u) {
-      container_bits = 32u;
-      max_size = 1u;
-    } else {
-      container_bits = 16u;
-      max_size = 0u;
-    }
-    if (size > max_size || esize_bits >= container_bits || container_bits > total_bits) {
+    const std::uint32_t total_bytes = q ? 16u : 8u;
+    const std::uint32_t imm4 = (insn >> 11) & 0xFu;
+    if (imm4 >= total_bytes) {
       return false;
     }
-    const std::uint32_t elems_per_group = container_bits / esize_bits;
-    const std::uint32_t groups = total_bits / container_bits;
-    const auto src = qregs_[rn];
-    std::array<std::uint64_t, 2> dst = {0u, 0u};
-    for (std::uint32_t group = 0; group < groups; ++group) {
-      const std::uint32_t base_lane = group * elems_per_group;
-      for (std::uint32_t lane = 0; lane < elems_per_group; ++lane) {
-        const std::uint32_t src_lane = base_lane + (elems_per_group - 1u - lane);
-        vector_set_elem(dst, esize_bits, base_lane + lane, vector_get_elem(src, esize_bits, src_lane));
-      }
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    std::array<std::uint8_t, 32> bytes{};
+    for (std::uint32_t i = 0; i < total_bytes; ++i) {
+      bytes[i] = static_cast<std::uint8_t>(vector_get_elem(qregs_[rn], 8u, i));
+      bytes[total_bytes + i] = static_cast<std::uint8_t>(vector_get_elem(qregs_[rm], 8u, i));
+    }
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    for (std::uint32_t i = 0; i < total_bytes; ++i) {
+      vector_set_elem(dst, 8u, i, bytes[imm4 + i]);
     }
     qregs_[rd] = dst;
     return true;
@@ -6672,6 +6901,10 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
 
   if ((insn & 0xBF3FFC00u) == 0x0E205800u) { // CNT (vector)
     const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    if (size != 0u) {
+      return false;
+    }
     const std::uint32_t lanes = q ? 16u : 8u;
     const auto src = qregs_[rn];
     std::array<std::uint64_t, 2> dst = {0, 0};
@@ -6988,6 +7221,13 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
+  if ((insn & 0xFFFFFC00u) == 0x5EF1B800u) { // ADDP Dd, Vn.2D
+    const auto src = qregs_[rn];
+    qregs_[rd][0] = vector_get_elem(src, 64u, 0u) + vector_get_elem(src, 64u, 1u);
+    qregs_[rd][1] = 0u;
+    return true;
+  }
+
   if ((insn & 0xFFFFFC00u) == 0x1E22C000u) { // FCVT Dd, Sn
     std::uint64_t fpsr_bits = 0u;
     const std::uint64_t result = fp32_to_fp64_bits(
@@ -7050,7 +7290,45 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
-  if ((insn & 0x9F20FC00u) == 0x0E20DC00u) { // FMUL (vector)
+  if ((insn & 0xBF20FC00u) == 0x0E20DC00u) { // FMULX (vector)
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t fpcr_mode = current_fpcr_ctl();
+    std::uint32_t esize_bits = 0;
+    std::uint32_t lanes = 0;
+    if (!vector_fp_shape(insn, esize_bits, lanes)) {
+      return false;
+    }
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0, 0};
+    std::uint64_t fpsr_bits = 0u;
+    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+      if (esize_bits == 32u) {
+        std::uint64_t lane_fpsr = 0u;
+        const std::uint32_t result = fp_mulx_bits<std::uint32_t, float>(
+            static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)),
+            static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, lane)),
+            fpcr_mode,
+            lane_fpsr);
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 32u, lane, result);
+      } else {
+        std::uint64_t lane_fpsr = 0u;
+        const std::uint64_t result = fp_mulx_bits<std::uint64_t, double>(
+            vector_get_elem(lhs, 64u, lane),
+            vector_get_elem(rhs, 64u, lane),
+            fpcr_mode,
+            lane_fpsr);
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 64u, lane, result);
+      }
+    }
+    sysregs_.fp_or_fpsr(fpsr_bits);
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xBF20FC00u) == 0x2E20DC00u) { // FMUL (vector)
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
     const std::uint32_t fpcr_mode = current_fpcr_ctl();
     std::uint32_t esize_bits = 0;
@@ -7080,6 +7358,164 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
             vector_get_elem(rhs, 64u, lane),
             fpcr_mode,
             HostFpBinaryOp::Mul,
+            lane_fpsr);
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 64u, lane, result);
+      }
+    }
+    sysregs_.fp_or_fpsr(fpsr_bits);
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xBF80F400u) == 0x0F809000u) { // FMUL (by element, vector)
+    const std::uint32_t sz = (insn >> 22) & 1u;
+    const std::uint32_t l = (insn >> 21) & 1u;
+    const std::uint32_t h = (insn >> 11) & 1u;
+    if (sz != 0u && l != 0u) {
+      return false;
+    }
+    const std::uint32_t index = sz == 0u ? ((h << 1u) | l) : h;
+    const std::uint32_t rm = ((insn >> 16) & 0xFu) | (((insn >> 20) & 1u) << 4u);
+    const std::uint32_t fpcr_mode = current_fpcr_ctl();
+    std::uint32_t esize_bits = 0u;
+    std::uint32_t lanes = 0u;
+    if (!vector_fp_shape(insn, esize_bits, lanes)) {
+      return false;
+    }
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0u, 0u};
+    std::uint64_t fpsr_bits = 0u;
+    if (esize_bits == 32u) {
+      const std::uint32_t elem = static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, index));
+      for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+        std::uint64_t lane_fpsr = 0u;
+        const std::uint32_t result = fp_binary_arith_bits<std::uint32_t, float>(
+            static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)),
+            elem,
+            fpcr_mode,
+            HostFpBinaryOp::Mul,
+            lane_fpsr);
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 32u, lane, result);
+      }
+    } else {
+      const std::uint64_t elem = vector_get_elem(rhs, 64u, index);
+      for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+        std::uint64_t lane_fpsr = 0u;
+        const std::uint64_t result = fp_binary_arith_bits<std::uint64_t, double>(
+            vector_get_elem(lhs, 64u, lane),
+            elem,
+            fpcr_mode,
+            HostFpBinaryOp::Mul,
+            lane_fpsr);
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 64u, lane, result);
+      }
+    }
+    sysregs_.fp_or_fpsr(fpsr_bits);
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xBF80F400u) == 0x2F809000u) { // FMULX (by element, vector)
+    const std::uint32_t sz = (insn >> 22) & 1u;
+    const std::uint32_t l = (insn >> 21) & 1u;
+    const std::uint32_t h = (insn >> 11) & 1u;
+    if (sz != 0u && l != 0u) {
+      return false;
+    }
+    const std::uint32_t index = sz == 0u ? ((h << 1u) | l) : h;
+    const std::uint32_t rm = ((insn >> 16) & 0xFu) | (((insn >> 20) & 1u) << 4u);
+    const std::uint32_t fpcr_mode = current_fpcr_ctl();
+    std::uint32_t esize_bits = 0u;
+    std::uint32_t lanes = 0u;
+    if (!vector_fp_shape(insn, esize_bits, lanes)) {
+      return false;
+    }
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0u, 0u};
+    std::uint64_t fpsr_bits = 0u;
+    if (esize_bits == 32u) {
+      const std::uint32_t elem = static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, index));
+      for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+        std::uint64_t lane_fpsr = 0u;
+        const std::uint32_t result = fp_mulx_bits<std::uint32_t, float>(
+            static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)),
+            elem,
+            fpcr_mode,
+            lane_fpsr);
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 32u, lane, result);
+      }
+    } else {
+      const std::uint64_t elem = vector_get_elem(rhs, 64u, index);
+      for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+        std::uint64_t lane_fpsr = 0u;
+        const std::uint64_t result = fp_mulx_bits<std::uint64_t, double>(
+            vector_get_elem(lhs, 64u, lane),
+            elem,
+            fpcr_mode,
+            lane_fpsr);
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 64u, lane, result);
+      }
+    }
+    sysregs_.fp_or_fpsr(fpsr_bits);
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xBF80F400u) == 0x0F801000u || // FMLA (by element, vector)
+      (insn & 0xBF80F400u) == 0x0F805000u) { // FMLS (by element, vector)
+    const std::uint32_t sz = (insn >> 22) & 1u;
+    const std::uint32_t l = (insn >> 21) & 1u;
+    const std::uint32_t h = (insn >> 11) & 1u;
+    if (sz != 0u && l != 0u) {
+      return false;
+    }
+    const bool is_sub = (insn & 0x00004000u) != 0u;
+    const std::uint32_t index = sz == 0u ? ((h << 1u) | l) : h;
+    const std::uint32_t rm = ((insn >> 16) & 0xFu) | (((insn >> 20) & 1u) << 4u);
+    const std::uint32_t fpcr_mode = current_fpcr_ctl();
+    std::uint32_t esize_bits = 0u;
+    std::uint32_t lanes = 0u;
+    if (!vector_fp_shape(insn, esize_bits, lanes)) {
+      return false;
+    }
+    const auto acc = qregs_[rd];
+    const auto lhs = qregs_[rn];
+    const auto rhs = qregs_[rm];
+    std::array<std::uint64_t, 2> dst = {0u, 0u};
+    std::uint64_t fpsr_bits = 0u;
+    if (esize_bits == 32u) {
+      const std::uint32_t elem = static_cast<std::uint32_t>(vector_get_elem(rhs, 32u, index));
+      for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+        std::uint64_t lane_fpsr = 0u;
+        const std::uint32_t result = fp_fma_bits<std::uint32_t, float>(
+            static_cast<std::uint32_t>(vector_get_elem(lhs, 32u, lane)),
+            elem,
+            static_cast<std::uint32_t>(vector_get_elem(acc, 32u, lane)),
+            fpcr_mode,
+            is_sub,
+            false,
+            lane_fpsr);
+        fpsr_bits |= lane_fpsr;
+        vector_set_elem(dst, 32u, lane, result);
+      }
+    } else {
+      const std::uint64_t elem = vector_get_elem(rhs, 64u, index);
+      for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+        std::uint64_t lane_fpsr = 0u;
+        const std::uint64_t result = fp_fma_bits<std::uint64_t, double>(
+            vector_get_elem(lhs, 64u, lane),
+            elem,
+            vector_get_elem(acc, 64u, lane),
+            fpcr_mode,
+            is_sub,
+            false,
             lane_fpsr);
         fpsr_bits |= lane_fpsr;
         vector_set_elem(dst, 64u, lane, result);
@@ -7552,11 +7988,11 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     }
   }
 
-  if ((insn & 0xBFE1FC00u) == 0x0EA1B800u || // FCVTZS (vector, S)
-      (insn & 0xBFE1FC00u) == 0x2EA1B800u || // FCVTZU (vector, S)
-      (insn & 0xBFE1FC00u) == 0x0EE1B800u || // FCVTZS (vector, D)
-      (insn & 0xBFE1FC00u) == 0x2EE1B800u) { // FCVTZU (vector, D)
-    const std::uint32_t opcode = insn & 0xBFE1FC00u;
+  if ((insn & 0xBFF1FC00u) == 0x0EA1B800u || // FCVTZS (vector, S)
+      (insn & 0xBFF1FC00u) == 0x2EA1B800u || // FCVTZU (vector, S)
+      (insn & 0xBFF1FC00u) == 0x0EE1B800u || // FCVTZS (vector, D)
+      (insn & 0xBFF1FC00u) == 0x2EE1B800u) { // FCVTZU (vector, D)
+    const std::uint32_t opcode = insn & 0xBFF1FC00u;
     std::uint32_t esize_bits = 0u;
     std::uint32_t lanes = 0u;
     if (!vector_fp_shape(insn, esize_bits, lanes)) {
@@ -7605,7 +8041,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
-  switch (insn & 0xBFE0FC00u) {
+  switch (insn & 0xBFF0FC00u) {
     case 0x0E20A800u: // FCVTNS (vector, S)
     case 0x2E20A800u: // FCVTNU (vector, S)
     case 0x0EA0A800u: // FCVTPS (vector, S)
@@ -7622,7 +8058,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     case 0x2E60B800u: // FCVTMU (vector, D)
     case 0x0E60C800u: // FCVTAS (vector, D)
     case 0x2E60C800u: { // FCVTAU (vector, D)
-      const std::uint32_t opcode = insn & 0xBFE0FC00u;
+      const std::uint32_t opcode = insn & 0xBFF0FC00u;
       std::uint32_t esize_bits = 0u;
       std::uint32_t lanes = 0u;
       if (!vector_fp_shape(insn, esize_bits, lanes)) {
@@ -7701,6 +8137,26 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
 
 
   switch (insn & 0xBFE1FC00u) {
+    case 0x0EA1C800u: // URECPE (vector)
+    case 0x2EA1C800u: { // URSQRTE (vector)
+      const bool is_rsqrt = ((insn >> 29) & 1u) != 0u;
+      const bool q = ((insn >> 30) & 1u) != 0u;
+      const std::uint32_t lanes = q ? 4u : 2u;
+      const auto src = qregs_[rn];
+      std::array<std::uint64_t, 2> dst = {0u, 0u};
+      for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+        const std::uint32_t operand = static_cast<std::uint32_t>(vector_get_elem(src, 32u, lane));
+        const std::uint32_t result = is_rsqrt
+            ? advsimd_unsigned_rsqrt_estimate_bits(operand)
+            : advsimd_unsigned_recip_estimate_bits(operand);
+        vector_set_elem(dst, 32u, lane, result);
+      }
+      qregs_[rd] = dst;
+      return true;
+    }
+  }
+
+  switch (insn & 0xBFF1FC00u) {
     case 0x0EA1D800u: // FRECPE (vector, S)
     case 0x2EA1D800u: // FRSQRTE (vector, S)
     case 0x0EE1D800u: // FRECPE (vector, D)
@@ -7711,7 +8167,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     case 0x0EE0F800u: // FABS (vector, D)
     case 0x2EE0F800u: // FNEG (vector, D)
     case 0x2EE1F800u: { // FSQRT (vector, D)
-      const std::uint32_t opcode = insn & 0xBFE1FC00u;
+      const std::uint32_t opcode = insn & 0xBFF1FC00u;
       std::uint32_t esize_bits = 0u;
       std::uint32_t lanes = 0u;
       if (!vector_fp_shape(insn, esize_bits, lanes)) {
@@ -7797,7 +8253,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     case 0x2E618800u: // FRINTA (vector, D)
     case 0x2E619800u: // FRINTX (vector, D)
     case 0x2EE19800u: { // FRINTI (vector, D)
-      const std::uint32_t opcode = insn & 0xBFE1FC00u;
+      const std::uint32_t opcode = insn & 0xBFF1FC00u;
       std::uint32_t esize_bits = 0u;
       std::uint32_t lanes = 0u;
       if (!vector_fp_shape(insn, esize_bits, lanes)) {
@@ -8060,105 +8516,267 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
-  if ((insn & 0xBF20FC00u) == 0x2E20AC00u) { // UMINP (vector, byte elements)
+  if ((insn & 0xBF3FFC00u) == 0x0E31B800u || // ADDV
+      (insn & 0xBF3FFC00u) == 0x0E303800u || // SADDLV
+      (insn & 0xBF3FFC00u) == 0x2E303800u || // UADDLV
+      (insn & 0xBF3FFC00u) == 0x0E30A800u || // SMAXV
+      (insn & 0xBF3FFC00u) == 0x0E31A800u || // SMINV
+      (insn & 0xBF3FFC00u) == 0x2E30A800u || // UMAXV
+      (insn & 0xBF3FFC00u) == 0x2E31A800u) { // UMINV
+    const std::uint32_t tag = insn & 0xBF3FFC00u;
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::uint32_t size = (insn >> 22) & 0x3u;
-    if (size != 0u) {
+    if (size == 3u || (size == 2u && !q)) {
       return false;
     }
-    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
-    const std::uint32_t lanes = q ? 16u : 8u;
-    const auto lhs = qregs_[rn];
-    const auto rhs = qregs_[rm];
-    std::array<std::uint64_t, 2> dst = {0, 0};
-    for (std::uint32_t lane = 0; lane < lanes / 2u; ++lane) {
-      const std::uint64_t a = vector_get_elem(lhs, 8u, lane * 2u);
-      const std::uint64_t b = vector_get_elem(lhs, 8u, lane * 2u + 1u);
-      vector_set_elem(dst, 8u, lane, a < b ? a : b);
-    }
-    for (std::uint32_t lane = 0; lane < lanes / 2u; ++lane) {
-      const std::uint64_t a = vector_get_elem(rhs, 8u, lane * 2u);
-      const std::uint64_t b = vector_get_elem(rhs, 8u, lane * 2u + 1u);
-      vector_set_elem(dst, 8u, lane + (lanes / 2u), a < b ? a : b);
-    }
-    qregs_[rd] = dst;
-    return true;
-  }
-
-  if ((insn & 0xBF20FC00u) == 0x2E20A400u) { // UMAXP (vector, byte elements)
-    const bool q = ((insn >> 30) & 1u) != 0u;
-    const std::uint32_t size = (insn >> 22) & 0x3u;
-    if (size != 0u) {
-      return false;
-    }
-    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
-    const std::uint32_t lanes = q ? 16u : 8u;
-    const auto lhs = qregs_[rn];
-    const auto rhs = qregs_[rm];
-    std::array<std::uint64_t, 2> dst = {0, 0};
-    for (std::uint32_t lane = 0; lane < lanes / 2u; ++lane) {
-      const std::uint64_t a = vector_get_elem(lhs, 8u, lane * 2u);
-      const std::uint64_t b = vector_get_elem(lhs, 8u, lane * 2u + 1u);
-      vector_set_elem(dst, 8u, lane, a > b ? a : b);
-    }
-    for (std::uint32_t lane = 0; lane < lanes / 2u; ++lane) {
-      const std::uint64_t a = vector_get_elem(rhs, 8u, lane * 2u);
-      const std::uint64_t b = vector_get_elem(rhs, 8u, lane * 2u + 1u);
-      vector_set_elem(dst, 8u, lane + (lanes / 2u), a > b ? a : b);
-    }
-    qregs_[rd] = dst;
-    return true;
-  }
-
-  if ((insn & 0xBF20FC00u) == 0x0E20BC00u) { // ADDP (vector, byte elements)
-    const bool q = ((insn >> 30) & 1u) != 0u;
-    const std::uint32_t size = (insn >> 22) & 0x3u;
-    if (size != 0u) {
-      return false;
-    }
-    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
-    const std::uint32_t lanes = q ? 16u : 8u;
-    const auto lhs = qregs_[rn];
-    const auto rhs = qregs_[rm];
-    std::array<std::uint64_t, 2> dst = {0, 0};
-    for (std::uint32_t lane = 0; lane < lanes / 2u; ++lane) {
-      const std::uint64_t sum = (vector_get_elem(lhs, 8u, lane * 2u) + vector_get_elem(lhs, 8u, lane * 2u + 1u)) & 0xFFu;
-      vector_set_elem(dst, 8u, lane, sum);
-    }
-    for (std::uint32_t lane = 0; lane < lanes / 2u; ++lane) {
-      const std::uint64_t sum = (vector_get_elem(rhs, 8u, lane * 2u) + vector_get_elem(rhs, 8u, lane * 2u + 1u)) & 0xFFu;
-      vector_set_elem(dst, 8u, lane + (lanes / 2u), sum);
-    }
-    qregs_[rd] = dst;
-    return true;
-  }
-
-
-  if ((insn & 0xBF80FC00u) == 0x0F008400u) { // SHRN
-    const std::uint32_t immh = (insn >> 19) & 0xFu;
-    const std::uint32_t immb = (insn >> 16) & 0x7u;
-    if (immh == 0u) {
-      return false;
-    }
-    const std::uint32_t src_esize_bits = 16u << highest_set_bit(immh);
-    if (src_esize_bits < 16u || src_esize_bits > 64u) {
-      return false;
-    }
-    const std::uint32_t immhb = (immh << 3u) | immb;
-    const std::uint32_t shift = src_esize_bits - immhb;
-    if (shift == 0u || shift > src_esize_bits / 2u) {
-      return false;
-    }
-    const std::uint32_t dst_esize_bits = src_esize_bits / 2u;
-    const std::uint32_t lanes = 64u / dst_esize_bits;
+    const std::uint32_t esize_bits = 8u << size;
+    const std::uint32_t datasize = q ? 128u : 64u;
+    const std::uint32_t lanes = datasize / esize_bits;
     const auto src = qregs_[rn];
-    std::array<std::uint64_t, 2> dst = {0, 0};
-    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
-      const std::uint64_t narrowed = (vector_get_elem(src, src_esize_bits, lane) >> shift) & ones(dst_esize_bits);
-      vector_set_elem(dst, dst_esize_bits, lane, narrowed);
+    switch (tag) {
+      case 0x0E31B800u: { // ADDV
+        std::uint64_t sum = 0u;
+        for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+          sum = (sum + vector_get_elem(src, esize_bits, lane)) & ones(esize_bits);
+        }
+        write_vec_scalar(rd, sum, esize_bits);
+        return true;
+      }
+      case 0x0E303800u:
+      case 0x2E303800u: { // SADDLV/UADDLV
+        const bool is_unsigned = tag == 0x2E303800u;
+        const std::uint32_t dst_esize_bits = esize_bits * 2u;
+        if (is_unsigned) {
+          std::uint64_t sum = 0u;
+          for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+            sum += vector_get_elem(src, esize_bits, lane);
+          }
+          write_vec_scalar(rd, sum, dst_esize_bits);
+        } else {
+          std::int64_t sum = 0;
+          for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+            sum += sign_extend(vector_get_elem(src, esize_bits, lane), esize_bits);
+          }
+          write_vec_scalar(rd, static_cast<std::uint64_t>(sum), dst_esize_bits);
+        }
+        return true;
+      }
+      case 0x0E30A800u:
+      case 0x0E31A800u: { // SMAXV/SMINV
+        std::int64_t best = sign_extend(vector_get_elem(src, esize_bits, 0u), esize_bits);
+        for (std::uint32_t lane = 1u; lane < lanes; ++lane) {
+          const std::int64_t value = sign_extend(vector_get_elem(src, esize_bits, lane), esize_bits);
+          if ((tag == 0x0E30A800u && value > best) || (tag == 0x0E31A800u && value < best)) {
+            best = value;
+          }
+        }
+        write_vec_scalar(rd, static_cast<std::uint64_t>(best), esize_bits);
+        return true;
+      }
+      case 0x2E30A800u:
+      case 0x2E31A800u: { // UMAXV/UMINV
+        std::uint64_t best = vector_get_elem(src, esize_bits, 0u);
+        for (std::uint32_t lane = 1u; lane < lanes; ++lane) {
+          const std::uint64_t value = vector_get_elem(src, esize_bits, lane);
+          if ((tag == 0x2E30A800u && value > best) || (tag == 0x2E31A800u && value < best)) {
+            best = value;
+          }
+        }
+        write_vec_scalar(rd, best, esize_bits);
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
+
+  if ((insn & 0x9F3FFC00u) == 0x0E202800u) { // SADDLP/UADDLP
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const bool is_unsigned = ((insn >> 29) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    const std::uint32_t src_esize_bits = 8u << size;
+    if (src_esize_bits > 32u) {
+      return false;
+    }
+    const std::uint32_t dst_esize_bits = src_esize_bits * 2u;
+    const std::uint32_t src_lanes = (q ? 128u : 64u) / src_esize_bits;
+    const auto src = qregs_[rn];
+    std::array<std::uint64_t, 2> dst = {0u, 0u};
+    for (std::uint32_t lane = 0; lane < src_lanes / 2u; ++lane) {
+      const std::uint64_t a = vector_get_elem(src, src_esize_bits, lane * 2u);
+      const std::uint64_t b = vector_get_elem(src, src_esize_bits, lane * 2u + 1u);
+      std::uint64_t result = 0u;
+      if (is_unsigned) {
+        result = (a + b) & ones(dst_esize_bits);
+      } else {
+        const std::int64_t sum = sign_extend(a, src_esize_bits) + sign_extend(b, src_esize_bits);
+        switch (dst_esize_bits) {
+          case 16u: result = static_cast<std::uint64_t>(static_cast<std::uint16_t>(static_cast<std::int16_t>(sum))); break;
+          case 32u: result = static_cast<std::uint64_t>(static_cast<std::uint32_t>(static_cast<std::int32_t>(sum))); break;
+          case 64u: result = static_cast<std::uint64_t>(static_cast<std::int64_t>(sum)); break;
+          default: return false;
+        }
+      }
+      vector_set_elem(dst, dst_esize_bits, lane, result);
     }
     qregs_[rd] = dst;
     return true;
+  }
+
+  if ((insn & 0x9F3FFC00u) == 0x0E206800u) { // SADALP/UADALP
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const bool is_unsigned = ((insn >> 29) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    const std::uint32_t src_esize_bits = 8u << size;
+    if (src_esize_bits > 32u) {
+      return false;
+    }
+    const std::uint32_t dst_esize_bits = src_esize_bits * 2u;
+    const std::uint32_t src_lanes = (q ? 128u : 64u) / src_esize_bits;
+    const auto src = qregs_[rn];
+    std::array<std::uint64_t, 2> dst = {qregs_[rd][0], q ? qregs_[rd][1] : 0u};
+    for (std::uint32_t lane = 0; lane < src_lanes / 2u; ++lane) {
+      const std::uint64_t a = vector_get_elem(src, src_esize_bits, lane * 2u);
+      const std::uint64_t b = vector_get_elem(src, src_esize_bits, lane * 2u + 1u);
+      const std::uint64_t sum = is_unsigned
+                                    ? ((a + b) & ones(dst_esize_bits))
+                                    : (static_cast<std::uint64_t>(
+                                          sign_extend(a, src_esize_bits) + sign_extend(b, src_esize_bits)) &
+                                       ones(dst_esize_bits));
+      const std::uint64_t accum = (vector_get_elem(dst, dst_esize_bits, lane) + sum) & ones(dst_esize_bits);
+      vector_set_elem(dst, dst_esize_bits, lane, accum);
+    }
+    qregs_[rd] = dst;
+    return true;
+  }
+
+  if ((insn & 0xBF20FC00u) == 0x0E20A400u || // SMAXP
+      (insn & 0xBF20FC00u) == 0x0E20AC00u || // SMINP
+      (insn & 0xBF20FC00u) == 0x2E20A400u || // UMAXP
+      (insn & 0xBF20FC00u) == 0x2E20AC00u || // UMINP
+      (insn & 0xBF20FC00u) == 0x0E20BC00u) { // ADDP (vector)
+    const std::uint32_t tag = insn & 0xBF20FC00u;
+    const bool q = ((insn >> 30) & 1u) != 0u;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    if (size < 3u) {
+      const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+      const std::uint32_t esize_bits = 8u << size;
+      const std::uint32_t lanes = (q ? 128u : 64u) / esize_bits;
+      const auto lhs = qregs_[rn];
+      const auto rhs = qregs_[rm];
+      std::array<std::uint64_t, 2> dst = {0, 0};
+      const auto do_pairwise = [&](const std::array<std::uint64_t, 2>& src, std::uint32_t dst_base) {
+        for (std::uint32_t lane = 0; lane < lanes / 2u; ++lane) {
+          const std::uint64_t a = vector_get_elem(src, esize_bits, lane * 2u);
+          const std::uint64_t b = vector_get_elem(src, esize_bits, lane * 2u + 1u);
+          std::uint64_t result = 0u;
+          switch (tag) {
+            case 0x0E20A400u:
+              result = static_cast<std::uint64_t>(
+                  std::max(sign_extend(a, esize_bits), sign_extend(b, esize_bits))) & ones(esize_bits);
+              break;
+            case 0x0E20AC00u:
+              result = static_cast<std::uint64_t>(
+                  std::min(sign_extend(a, esize_bits), sign_extend(b, esize_bits))) & ones(esize_bits);
+              break;
+            case 0x2E20A400u:
+              result = std::max(a, b);
+              break;
+            case 0x2E20AC00u:
+              result = std::min(a, b);
+              break;
+            case 0x0E20BC00u:
+              result = (a + b) & ones(esize_bits);
+              break;
+            default:
+              return false;
+          }
+          vector_set_elem(dst, esize_bits, dst_base + lane, result);
+        }
+        return true;
+      };
+      if (!do_pairwise(lhs, 0u) || !do_pairwise(rhs, lanes / 2u)) {
+        return false;
+      }
+      qregs_[rd] = dst;
+      return true;
+    }
+  }
+
+
+  {
+    const std::uint32_t tag = insn & 0xBF80FC00u;
+    if (tag == 0x0F008400u || // SHRN/SHRN2
+        tag == 0x0F008C00u || // RSHRN/RSHRN2
+        tag == 0x0F009400u || // SQSHRN/SQSHRN2
+        tag == 0x2F009400u || // UQSHRN/UQSHRN2
+        tag == 0x0F009C00u || // SQRSHRN/SQRSHRN2
+        tag == 0x2F009C00u || // UQRSHRN/UQRSHRN2
+        tag == 0x2F008400u || // SQSHRUN/SQSHRUN2
+        tag == 0x2F008C00u) { // SQRSHRUN/SQRSHRUN2
+      const bool upper_half = ((insn >> 30) & 1u) != 0u;
+      const std::uint32_t immh = (insn >> 19) & 0xFu;
+      const std::uint32_t immb = (insn >> 16) & 0x7u;
+      if (immh == 0u) {
+        return false;
+      }
+      const std::uint32_t src_esize_bits = 16u << highest_set_bit(immh);
+      if (src_esize_bits < 16u || src_esize_bits > 64u) {
+        return false;
+      }
+      const std::uint32_t immhb = (immh << 3u) | immb;
+      const std::uint32_t shift = src_esize_bits - immhb;
+      if (shift == 0u || shift > src_esize_bits / 2u) {
+        return false;
+      }
+      const std::uint32_t dst_esize_bits = src_esize_bits / 2u;
+      const std::uint32_t lanes = 64u / dst_esize_bits;
+      const bool round = tag == 0x0F008C00u || tag == 0x0F009C00u ||
+                         tag == 0x2F009C00u || tag == 0x2F008C00u;
+      ShiftRightNarrowMode mode = ShiftRightNarrowMode::PlainUnsigned;
+      switch (tag) {
+        case 0x0F008400u:
+        case 0x0F008C00u:
+          mode = ShiftRightNarrowMode::PlainUnsigned;
+          break;
+        case 0x0F009400u:
+        case 0x0F009C00u:
+          mode = ShiftRightNarrowMode::SignedToSignedSaturating;
+          break;
+        case 0x2F009400u:
+        case 0x2F009C00u:
+          mode = ShiftRightNarrowMode::UnsignedToUnsignedSaturating;
+          break;
+        case 0x2F008400u:
+        case 0x2F008C00u:
+          mode = ShiftRightNarrowMode::SignedToUnsignedSaturating;
+          break;
+        default:
+          return false;
+      }
+      const auto src = qregs_[rn];
+      auto dst = upper_half ? qregs_[rd] : std::array<std::uint64_t, 2>{0u, 0u};
+      const std::uint32_t dst_base = upper_half ? lanes : 0u;
+      bool saturated = false;
+      for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+        bool lane_saturated = false;
+        const std::uint64_t narrowed = shift_right_narrow_result(
+            vector_get_elem(src, src_esize_bits, lane),
+            src_esize_bits,
+            dst_esize_bits,
+            shift,
+            round,
+            mode,
+            lane_saturated);
+        saturated |= lane_saturated;
+        vector_set_elem(dst, dst_esize_bits, dst_base + lane, narrowed);
+      }
+      qregs_[rd] = dst;
+      if (saturated) {
+        sysregs_.fp_or_fpsr(kFpsrQc);
+      }
+      return true;
+    }
   }
 
   {
@@ -8200,7 +8818,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     }
   }
 
-  if ((insn & 0xBF00FC00u) == 0x0E002800u) { // XTN/XTN2
+  if ((insn & 0xBF3FFC00u) == 0x0E212800u) { // XTN/XTN2
     const bool upper_half = ((insn >> 30) & 1u) != 0u;
     const std::uint32_t size = (insn >> 22) & 0x3u;
     const std::uint32_t src_esize_bits = 16u << size;
@@ -8220,7 +8838,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
-  if ((insn & 0x9F80FC00u) == 0x0E004800u) { // SQXTN/UQXTN and *2 variants
+  if ((insn & 0x9F3FFC00u) == 0x0E214800u) { // SQXTN/UQXTN and *2 variants
     const bool is_unsigned = ((insn >> 29) & 1u) != 0u;
     const bool upper_half = ((insn >> 30) & 1u) != 0u;
     const std::uint32_t size = (insn >> 22) & 0x3u;
@@ -8283,8 +8901,10 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
-  if ((insn & 0x9F80FC00u) == 0x0E000000u) { // SADDL/UADDL and *2 variants
+  if ((insn & 0x9F20FC00u) == 0x0E200000u || // SADDL/UADDL and *2 variants
+      (insn & 0x9F20FC00u) == 0x0E202000u) { // SSUBL/USUBL and *2 variants
     const bool is_unsigned = ((insn >> 29) & 1u) != 0u;
+    const bool is_subtract = (insn & 0x00002000u) != 0u;
     const bool upper_half = ((insn >> 30) & 1u) != 0u;
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
     const std::uint32_t size = (insn >> 22) & 0x3u;
@@ -8303,13 +8923,22 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
       const std::uint64_t a = vector_get_elem(lhs, src_esize_bits, src_base + lane);
       const std::uint64_t b = vector_get_elem(rhs, src_esize_bits, src_base + lane);
       if (is_unsigned) {
-        result = (a + b) & ones(dst_esize_bits);
+        result = is_subtract ? ((a - b) & ones(dst_esize_bits))
+                             : ((a + b) & ones(dst_esize_bits));
       } else {
-        const std::int64_t sum = sign_extend(a, src_esize_bits) + sign_extend(b, src_esize_bits);
+        const __int128_t lhs_value = static_cast<__int128_t>(sign_extend_bits(a, src_esize_bits));
+        const __int128_t rhs_value = static_cast<__int128_t>(sign_extend_bits(b, src_esize_bits));
+        const __int128_t wide_result = is_subtract ? (lhs_value - rhs_value) : (lhs_value + rhs_value);
         switch (dst_esize_bits) {
-          case 16u: result = static_cast<std::uint64_t>(static_cast<std::uint16_t>(static_cast<std::int16_t>(sum))); break;
-          case 32u: result = static_cast<std::uint64_t>(static_cast<std::uint32_t>(static_cast<std::int32_t>(sum))); break;
-          case 64u: result = static_cast<std::uint64_t>(static_cast<std::int64_t>(sum)); break;
+          case 16u:
+            result = static_cast<std::uint64_t>(static_cast<std::uint16_t>(static_cast<std::int16_t>(wide_result)));
+            break;
+          case 32u:
+            result = static_cast<std::uint64_t>(static_cast<std::uint32_t>(static_cast<std::int32_t>(wide_result)));
+            break;
+          case 64u:
+            result = static_cast<std::uint64_t>(static_cast<std::int64_t>(wide_result));
+            break;
           default: return false;
         }
       }
@@ -8319,8 +8948,10 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
-  if ((insn & 0x9F20FC00u) == 0x0E201000u) { // SADDW/UADDW and *2 variants
+  if ((insn & 0x9F20FC00u) == 0x0E201000u || // SADDW/UADDW and *2 variants
+      (insn & 0x9F20FC00u) == 0x0E203000u) { // SSUBW/USUBW and *2 variants
     const bool is_unsigned = ((insn >> 29) & 1u) != 0u;
+    const bool is_subtract = (insn & 0x00002000u) != 0u;
     const bool upper_half = ((insn >> 30) & 1u) != 0u;
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
     const std::uint32_t size = (insn >> 22) & 0x3u;
@@ -8339,9 +8970,14 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
       const std::uint64_t narrow = vector_get_elem(rhs, src_esize_bits, src_base + lane);
       std::uint64_t result = 0;
       if (is_unsigned) {
-        result = (wide + narrow) & ones(dst_esize_bits);
+        result = is_subtract ? ((wide - narrow) & ones(dst_esize_bits))
+                             : ((wide + narrow) & ones(dst_esize_bits));
       } else {
-        result = (wide + (static_cast<std::uint64_t>(sign_extend(narrow, src_esize_bits)) & ones(dst_esize_bits))) & ones(dst_esize_bits);
+        const std::uint64_t wide_signed = wide & ones(dst_esize_bits);
+        const std::uint64_t narrow_signed =
+            static_cast<std::uint64_t>(sign_extend_bits(narrow, src_esize_bits)) & ones(dst_esize_bits);
+        result = is_subtract ? ((wide_signed - narrow_signed) & ones(dst_esize_bits))
+                             : ((wide_signed + narrow_signed) & ones(dst_esize_bits));
       }
       vector_set_elem(dst, dst_esize_bits, lane, result);
     }
@@ -8349,9 +8985,11 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
-  if ((insn & 0x9F80FC00u) == 0x0E000C00u) { // SQADD/UQADD (vector)
+  if ((insn & 0x9F20FC00u) == 0x0E200C00u || // SQADD/UQADD (vector)
+      (insn & 0x9F20FC00u) == 0x0E202C00u) { // SQSUB/UQSUB (vector)
     const bool q = ((insn >> 30) & 1u) != 0u;
     const bool is_unsigned = ((insn >> 29) & 1u) != 0u;
+    const bool is_subtract = (insn & 0x00002000u) != 0u;
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
     const std::uint32_t size = (insn >> 22) & 0x3u;
     const std::uint32_t esize_bits = 8u << size;
@@ -8365,68 +9003,38 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     std::array<std::uint64_t, 2> dst = {0, 0};
     bool saturated = false;
     for (std::uint32_t lane = 0; lane < lanes; ++lane) {
-      std::uint64_t value = 0;
       const std::uint64_t a = vector_get_elem(lhs, esize_bits, lane);
       const std::uint64_t b = vector_get_elem(rhs, esize_bits, lane);
-      if (is_unsigned) {
-        const std::uint64_t sum = a + b;
-        switch (esize_bits) {
-          case 8u:
-            saturated |= sum > std::numeric_limits<std::uint8_t>::max();
-            value = saturate_unsigned_value<std::uint8_t>(sum);
-            break;
-          case 16u:
-            saturated |= sum > std::numeric_limits<std::uint16_t>::max();
-            value = saturate_unsigned_value<std::uint16_t>(sum);
-            break;
-          case 32u:
-            saturated |= sum > std::numeric_limits<std::uint32_t>::max();
-            value = saturate_unsigned_value<std::uint32_t>(sum);
-            break;
-          case 64u:
-            saturated |= sum < a;
-            value = (sum < a) ? std::numeric_limits<std::uint64_t>::max() : sum;
-            break;
-          default: return false;
-        }
-      } else {
-        const std::int64_t sum = sign_extend(a, esize_bits) + sign_extend(b, esize_bits);
-        switch (esize_bits) {
-          case 8u:
-            saturated |= sum < std::numeric_limits<std::int8_t>::min() ||
-                         sum > std::numeric_limits<std::int8_t>::max();
-            value = static_cast<std::uint64_t>(static_cast<std::uint8_t>(saturate_signed_value<std::int8_t>(sum)));
-            break;
-          case 16u:
-            saturated |= sum < std::numeric_limits<std::int16_t>::min() ||
-                         sum > std::numeric_limits<std::int16_t>::max();
-            value = static_cast<std::uint64_t>(static_cast<std::uint16_t>(saturate_signed_value<std::int16_t>(sum)));
-            break;
-          case 32u:
-            saturated |= sum < std::numeric_limits<std::int32_t>::min() ||
-                         sum > std::numeric_limits<std::int32_t>::max();
-            value = static_cast<std::uint64_t>(static_cast<std::uint32_t>(saturate_signed_value<std::int32_t>(sum)));
-            break;
-          case 64u: {
-            const std::int64_t sa = static_cast<std::int64_t>(a);
-            const std::int64_t sb = static_cast<std::int64_t>(b);
-            if ((sb > 0 && sa > (std::numeric_limits<std::int64_t>::max() - sb))) {
-              saturated = true;
-              value = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
-            } else if ((sb < 0 && sa < (std::numeric_limits<std::int64_t>::min() - sb))) {
-              saturated = true;
-              value = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::min());
-            } else {
-              value = static_cast<std::uint64_t>(sa + sb);
-            }
-            break;
-          }
-          default: return false;
-        }
-      }
+      bool lane_saturated = false;
+      const std::uint64_t value = is_unsigned
+          ? sat_unsigned_add_sub(a, b, esize_bits, is_subtract, lane_saturated)
+          : sat_signed_add_sub(a, b, esize_bits, is_subtract, lane_saturated);
+      saturated |= lane_saturated;
       vector_set_elem(dst, esize_bits, lane, value);
     }
     qregs_[rd] = dst;
+    if (saturated) {
+      sysregs_.fp_or_fpsr(kFpsrQc);
+    }
+    return true;
+  }
+
+
+  if ((insn & 0xDF20FC00u) == 0x5E200C00u || // SQADD/UQADD (scalar)
+      (insn & 0xDF20FC00u) == 0x5E202C00u) { // SQSUB/UQSUB (scalar)
+    const bool is_unsigned = ((insn >> 29) & 1u) != 0u;
+    const bool is_subtract = (insn & 0x00002000u) != 0u;
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t size = (insn >> 22) & 0x3u;
+    const std::uint32_t esize_bits = 8u << size;
+    bool saturated = false;
+    const std::uint64_t lhs = qregs_[rn][0] & ones(esize_bits);
+    const std::uint64_t rhs = qregs_[rm][0] & ones(esize_bits);
+    const std::uint64_t value = is_unsigned
+        ? sat_unsigned_add_sub(lhs, rhs, esize_bits, is_subtract, saturated)
+        : sat_signed_add_sub(lhs, rhs, esize_bits, is_subtract, saturated);
+    qregs_[rd][0] = value & ones(esize_bits);
+    qregs_[rd][1] = 0u;
     if (saturated) {
       sysregs_.fp_or_fpsr(kFpsrQc);
     }
@@ -8797,6 +9405,149 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return false;
   }
 
+  if ((insn & 0xFF20FC00u) == 0x5E20DC00u) { // FMULX (scalar)
+    const std::uint32_t rm = (insn >> 16) & 0x1Fu;
+    const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    const std::uint32_t fpcr_mode = current_fpcr_ctl();
+    if (ftype == 0u) {
+      std::uint64_t fpsr_bits = 0u;
+      const std::uint32_t result = fp_mulx_bits<std::uint32_t, float>(
+          static_cast<std::uint32_t>(qregs_[rn][0] & 0xFFFFFFFFu),
+          static_cast<std::uint32_t>(qregs_[rm][0] & 0xFFFFFFFFu),
+          fpcr_mode,
+          fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      qregs_[rd][0] = result;
+      qregs_[rd][1] = 0u;
+      return true;
+    }
+    if (ftype == 1u) {
+      std::uint64_t fpsr_bits = 0u;
+      const std::uint64_t result = fp_mulx_bits<std::uint64_t, double>(
+          qregs_[rn][0],
+          qregs_[rm][0],
+          fpcr_mode,
+          fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      qregs_[rd][0] = result;
+      qregs_[rd][1] = 0u;
+      return true;
+    }
+    return false;
+  }
+
+  if ((insn & 0xFF80F400u) == 0x5F809000u) { // FMUL (by element, scalar)
+    const std::uint32_t sz = (insn >> 22) & 1u;
+    const std::uint32_t l = (insn >> 21) & 1u;
+    const std::uint32_t h = (insn >> 11) & 1u;
+    if (sz != 0u && l != 0u) {
+      return false;
+    }
+    const std::uint32_t rm = ((insn >> 16) & 0xFu) | (((insn >> 20) & 1u) << 4u);
+    const std::uint32_t index = sz == 0u ? ((h << 1u) | l) : h;
+    const std::uint32_t fpcr_mode = current_fpcr_ctl();
+    if (sz == 0u) {
+      std::uint64_t fpsr_bits = 0u;
+      const std::uint32_t result = fp_binary_arith_bits<std::uint32_t, float>(
+          static_cast<std::uint32_t>(qregs_[rn][0] & 0xFFFFFFFFu),
+          static_cast<std::uint32_t>(vector_get_elem(qregs_[rm], 32u, index)),
+          fpcr_mode,
+          HostFpBinaryOp::Mul,
+          fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      qregs_[rd][0] = result;
+      qregs_[rd][1] = 0u;
+      return true;
+    }
+    std::uint64_t fpsr_bits = 0u;
+    const std::uint64_t result = fp_binary_arith_bits<std::uint64_t, double>(
+        qregs_[rn][0],
+        vector_get_elem(qregs_[rm], 64u, index),
+        fpcr_mode,
+        HostFpBinaryOp::Mul,
+        fpsr_bits);
+    sysregs_.fp_or_fpsr(fpsr_bits);
+    qregs_[rd][0] = result;
+    qregs_[rd][1] = 0u;
+    return true;
+  }
+
+  if ((insn & 0xFF80F400u) == 0x7F809000u) { // FMULX (by element, scalar)
+    const std::uint32_t sz = (insn >> 22) & 1u;
+    const std::uint32_t l = (insn >> 21) & 1u;
+    const std::uint32_t h = (insn >> 11) & 1u;
+    if (sz != 0u && l != 0u) {
+      return false;
+    }
+    const std::uint32_t rm = ((insn >> 16) & 0xFu) | (((insn >> 20) & 1u) << 4u);
+    const std::uint32_t index = sz == 0u ? ((h << 1u) | l) : h;
+    const std::uint32_t fpcr_mode = current_fpcr_ctl();
+    if (sz == 0u) {
+      std::uint64_t fpsr_bits = 0u;
+      const std::uint32_t result = fp_mulx_bits<std::uint32_t, float>(
+          static_cast<std::uint32_t>(qregs_[rn][0] & 0xFFFFFFFFu),
+          static_cast<std::uint32_t>(vector_get_elem(qregs_[rm], 32u, index)),
+          fpcr_mode,
+          fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      qregs_[rd][0] = result;
+      qregs_[rd][1] = 0u;
+      return true;
+    }
+    std::uint64_t fpsr_bits = 0u;
+    const std::uint64_t result = fp_mulx_bits<std::uint64_t, double>(
+        qregs_[rn][0],
+        vector_get_elem(qregs_[rm], 64u, index),
+        fpcr_mode,
+        fpsr_bits);
+    sysregs_.fp_or_fpsr(fpsr_bits);
+    qregs_[rd][0] = result;
+    qregs_[rd][1] = 0u;
+    return true;
+  }
+
+  if ((insn & 0xFF80F400u) == 0x5F801000u || // FMLA (by element, scalar)
+      (insn & 0xFF80F400u) == 0x5F805000u) { // FMLS (by element, scalar)
+    const std::uint32_t sz = (insn >> 22) & 1u;
+    const std::uint32_t l = (insn >> 21) & 1u;
+    const std::uint32_t h = (insn >> 11) & 1u;
+    if (sz != 0u && l != 0u) {
+      return false;
+    }
+    const bool is_sub = (insn & 0x00004000u) != 0u;
+    const std::uint32_t rm = ((insn >> 16) & 0xFu) | (((insn >> 20) & 1u) << 4u);
+    const std::uint32_t index = sz == 0u ? ((h << 1u) | l) : h;
+    const std::uint32_t fpcr_mode = current_fpcr_ctl();
+    if (sz == 0u) {
+      std::uint64_t fpsr_bits = 0u;
+      const std::uint32_t result = fp_fma_bits<std::uint32_t, float>(
+          static_cast<std::uint32_t>(qregs_[rn][0] & 0xFFFFFFFFu),
+          static_cast<std::uint32_t>(vector_get_elem(qregs_[rm], 32u, index)),
+          static_cast<std::uint32_t>(qregs_[rd][0] & 0xFFFFFFFFu),
+          fpcr_mode,
+          is_sub,
+          false,
+          fpsr_bits);
+      sysregs_.fp_or_fpsr(fpsr_bits);
+      qregs_[rd][0] = result;
+      qregs_[rd][1] = 0u;
+      return true;
+    }
+    std::uint64_t fpsr_bits = 0u;
+    const std::uint64_t result = fp_fma_bits<std::uint64_t, double>(
+        qregs_[rn][0],
+        vector_get_elem(qregs_[rm], 64u, index),
+        qregs_[rd][0],
+        fpcr_mode,
+        is_sub,
+        false,
+        fpsr_bits);
+    sysregs_.fp_or_fpsr(fpsr_bits);
+    qregs_[rd][0] = result;
+    qregs_[rd][1] = 0u;
+    return true;
+  }
+
   if ((insn & 0xFF20FC00u) == 0x1E208800u) { // FNMUL (scalar)
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
     const std::uint32_t ftype = (insn >> 22) & 0x3u;
@@ -8927,13 +9678,19 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
       return true;
     }
     case 0x7E30F800u: // FMAXP Sd, Vn.2S
+    case 0x7E70F800u: // FMAXP Dd, Vn.2D
+    case 0x7EB0F800u: // FMINP Sd, Vn.2S
     case 0x7EF0F800u: // FMINP Dd, Vn.2D
     case 0x7E30C800u: // FMAXNMP Sd, Vn.2S
+    case 0x7E70C800u: // FMAXNMP Dd, Vn.2D
+    case 0x7EB0C800u: // FMINNMP Sd, Vn.2S
     case 0x7EF0C800u: { // FMINNMP Dd, Vn.2D
       const std::uint32_t opcode = insn & 0xFFFFFC00u;
       const bool is_double = ((insn >> 22) & 1u) != 0u;
-      const bool is_min = opcode == 0x7EF0F800u || opcode == 0x7EF0C800u;
-      const bool numeric_variant = opcode == 0x7E30C800u || opcode == 0x7EF0C800u;
+      const bool is_min = opcode == 0x7EB0F800u || opcode == 0x7EF0F800u ||
+                          opcode == 0x7EB0C800u || opcode == 0x7EF0C800u;
+      const bool numeric_variant = opcode == 0x7E30C800u || opcode == 0x7E70C800u ||
+                                   opcode == 0x7EB0C800u || opcode == 0x7EF0C800u;
       const std::uint32_t fpcr_mode = current_fpcr_ctl();
       std::uint64_t fpsr_bits = 0u;
       if (!is_double) {
@@ -9498,6 +10255,65 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
       return true;
     }
     return false;
+  }
+
+  {
+    const std::uint32_t tag = insn & 0xFF80FC00u;
+    if (tag == 0x5F009400u || // SQSHRN (scalar)
+        tag == 0x7F009400u || // UQSHRN (scalar)
+        tag == 0x5F009C00u || // SQRSHRN (scalar)
+        tag == 0x7F009C00u || // UQRSHRN (scalar)
+        tag == 0x7F008400u || // SQSHRUN (scalar)
+        tag == 0x7F008C00u) { // SQRSHRUN (scalar)
+      const std::uint32_t immh = (insn >> 19) & 0xFu;
+      const std::uint32_t immb = (insn >> 16) & 0x7u;
+      if (immh == 0u) {
+        return false;
+      }
+      const std::uint32_t src_esize_bits = 16u << highest_set_bit(immh);
+      if (src_esize_bits < 16u || src_esize_bits > 64u) {
+        return false;
+      }
+      const std::uint32_t immhb = (immh << 3u) | immb;
+      const std::uint32_t shift = src_esize_bits - immhb;
+      if (shift == 0u || shift > src_esize_bits / 2u) {
+        return false;
+      }
+      const std::uint32_t dst_esize_bits = src_esize_bits / 2u;
+      const bool round = tag == 0x5F009C00u || tag == 0x7F009C00u || tag == 0x7F008C00u;
+      ShiftRightNarrowMode mode = ShiftRightNarrowMode::SignedToSignedSaturating;
+      switch (tag) {
+        case 0x5F009400u:
+        case 0x5F009C00u:
+          mode = ShiftRightNarrowMode::SignedToSignedSaturating;
+          break;
+        case 0x7F009400u:
+        case 0x7F009C00u:
+          mode = ShiftRightNarrowMode::UnsignedToUnsignedSaturating;
+          break;
+        case 0x7F008400u:
+        case 0x7F008C00u:
+          mode = ShiftRightNarrowMode::SignedToUnsignedSaturating;
+          break;
+        default:
+          return false;
+      }
+      bool saturated = false;
+      const std::uint64_t narrowed = shift_right_narrow_result(
+          qregs_[rn][0] & ones(src_esize_bits),
+          src_esize_bits,
+          dst_esize_bits,
+          shift,
+          round,
+          mode,
+          saturated);
+      qregs_[rd][0] = narrowed & ones(dst_esize_bits);
+      qregs_[rd][1] = 0u;
+      if (saturated) {
+        sysregs_.fp_or_fpsr(kFpsrQc);
+      }
+      return true;
+    }
   }
 
   if ((insn & 0xFF3FFC00u) == 0x1E380000u || (insn & 0xFF3FFC00u) == 0x9E380000u) { // FCVTZS

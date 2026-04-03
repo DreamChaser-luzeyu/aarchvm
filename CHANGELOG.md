@@ -1,3 +1,257 @@
+## 本轮修改 2026-04-03 21:03
+
+- 继续沿 AdvSIMD 基础整数页审计程序可见缺口，确认此前仍缺少一整组基础减法家族：
+  - `SSUBL/USUBL` 与 `SSUBL2/USUBL2`
+  - `SSUBW/USUBW` 与 `SSUBW2/USUBW2`
+  - `SQSUB/UQSUB (vector)`
+  - `SQADD/UQADD (scalar)` 与 `SQSUB/UQSUB (scalar)` 这一整组标量饱和加减
+- 在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中补齐了这些基础 AdvSIMD 指令的解码与执行语义。
+- 为避免宿主 C++ 有符号溢出未定义行为，把有符号饱和加减统一收敛到新的宽位 helper：
+  - `sat_unsigned_add_sub()`
+  - `sat_signed_add_sub()`
+- 这同时修正了原先 `SQADD` 64 位有符号路径里直接在 `int64_t` 上相加的隐患；现在新旧饱和加减都经由 `__int128_t/__uint128_t` 宽位计算后再饱和回目标元素宽度。
+- 新增 [tests/arm64/fpsimd_subtract_sat_more.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_subtract_sat_more.S)，覆盖：
+  - `SSUBL`
+  - `USUBL2`
+  - `SSUBW`
+  - `USUBW2`
+  - `SQSUB (vector, 2D)` 的 64 位饱和边界
+  - `UQSUB (vector, 8H)` 的下溢饱和与 `FPSR.QC`
+  - 标量 `SQADD/UQADD/SQSUB/UQSUB` 与 `FPSR.QC` 行为
+- 将该测试接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)。
+
+## 本轮测试
+
+- `timeout 1800s ./tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_subtract_sat_more.bin -load 0x0 -entry 0x0 -steps 500000`
+- `timeout 1800s cmake --build build -j`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮不是新的 decode overlap，而是又找到了一组此前真实缺失的 Armv8-A 基础 AdvSIMD 整数指令家族。
+- 补齐后，新增单测、ARM64 全量回归、Linux 单核功能回归、Linux SMP 功能回归都已通过。
+- 目前仍不能自信宣称“Armv8-A 程序可见最小集已完整收口”；下一类仍值得继续追的是一些保留编码/非法 arrangement 边界，例如部分 integer vector 类指令对 `Q=0,size=11` 之类保留组合的拒绝是否已经全覆盖。
+
+## 本轮修改 2026-04-03 20:11
+
+- 继续按 AdvSIMD/FP 编码页审计解码与缺口，确认 `URECPE` / `URSQRTE` 此前在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中完全缺失，不是 overlap，而是真实的 Armv8-A 基础 AdvSIMD 指令缺口。
+- 依据 ARM ARM 共享伪代码 `UnsignedRecipEstimate()` / `UnsignedRSqrtEstimate()`，补齐了：
+  - `URECPE Vd.2S, Vn.2S`
+  - `URECPE Vd.4S, Vn.4S`
+  - `URSQRTE Vd.2S, Vn.2S`
+  - `URSQRTE Vd.4S, Vn.4S`
+- 新增内部 helper：
+  - `advsimd_unsigned_recip_estimate_bits()`
+  - `advsimd_unsigned_rsqrt_estimate_bits()`
+- 该实现按 ARM ARM 的整数估值阈值语义处理：
+  - `URECPE` 对 `operand <= 0x7fffffff` 返回 `0xffffffff`
+  - `URSQRTE` 对 `operand <= 0x3fffffff` 返回 `0xffffffff`
+  - 其余情况按 `operand<31:23>` 经 `RecipEstimate` / `RecipSqrtEstimate` 生成 9-bit 估值后左对齐到结果高位
+- 新增 [tests/arm64/fpsimd_unsigned_estimate.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_unsigned_estimate.S)，覆盖：
+  - `2S/4S` 两种合法编码
+  - 阈值边界输入
+  - 一般输入与结果拼装
+- 将该测试接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)。
+
+## 本轮测试
+
+- `timeout 1800s cmake --build build -j`
+- `timeout 1800s ./tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_unsigned_estimate.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮再次发现并补齐了一组此前真实缺失的基础 AdvSIMD 指令，不是“保留编码误判”之类边角问题。
+- 补齐后 ARM64 全量单测、Linux 单核功能回归、Linux SMP 功能回归都已通过。
+- 目前仍不能据此就宣称“Armv8-A 程序可见最小集已完整收口”；但 `URECPE/URSQRTE` 这一页的基础整数估值向量指令现在已经补齐。
+
+## 本轮修改 2026-04-03 21:05
+
+- 继续按 AdvSIMD/FP 编码页审计解码 overlap，确认 `FMULX (vector)` 此前会被 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 里过宽的 `FMUL (vector)` 掩码错误吞掉，这是真实的“多截住”问题。
+- 修正 `FMUL/FMULX` 的向量解码边界，并补齐此前缺失的非 FP16 `FMULX` 家族：
+  - `FMULX Sd, Sn, Sm`
+  - `FMULX Dd, Dn, Dm`
+  - `FMULX Vd.2S/4S, Vn.2S/4S, Vm.2S/4S`
+  - `FMULX Vd.2D, Vn.2D, Vm.2D`
+  - `FMULX` 的 scalar/vector by-element 单精度与双精度形式
+- 新增 `fp_mulx_bits()`，按 ARM ARM 语义实现 `FMULX` 的关键可见行为：当一侧为零、另一侧为无穷大时返回带正确符号的 `2.0`，而不是普通 `FMUL` 的 NaN/IOC 行为。
+- 新增 [tests/arm64/fpsimd_fmulx.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fmulx.S)，覆盖：
+  - scalar/vector `FMULX`
+  - scalar/vector by-element `FMULX`
+  - `0 * inf -> 2.0` 与符号传播
+  - 普通乘法与按 lane 取元素的路径
+- 同轮继续补齐此前完全缺失的非 FP16 indexed FP multiply family：
+  - `FMUL (by element)` scalar/vector
+  - `FMLA (by element)` scalar/vector
+  - `FMLS (by element)` scalar/vector
+- 新增 [tests/arm64/fpsimd_fp_indexed_more.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_fp_indexed_more.S)，覆盖上述 `FMUL/FMLA/FMLS` 的 scalar/vector indexed 路径与 lane 选择。
+- 将该测试接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)。
+
+## 本轮修改 2026-04-03 20:07
+
+- 继续审计 AdvSIMD/FP 解码页，确认 `ADDP (scalar)` (`addp Dd, Vn.2D`) 这一条基础 AdvSIMD 指令此前完全缺失，不是 overlap，而是真实的程序可见缺口。
+- 在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 补齐 `ADDP (scalar)` 的执行语义：对 `Vn.2D` 两个 64 位元素做模 `2^64` 加法，结果写回 `Dd`，并清空寄存器高 64 位。
+- 新增 [tests/arm64/fpsimd_pairwise_scalar_int.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_pairwise_scalar_int.S)，覆盖：
+  - 基本 `1 + 2 -> 3`
+  - `0xffffffffffffffff + 2 -> 1` 的 64 位回卷
+  - `Dd` 写回会清掉高 64 位
+- 将该测试接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)。
+
+# 修改日志 2026-04-03 18:59
+
+## 本轮修改
+
+- 继续审计 AdvSIMD/FP 解码里是否还有“多截住”或“只实现了一半合法编码”的问题：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fp_scalar_pairwise.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_scalar_pairwise.S)
+  - [CHANGELOG.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/CHANGELOG.md)
+- 在标量 floating-point pairwise 这一页又发现了一处真实的程序可见缺口，而不是新的 overlap：
+  - 原先只实现了 `FMAXP Sd`、`FMINP Dd`、`FMAXNMP Sd`、`FMINNMP Dd`；
+  - 现已补齐另外 4 个非 FP16 合法编码：
+    - `FMAXP Dd, Vn.2D`
+    - `FMINP Sd, Vn.2S`
+    - `FMAXNMP Dd, Vn.2D`
+    - `FMINNMP Sd, Vn.2S`
+- 扩展并校正了标量 pairwise 回归样例：
+  - `fp_scalar_pairwise` 现在覆盖上述 4 个此前缺失的编码；
+  - 同时按 ARM ARM 修正了两处 NaN/FPSR 期望，避免测试自身误报：
+    - `FMAXNMP` 在 `sNaN + numeric` 时应返回 quiet NaN 并置 `FPSR.IOC`
+    - `FMINNMP` 在 `qNaN + numeric` 时应返回 numeric，且不置 `FPSR.IOC`
+
+## 本轮测试
+
+- `timeout 1800s ./tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fp_scalar_pairwise.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮没有在标量 pairwise 页里再发现新的真实 decode overlap，但确实发现并补齐了一组此前漏掉的合法 AdvSIMD 标量 FP 编码。
+- 新增测试和 NaN 语义校正后，Linux 单核/SMP 功能回归都已通过。
+- 目前仍不能据此就宣称“Armv8-A 程序可见最小集已完整收口”；但这一页的非 FP16 标量 pairwise 编码现在已经补全。
+
+# 修改日志 2026-04-03 16:07
+
+## 本轮修改
+
+- 继续审计 AdvSIMD/FP 解码里的“宽掩码先吞掉窄掩码”问题：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/fpsimd_decode_overlap_regressions.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_decode_overlap_regressions.S)
+  - [CHANGELOG.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/CHANGELOG.md)
+- 修正了一处真实的向量解码 overlap：
+  - `CMGT/CMGE/CMEQ/CMLE/CMLT #0` 原先使用过宽的 `0xBF20FC00` 掩码；
+  - 在源寄存器恰好编码为 `v0` 时，合法的向量 `FCVT*` 指令可能先被这组 compare-zero 解码块命中；
+  - 现已将 compare-zero 家族收紧为 `0xBF3FFC00`，把其保留零字段纳入匹配，避免再把后续 `FCVT*` 误判成比较指令。
+- 扩展了 overlap 回归样例：
+  - `fpsimd_decode_overlap_regressions` 现在额外覆盖 `fcvtns v*.4s, v0.4s`、`fcvtps v*.2s, v0.2s`、`fcvtns v*.2d, v0.2d`；
+  - 这类“源寄存器正好为 `v0`”的边界此前没有被已有 `FCVT*` 样例覆盖到。
+
+## 本轮测试
+
+- `timeout 1800s ./tests/arm64/build_tests.sh`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_decode_overlap_regressions.bin -load 0x0 -entry 0x0 -steps 600000`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_fcvt_rounding.bin -load 0x0 -entry 0x0 -steps 600000`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_cmp_zero_vector.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_decode_overlap_undef.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮又确认并修掉了一处真实的 SIMD/FP 解码 overlap，而不是仅仅修保留编码的 `UNDEF` 边界。
+- 修复后 ARM64 全量单测、Linux 单核功能回归、Linux SMP 功能回归都已通过。
+- 目前还不能仅凭这一轮就宣称“Armv8-A 程序可见最小集已完整收口”；但至少在这段 AdvSIMD/FP 解码区里，又消除了一个此前未被样例覆盖到的真实误解码点。
+
+# 修改日志 2026-04-03 15:28
+
+## 本轮修改
+
+- 继续收口 AdvSIMD 最小集里此前真实缺失的一组整数 reduce / accumulate-long 指令：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [tests/arm64/fpsimd_reduce_accum_more.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_reduce_accum_more.S)
+  - [tests/arm64/fpsimd_decode_overlap_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_decode_overlap_undef.S)
+  - [CHANGELOG.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/CHANGELOG.md)
+- 新增实现：
+  - `ADDV`
+  - `SADDLV/UADDLV`
+  - `SMAXV/SMINV`
+  - `UMAXV/UMINV`
+  - `SADALP/UADALP`
+- 这轮同时补了两类保底检查，避免新解码块再引入“多截住”问题：
+  - `ADDV` 的 `size:Q == 100` 保留编码现在会明确走 `UNDEF`；
+  - `SADALP/UADALP` 的 `size == 11` 保留编码现在会明确走 `UNDEF`。
+- 新增专门单测 `fpsimd_reduce_accum_more`，覆盖：
+  - integer across-lane reductions 的 B/H/S/D 合法组合
+  - pairwise accumulate-long 的 `4H/8H/2S/8H/2D` 组合
+  - 标量结果写回后高位清零的程序可见行为
+
+## 本轮测试
+
+- `timeout 1800s cmake --build build -j`
+- `timeout 1800s ./tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_reduce_accum_more.bin -load 0x0 -entry 0x0 -steps 500000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_decode_overlap_undef.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- AdvSIMD 里一批此前缺失但属于程序可见最小集的重要整数 reduce / accumulate-long 指令现已补齐。
+- 这轮新增的 undef 边界测试也说明：新加的 reduce / accumulate-long 解码没有把保留编码错误吞成别的合法指令。
+
+# 修改日志 2026-04-03 15:17
+
+## 本轮修改
+
+- 继续收口 AdvSIMD 解码 overlap 与程序可见正确性：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+  - [tests/arm64/fpsimd_pairwise_int_more.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_pairwise_int_more.S)
+  - [CHANGELOG.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/CHANGELOG.md)
+- 修正了一类会“先被宽掩码命中，再因附加固定位不符而直接 `return false`”的 AdvSIMD 解码错误：
+  - `REV16 (vector)`、`REV32/REV64 (vector)`、`CLS/CLZ (vector)`、`CMGT/CMGE/CMEQ/CMLE/CMLT #0` 现在只有在完整命中自身编码时才返回；
+  - 不再把后续合法指令错误短路为 `UNIMPL`，已实测恢复 `frintn v1.4s, v0.4s` 所在路径。
+- 补齐了整数 pairwise 向量家族此前缺失的 H/S 变体：
+  - `ADDP (vector)` 不再只支持 byte；
+  - `UMAXP/UMINP` 不再只支持 byte；
+  - 新增 `SMAXP/SMINP` 的向量实现；
+  - 对合法的 `4H/8H/2S/4S` 编码现已按 Arm ARM 语义执行，`size == 11` 仍保持未分配。
+- 新增专门单测 `fpsimd_pairwise_int_more`，覆盖：
+  - `UMINP 4H`
+  - `UMAXP 2S`
+  - `ADDP 8H`
+  - `SMAXP 4S`
+  - `SMINP 8H`
+
+## 本轮测试
+
+- `timeout 1800s cmake --build build -j`
+- `timeout 1800s tests/arm64/build_tests.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_pairwise_int_more.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_uminp.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/fpsimd_misc_more.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮 AdvSIMD overlap 修正已经通过 `arm64` 全量回归以及 Linux 单核/SMP 功能回归。
+- 当前又补上一批此前真实缺失的整数 pairwise 向量指令变体，减少了 Debian/Linux 用户态继续命中 `SIGILL/illegal instruction` 的风险面。
+
 # 修改日志 2026-04-02 22:08
 
 ## 本轮修改
@@ -6746,3 +7000,141 @@
   - 这三组最显眼的重叠边界已被实测钉住
   - 现有裸机全回归、Linux UMP、Linux SMP、Debian block smoke 全部通过
   - 仍需继续审 trap/undef 边界、系统指令分派边界以及更多 Linux 压力路径后，才能更有把握地下这个最终结论
+
+# 修改日志 2026-04-03 11:00
+
+## 本轮修改
+
+- 继续围绕“解码可能多截住”的问题做静态与动态复核：
+  - 用掩码交集脚本继续审计 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中 `exec_data_processing()` 的实际重叠点
+  - 对代表性真实指令做了编码落点检查，确认此前锁定的 `USHR/SSHR`、modified-immediate、`TRN1/XTN`、`FRECPS/FDIV` 这几组边界当前没有出现真实误落点
+- 针对两处“理论上会被更宽模式相交，但按架构应为 unallocated/undef”的裸 opcode，新增正式回归 [tests/arm64/fpsimd_decode_overlap_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_decode_overlap_undef.S)：
+  - `.inst 0x4e000400`
+  - `.inst 0x0e000c00`
+- 该回归显式打开 `CPACR_EL1` 的 FP/SIMD 访问，避免把 `CPACR` trap 误判成解码行为，然后验证这两个 opcode 都会产生 `EC=0` 的未定义指令异常，而不是被某个更宽的 AdvSIMD 解码分支错误执行。
+- 将新回归接入：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+
+## 本轮测试
+
+- `timeout 1200s ./tests/arm64/build_tests.sh`
+- `env AARCHVM_BRK_MODE=halt timeout 120s ./build/aarchvm -bin tests/arm64/out/fpsimd_decode_overlap_undef.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+- `timeout 2400s ./tests/linux/run_block_mount_smoke.sh`
+
+## 当前结论
+
+- 这轮进一步确认了两件事：
+  - 当前已识别出的几组 AdvSIMD/FP 重叠边界里，真实已分配指令没有被错误前置分支吞掉
+  - 两个容易被“宽掩码误吃”的 unallocated opcode 现在会稳定走 `UNDEF`
+- 但即便如此，我仍不能在这一刻自信地说“模拟器已经完整实现 Armv8-A 要求的最小集合”。
+- 更准确的状态是：
+  - 解码重叠这条线又收紧了一步，尤其是 AdvSIMD/FP 区域
+  - 现有裸机、Linux UMP、Linux SMP、Debian block smoke 回归仍然全绿
+  - 剩余还需要继续审的高价值区域，主要是：
+    - 其余 system/debug/hint/trap/no-op 边界是否还存在未被覆盖的误截获
+    - MMU/fault/TLB 路径下是否还有“编码对了但异常行为边界不完整”的情况
+    - 更复杂 Linux 用户态与 systemd 路径是否还能逼出尚未覆盖的程序可见缺口
+
+# 修改日志 2026-04-03 11:20
+
+## 本轮修改
+
+- 继续围绕“解码可能多截住”的问题收口 AdvSIMD `REV*` 向量族：
+  - 新增裸机回归 [tests/arm64/fpsimd_rev_vector.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_rev_vector.S)
+  - 该用例显式开启 `CPACR_EL1.FPEN`，逐一验证：
+    - `rev16 v0.16b, v1.16b`
+    - `rev32 v2.8h, v3.8h`
+    - `rev64 v4.4s, v5.4s`
+    - `rev64 v6.8b, v7.8b`
+- 将该新回归接入：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 清理 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中一处已经被更早分支完全覆盖的重复 `REV16/REV32/REV64 (vector)` 分发块：
+  - 先用新用例确认前面的实现分支已经完整覆盖程序可见行为
+  - 再删除后面那段死代码，避免后续继续在同一编码族上出现“前后两套逻辑并存”的维护风险
+- 继续做静态掩码交集扫描：
+  - `REV*` 这条线在删除重复块后不再存在直接重复分发
+  - 当前仍可见的高风险交叠主要集中在先前已加回归钉住的 `UMOV/DUP/INS(general)` 与 modified-immediate 家族边界，没有发现新的已分配真实指令误落点
+
+## 本轮测试
+
+- `timeout 1200s ./tests/arm64/build_tests.sh`
+- `env AARCHVM_BRK_MODE=halt timeout 120s ./build/aarchvm -bin tests/arm64/out/fpsimd_rev_vector.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+- `timeout 2400s ./tests/linux/run_block_mount_smoke.sh`
+
+## 当前结论
+
+- 这一轮可以确认两件事：
+  - `REV16/REV32/REV64 (vector)` 当前程序可见行为已被直接测试覆盖，且删掉重复分发块后没有引入回归
+  - 这条具体的“同一编码族前后两套分发逻辑并存”维护风险已经消掉
+- 但我仍不能在此刻自信地下结论说“模拟器已经完整实现 Armv8-A 要求的最小集合”。
+- 更准确的现状是：
+  - AdvSIMD/FP 解码重叠这条线又收口了一步，`REV*` 家族已从“有重复分发”变成“有单点实现 + 专门回归”
+  - system/debug/hint/trap 以及 MMU/fault/TLB 的程序可见边界仍需要继续审，尤其是那些“编码分发看起来对，但异常/undef/no-op 语义边界可能仍不完整”的区域
+
+# 修改日志 2026-04-03 14:51
+
+## 本轮修改
+
+- 继续围绕 “AdvSIMD 解码可能多截住” 做了一轮更细的收口，直接修掉了三处真实的编码边界问题，位置都在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 的 `exec_data_processing()`：
+  - `TBL/TBX` 分支此前漏掉了 bit11 的固定约束，会把本应 `UNDEF` 的 `0x0e004800` 吞掉
+  - 新增的 `SADDLP/UADDLP` 分支此前漏掉了 bit16 的固定约束，会把 `XTN/XTN2` 误当成 pairwise-add 执行
+  - 新增的 `CLS/CLZ` 分支此前同样漏掉了 bit16 的固定约束，会把 `SQXTN/UQXTN` 误当成 `CLS/CLZ` 执行
+- 在收紧掩码的同时，补齐了缺失的程序可见实现：
+  - `TBL/TBX`
+  - `EXT .8B`
+  - `CLS/CLZ (vector)`
+  - `SADDLP/UADDLP`
+- 继续把此前只做了一半的 lane/element 边界补严，避免非法 `esize` 或越界 lane 被更宽的分支错误执行：
+  - `UMOV/MOV (lane to general)`
+  - `DUP (element)`
+  - `DUP (general)`
+  - `INS (general)`
+- 新增并接入了两组正式裸机回归：
+  - [tests/arm64/fpsimd_decode_overlap_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_decode_overlap_undef.S)
+    - 继续验证多条此前容易被宽掩码吞掉的裸 opcode 会稳定走 `UNDEF`
+    - 本轮新增覆盖 `0x0e004800` 与 `0x2e004800`
+  - [tests/arm64/fpsimd_lookup_misc_more.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_lookup_misc_more.S)
+    - 覆盖 `EXT .8B`、`TBL/TBX`、`CLS/CLZ`、`SADDLP/UADDLP`
+- 将新回归接入：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 额外做了一轮基于测试集中全部已组装指令的静态碰撞扫描：
+  - 用当前收紧后的掩码去撞 `tests/arm64/out/*.elf` 里的实际编码
+  - 在本轮重点审计的 `TBL/TBX`、`EXT`、`CLS/CLZ`、`SADDLP/UADDLP`、`XTN`、`SQXTN`、`SADDL`、`SADDW`、`SQADD` 这些家族中，没有再发现新的“命中本分支但反汇编助记符属于别的指令”的样本
+
+## 本轮测试
+
+- `timeout 1200s ./tests/arm64/build_tests.sh`
+- `env AARCHVM_BRK_MODE=halt timeout 120s ./build/aarchvm -bin tests/arm64/out/fpsimd_decode_overlap_regressions.bin -load 0x0 -entry 0x0 -steps 500000`
+- `env AARCHVM_BRK_MODE=halt timeout 120s ./build/aarchvm -bin tests/arm64/out/fpsimd_decode_overlap_undef.bin -load 0x0 -entry 0x0 -steps 500000`
+- `env AARCHVM_BRK_MODE=halt timeout 120s ./build/aarchvm -bin tests/arm64/out/fpsimd_lookup_misc_more.bin -load 0x0 -entry 0x0 -steps 500000`
+- `env AARCHVM_BRK_MODE=halt timeout 120s ./build/aarchvm -bin tests/arm64/out/fpsimd_widen_sat.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+- `timeout 2400s ./tests/linux/run_block_mount_smoke.sh`
+
+## 当前结论
+
+- 这轮确认修掉的是“真实存在、且已经能被正式回归复现”的三处 AdvSIMD 解码 over-capture：
+  - `TBL/TBX` 吞 `UNDEF`
+  - `SADDLP/UADDLP` 吞 `XTN/XTN2`
+  - `CLS/CLZ` 吞 `SQXTN/UQXTN`
+- 修复后：
+  - 裸机全回归重新全绿
+  - Linux UMP 功能回归通过
+  - Linux SMP 功能回归通过
+  - Debian block mount smoke 通过
+- 但我仍不能在这一刻负责任地说“模拟器已经完整实现 Armv8-A 要求的最小集合”。
+- 更准确的状态是：
+  - 这类 `AdvSIMD` 宽掩码误截获问题又系统性地收掉了一批
+  - 当前重点家族已经有了专门回归和一轮静态碰撞复核
+  - 仍需继续审其它未系统扫描到的 system/debug/hint/trap/no-op 边界，以及更多未被现有测试二进制覆盖到的编码子空间
