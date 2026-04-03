@@ -60,7 +60,7 @@ setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 rdinit=/init in
 booti 0x40400000 0x46000000:${INITRD_SIZE_HEX} ${DTB_ADDR}
 EOC
 )
-SHELL_CMDS=$'/bin/busybox mkdir -p /mnt/debian\n/bin/busybox mount -t ext4 -o ro /dev/vda /mnt/debian\n/bin/busybox test -d /mnt/debian/bin && echo ROOTFS-BIN-OK\n/bin/busybox test -f /mnt/debian/etc/debian_version && echo ROOTFS-DEBIAN-VERSION-OK\n/bin/busybox cat /mnt/debian/etc/debian_version\nSHELL=/bin/bash /bin/busybox chroot /mnt/debian\necho CHROOT-DEFAULT-BASH-OK\nexit\n/bin/busybox chroot /mnt/debian /bin/sh -c "echo CHROOT-SH-OK"\necho BLOCK-MOUNT PASS\n'
+SHELL_CMDS=$'/bin/busybox mkdir -p /mnt/debian\n/bin/busybox mount -t ext4 -o ro /dev/vda /mnt/debian\n/bin/busybox test -d /mnt/debian/bin && echo ROOTFS-BIN-OK\n/bin/busybox test -f /mnt/debian/etc/debian_version && echo ROOTFS-DEBIAN-VERSION-OK\n/bin/busybox cat /mnt/debian/etc/debian_version\nSHELL=/bin/bash /bin/busybox chroot /mnt/debian\necho CHROOT-DEFAULT-BASH-OK\nexit\n/bin/busybox chroot /mnt/debian /bin/bash -lc "uname -a >/dev/null; /bin/grep --version >/dev/null; /bin/sed --version >/dev/null; /bin/dash -c true; echo CHROOT-DYN-OK"\n/bin/busybox chroot /mnt/debian /bin/sh -c "echo CHROOT-SH-OK"\necho BLOCK-MOUNT PASS\n'
 
 AARCHVM_CMD=(
   ./build/aarchvm
@@ -116,6 +116,7 @@ check '[vda]'
 check 'ROOTFS-BIN-OK'
 check 'ROOTFS-DEBIAN-VERSION-OK'
 check 'CHROOT-DEFAULT-BASH-OK'
+check 'CHROOT-DYN-OK'
 check 'CHROOT-SH-OK'
 check 'BLOCK-MOUNT PASS'
 if grep -aFq 'Illegal instruction' "$CLEAN_LOG"; then

@@ -6699,3 +6699,50 @@
 - 这次 Debian 路径里的 `SIGILL` / `UNIMPL` 根因是标量 `FCVT` 解码掩码过宽，而不是后续 `CNT`/`CMHI`/`SADDW` 一类指令本身实现错误。
 - 修复后，定向裸机用例、裸机全回归、Linux UMP 功能回归、Linux SMP 功能回归、Debian 块设备与 `chroot` smoke 都已通过。
 - 额外试跑了 Debian `systemd` 启动路径，系统已能进入 `multi-user.target` 并完成 `aarchvm-ready.service`；当前卡点不在 ISA，而是脚本使用的串口 stop pattern 没有真正落到日志中，这个属于测试脚本路径问题，未在本轮改动。
+
+# 修改日志 2026-04-03 01:24
+
+## 本轮修改
+
+- 继续审计 AdvSIMD/FP 解码路径中可能“多截住”的边界，重点复核了三组高风险模式：
+  - `USHR/SSHR` 与 modified-immediate (`MOVI/ORR/MVNI/BIC`)
+  - `TRN1` 与 `XTN/XTN2`
+  - `FRECPS` 与 `FDIV`
+- 新增裸机回归 [tests/arm64/fpsimd_decode_overlap_regressions.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_decode_overlap_regressions.S)，把上述三组边界放到同一用例里直接验证，覆盖：
+  - `ushr`
+  - `sshr`
+  - `movi`
+  - `orr`
+  - `mvni`
+  - `bic`
+  - `trn1`
+  - `xtn`
+  - `xtn2`
+  - `fdiv`
+  - `frecps`
+- 将该新用例接入：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+- 强化 [tests/linux/run_block_mount_smoke.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/run_block_mount_smoke.sh) 的 Debian 动态用户态覆盖：
+  - 在现有默认 `chroot` 交互式 `bash` 路径之外，新增一次显式 `/bin/bash -lc ...`
+  - 实际执行 `uname`、`grep`、`sed`、`dash`
+  - 新增 `CHROOT-DYN-OK` 断言
+  - 持续检查日志中不应出现 `Illegal instruction`
+
+## 本轮测试
+
+- `timeout 1200s ./tests/arm64/build_tests.sh`
+- `timeout 120s ./build/aarchvm -bin tests/arm64/out/fpsimd_decode_overlap_regressions.bin -load 0x0 -entry 0x0 -steps 500000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+- `timeout 2400s ./tests/linux/run_block_mount_smoke.sh`
+
+## 当前结论
+
+- 这轮锁定的三组高风险解码边界在当前实现上均未再表现出误解码；新增裸机回归已把这些边界固定住。
+- Debian 块设备 smoke 现在不再只验证 mount/chroot 壳子，而是会实际跑几条动态链接用户态程序，这能更早暴露 AdvSIMD/FP 剩余缺口。
+- 但基于这轮结果，我仍不能下结论说“模拟器已经完整实现 Armv8-A 程序可见最小集合”；目前只能说：
+  - 这三组最显眼的重叠边界已被实测钉住
+  - 现有裸机全回归、Linux UMP、Linux SMP、Debian block smoke 全部通过
+  - 仍需继续审 trap/undef 边界、系统指令分派边界以及更多 Linux 压力路径后，才能更有把握地下这个最终结论
