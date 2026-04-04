@@ -141,6 +141,230 @@ after_sadalp_reserved_decode_overlap_undef:
     cmp  x12, x13
     b.ne fail
 
+case_pmul_absent_decode_overlap_undef:
+    .inst 0x2e229c20
+after_pmul_absent_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0x1, lsl #16
+    cmp  x12, x13
+    b.ne fail
+
+case_pmull_absent_decode_overlap_undef:
+    .inst 0x0e22e020
+after_pmull_absent_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0x3, lsl #16
+    cmp  x12, x13
+    b.ne fail
+
+case_mul_by_element_invalid_size_decode_overlap_undef:
+    .inst 0x0f328020
+after_mul_by_element_invalid_size_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0x7, lsl #16
+    cmp  x12, x13
+    b.ne fail
+
+case_mla_vector_invalid_size_decode_overlap_undef:
+    .inst 0x0ee29420
+after_mla_vector_invalid_size_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0xf, lsl #16
+    cmp  x12, x13
+    b.ne fail
+
+case_fcadd_absent_decode_overlap_undef:
+    .inst 0x6e82e420
+after_fcadd_absent_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0x1f, lsl #16
+    cmp  x12, x13
+    b.ne fail
+
+case_fcmla_absent_decode_overlap_undef:
+    .inst 0x6e82cc20
+after_fcmla_absent_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0x3f, lsl #16
+    cmp  x12, x13
+    b.ne fail
+
+case_sqrdmlah_absent_decode_overlap_undef:
+    .inst 0x6e828420
+after_sqrdmlah_absent_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0x7f, lsl #16
+    cmp  x12, x13
+    b.ne fail
+
+case_sqrdmlsh_absent_decode_overlap_undef:
+    .inst 0x6e828c20
+after_sqrdmlsh_absent_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0xff, lsl #16
+    cmp  x12, x13
+    b.ne fail
+
+case_udot_absent_decode_overlap_undef:
+    .inst 0x6e829420
+after_udot_absent_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0x1ff, lsl #16
+    cmp  x12, x13
+    b.ne fail
+
+case_sdot_absent_decode_overlap_undef:
+    .inst 0x4e829420
+after_sdot_absent_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0x3ff, lsl #16
+    cmp  x12, x13
+    b.ne fail
+
+case_aese_absent_decode_overlap_undef:
+    .inst 0x4e284820
+after_aese_absent_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0x7ff, lsl #16
+    cmp  x12, x13
+    b.ne fail
+
+case_aesd_absent_decode_overlap_undef:
+    .inst 0x4e285820
+after_aesd_absent_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0xfff, lsl #16
+    cmp  x12, x13
+    b.ne fail
+
+case_aesmc_absent_decode_overlap_undef:
+    .inst 0x4e286820
+after_aesmc_absent_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0x1fff, lsl #16
+    cmp  x12, x13
+    b.ne fail
+
+case_aesimc_absent_decode_overlap_undef:
+    .inst 0x4e287820
+after_aesimc_absent_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0x3fff, lsl #16
+    cmp  x12, x13
+    b.ne fail
+
+case_sha1c_absent_decode_overlap_undef:
+    .inst 0x5e020020
+after_sha1c_absent_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0x7fff, lsl #16
+    cmp  x12, x13
+    b.ne fail
+
+case_sha256h_absent_decode_overlap_undef:
+    .inst 0x5e024020
+after_sha256h_absent_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0xffff, lsl #16
+    cmp  x12, x13
+    b.ne fail
+
+case_sha1h_absent_decode_overlap_undef:
+    .inst 0x5e280820
+after_sha1h_absent_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0xffff, lsl #16
+    movk x13, #0x1, lsl #32
+    cmp  x12, x13
+    b.ne fail
+
+case_sha1su1_absent_decode_overlap_undef:
+    .inst 0x5e281820
+after_sha1su1_absent_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0xffff, lsl #16
+    movk x13, #0x3, lsl #32
+    cmp  x12, x13
+    b.ne fail
+
+case_sha1p_absent_decode_overlap_undef:
+    .inst 0x5e021020
+after_sha1p_absent_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0xffff, lsl #16
+    movk x13, #0x7, lsl #32
+    cmp  x12, x13
+    b.ne fail
+
+case_sha1m_absent_decode_overlap_undef:
+    .inst 0x5e022020
+after_sha1m_absent_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0xffff, lsl #16
+    movk x13, #0xf, lsl #32
+    cmp  x12, x13
+    b.ne fail
+
+case_sha1su0_absent_decode_overlap_undef:
+    .inst 0x5e023020
+after_sha1su0_absent_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0xffff, lsl #16
+    movk x13, #0x1f, lsl #32
+    cmp  x12, x13
+    b.ne fail
+
+case_sha256h2_absent_decode_overlap_undef:
+    .inst 0x5e025020
+after_sha256h2_absent_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0xffff, lsl #16
+    movk x13, #0x3f, lsl #32
+    cmp  x12, x13
+    b.ne fail
+
+case_sha256su0_absent_decode_overlap_undef:
+    .inst 0x5e282820
+after_sha256su0_absent_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0xffff, lsl #16
+    movk x13, #0x7f, lsl #32
+    cmp  x12, x13
+    b.ne fail
+
+case_sha256su1_absent_decode_overlap_undef:
+    .inst 0x5e026020
+after_sha256su1_absent_decode_overlap_undef:
+    ldr  x12, [x11]
+    movz x13, #0xffff
+    movk x13, #0xffff, lsl #16
+    movk x13, #0xff, lsl #32
+    cmp  x12, x13
+    b.ne fail
+
     movz x0, #'U'
     str  x0, [x1]
     movz x0, #'\n'
@@ -221,6 +445,78 @@ sync_handler:
     adr  x25, case_sadalp_reserved_decode_overlap_undef
     cmp  x24, x25
     b.eq handle_sadalp_reserved_decode_overlap_undef
+    adr  x25, case_pmul_absent_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_pmul_absent_decode_overlap_undef
+    adr  x25, case_pmull_absent_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_pmull_absent_decode_overlap_undef
+    adr  x25, case_mul_by_element_invalid_size_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_mul_by_element_invalid_size_decode_overlap_undef
+    adr  x25, case_mla_vector_invalid_size_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_mla_vector_invalid_size_decode_overlap_undef
+    adr  x25, case_fcadd_absent_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_fcadd_absent_decode_overlap_undef
+    adr  x25, case_fcmla_absent_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_fcmla_absent_decode_overlap_undef
+    adr  x25, case_sqrdmlah_absent_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_sqrdmlah_absent_decode_overlap_undef
+    adr  x25, case_sqrdmlsh_absent_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_sqrdmlsh_absent_decode_overlap_undef
+    adr  x25, case_udot_absent_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_udot_absent_decode_overlap_undef
+    adr  x25, case_sdot_absent_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_sdot_absent_decode_overlap_undef
+    adr  x25, case_aese_absent_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_aese_absent_decode_overlap_undef
+    adr  x25, case_aesd_absent_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_aesd_absent_decode_overlap_undef
+    adr  x25, case_aesmc_absent_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_aesmc_absent_decode_overlap_undef
+    adr  x25, case_aesimc_absent_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_aesimc_absent_decode_overlap_undef
+    adr  x25, case_sha1c_absent_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_sha1c_absent_decode_overlap_undef
+    adr  x25, case_sha256h_absent_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_sha256h_absent_decode_overlap_undef
+    adr  x25, case_sha1h_absent_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_sha1h_absent_decode_overlap_undef
+    adr  x25, case_sha1su1_absent_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_sha1su1_absent_decode_overlap_undef
+    adr  x25, case_sha1p_absent_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_sha1p_absent_decode_overlap_undef
+    adr  x25, case_sha1m_absent_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_sha1m_absent_decode_overlap_undef
+    adr  x25, case_sha1su0_absent_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_sha1su0_absent_decode_overlap_undef
+    adr  x25, case_sha256h2_absent_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_sha256h2_absent_decode_overlap_undef
+    adr  x25, case_sha256su0_absent_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_sha256su0_absent_decode_overlap_undef
+    adr  x25, case_sha256su1_absent_decode_overlap_undef
+    cmp  x24, x25
+    b.eq handle_sha256su1_absent_decode_overlap_undef
     b fail_from_handler
 
 handle_dup_vs_ins:
@@ -371,6 +667,246 @@ handle_sadalp_reserved_decode_overlap_undef:
     orr  x27, x27, x28
     str  x27, [x26]
     adr  x28, after_sadalp_reserved_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_pmul_absent_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #1, lsl #16
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_pmul_absent_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_pmull_absent_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #2, lsl #16
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_pmull_absent_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_mul_by_element_invalid_size_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #4, lsl #16
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_mul_by_element_invalid_size_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_mla_vector_invalid_size_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #8, lsl #16
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_mla_vector_invalid_size_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_fcadd_absent_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #0x10, lsl #16
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_fcadd_absent_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_fcmla_absent_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #0x20, lsl #16
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_fcmla_absent_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_sqrdmlah_absent_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #0x40, lsl #16
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_sqrdmlah_absent_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_sqrdmlsh_absent_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #0x80, lsl #16
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_sqrdmlsh_absent_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_udot_absent_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #0x100, lsl #16
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_udot_absent_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_sdot_absent_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #0x200, lsl #16
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_sdot_absent_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_aese_absent_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #0x400, lsl #16
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_aese_absent_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_aesd_absent_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #0x800, lsl #16
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_aesd_absent_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_aesmc_absent_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #0x1000, lsl #16
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_aesmc_absent_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_aesimc_absent_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #0x2000, lsl #16
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_aesimc_absent_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_sha1c_absent_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #0x4000, lsl #16
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_sha1c_absent_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_sha256h_absent_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #0x8000, lsl #16
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_sha256h_absent_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_sha1h_absent_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #0x1, lsl #32
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_sha1h_absent_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_sha1su1_absent_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #0x2, lsl #32
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_sha1su1_absent_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_sha1p_absent_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #0x4, lsl #32
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_sha1p_absent_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_sha1m_absent_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #0x8, lsl #32
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_sha1m_absent_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_sha1su0_absent_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #0x10, lsl #32
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_sha1su0_absent_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_sha256h2_absent_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #0x20, lsl #32
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_sha256h2_absent_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_sha256su0_absent_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #0x40, lsl #32
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_sha256su0_absent_decode_overlap_undef
+    msr  elr_el1, x28
+    eret
+
+handle_sha256su1_absent_decode_overlap_undef:
+    adr  x26, handled
+    ldr  x27, [x26]
+    movz x28, #0x80, lsl #32
+    orr  x27, x27, x28
+    str  x27, [x26]
+    adr  x28, after_sha256su1_absent_decode_overlap_undef
     msr  elr_el1, x28
     eret
 

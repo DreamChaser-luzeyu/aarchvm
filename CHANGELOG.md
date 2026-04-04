@@ -1,3 +1,77 @@
+## 本轮修改 2026-04-03 23:37
+
+- 继续沿 AdvSIMD 基础整数乘法页审计解码边界，确认当前实现仍缺少三类真实的 Armv8-A 程序可见指令：
+  - `MLA/MLS (vector)`
+  - `MUL (by element, vector)`
+  - `MLA/MLS (by element, vector)`
+- 在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中补齐了这三类整数 AdvSIMD 指令。
+- 这轮实现明确保留了架构要求的合法 arrangement 约束：
+  - `MLA/MLS (vector)` 仅接受 `8B/16B/4H/8H/2S/4S`
+  - `MUL/MLA/MLS (by element)` 仅接受 `4H/8H/2S/4S`
+  - 非法 `size` 组合继续返回未定义指令，而不是被宽掩码误吞
+- 新增 [tests/arm64/fpsimd_mulacc_more.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_mulacc_more.S)，覆盖：
+  - `MLA/MLS (vector)` 的 `8B/16B/4H/4S`
+  - `MUL/MLA/MLS (by element)` 的 `8H/4H/4S/2S`
+  - 取模回绕行为
+  - `Q=0/Q=1` 两种向量宽度
+- 将该测试接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 1200s tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_mulacc_more.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这一轮不是性能或客制化行为，而是又收掉了一页基础 AdvSIMD 整数乘法的真实缺口。
+- 截至目前，我仍不能诚实宣称“Armv8-A 程序可见最小集已经完整收口”；接下来仍要继续审同页及相邻页的保留编码、optional-feature absent 行为，以及尚未核实的其余基础 SIMD/FP 边界。
+
+## 本轮修改 2026-04-03 22:10
+
+- 继续沿 AdvSIMD 基础整数乘法页审计，确认 `SQDMULH/SQRDMULH` 这组此前只补到了普通 vector/scalar，`by element` 形式仍然是真缺口。
+- 在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中新增宽位 helper：
+  - `round_shift_right_signed_wide()`
+  - `sqdmulh_result()`
+- 用该 helper 统一补齐了 `SQDMULH/SQRDMULH` 的四条程序可见路径：
+  - 普通 `vector`
+  - 普通 `scalar`
+  - `by element (vector)`
+  - `by element (scalar)`
+- 实现细节按 ARM ARM 伪码落地：
+  - 仅接受合法 `size`
+  - `SQRDMULH` 走 rounding 路径
+  - `INT_MIN * INT_MIN` 这类边界通过 `__int128_t` 宽位中间结果正确饱和，不再依赖宿主有符号溢出行为
+  - 任一 lane 饱和都会置 `FPSR.QC`
+- 新增测试：
+  - [tests/arm64/fpsimd_qdmulh_more.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_qdmulh_more.S)
+  - [tests/arm64/fpsimd_qdmulh_indexed_more.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_qdmulh_indexed_more.S)
+- 新测试覆盖了：
+  - `vector/scalar`
+  - `trunc/rounding`
+  - `16-bit/32-bit`
+  - `FPSR.QC`
+  - indexed 形式的 `size/H/L/M/Rmhi/index` 解码边界，包含 `16-bit` 只能访问 `v0..v15`、`32-bit` 才能扩展到高寄存器号这一规则
+- 将上述测试接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 1200s tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_qdmulh_more.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_qdmulh_indexed_more.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- `SQDMULH/SQRDMULH` 这一整页现在已经不再只实现一半，普通形式和 indexed 形式都已补齐，并且完整回归通过。
+- 但截至这一轮，我仍不能诚实宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”；当前更像是在持续收掉明确、可证明的缺口。
+
 ## 本轮修改 2026-04-03 21:03
 
 - 继续沿 AdvSIMD 基础整数页审计程序可见缺口，确认此前仍缺少一整组基础减法家族：
@@ -7138,3 +7212,183 @@
   - 这类 `AdvSIMD` 宽掩码误截获问题又系统性地收掉了一批
   - 当前重点家族已经有了专门回归和一轮静态碰撞复核
   - 仍需继续审其它未系统扫描到的 system/debug/hint/trap/no-op 边界，以及更多未被现有测试二进制覆盖到的编码子空间
+
+# 修改日志 2026-04-03 21:28
+
+## 本轮修改
+
+- 继续在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 的 AdvSIMD 基础整数区收口程序可见缺口，补齐了此前未实现的以下指令家族：
+  - `SRHADD/URHADD (vector)`
+  - `SABA/UABA (vector)`
+  - `SABD/UABD (vector)`
+  - `SABAL/UABAL`、`SABAL2/UABAL2`
+  - `SABDL/UABDL`、`SABDL2/UABDL2`
+- 这轮实现时同时核对了编码边界，确保新增分支不会去吞掉现有家族：
+  - `SRHADD/URHADD` 使用独立的 `0x0E201400` 家族匹配，不再混淆到 `SHADD/UHADD` 或 `SHSUB/UHSUB`
+  - absolute-difference 同宽/long 家族分别落在 `0x0E207C00`、`0x0E207400`、`0x0E205000`、`0x0E207000` 四个独立编码窗
+- 新增并接入了两组裸机覆盖测试：
+  - [tests/arm64/fpsimd_halving_more.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_halving_more.S)
+    - 在原有 `SHADD/UHADD/SHSUB/UHSUB` 基础上新增 `SRHADD/URHADD`
+  - [tests/arm64/fpsimd_absdiff_more.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_absdiff_more.S)
+    - 覆盖 `SABA/UABA/SABD/UABD/SABAL/UABAL/SABDL/UABDL`
+    - 同时覆盖了 lower/upper-half、signed/unsigned、accumulate/non-accumulate 三类关键边界
+- 将新测试接入：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 1200s tests/arm64/build_tests.sh`
+- `env AARCHVM_BRK_MODE=halt timeout 120s ./build/aarchvm -bin tests/arm64/out/fpsimd_halving_more.bin -load 0x0 -entry 0x0 -steps 400000`
+- `env AARCHVM_BRK_MODE=halt timeout 120s ./build/aarchvm -bin tests/arm64/out/fpsimd_absdiff_more.bin -load 0x0 -entry 0x0 -steps 500000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮补齐的是一组真实缺失、且属于 Armv8-A AdvSIMD 基础整数最小集里的常用家族，不是性能 hack，也不是特殊位置绕过。
+- 新增家族在裸机回归和 Linux UMP/SMP 功能回归下都没有引入可见回归。
+- 但我仍不能现在就下结论说“模拟器已经完整实现 Armv8-A 要求的最小集合”。
+- 当前仍然明显可见的缺口至少包括：
+  - `SMAX/SMIN/UMAX/UMIN (vector)` 这类同宽元素级整数 max/min 家族
+  - `SQDMULH/SQRDMULH` 及相邻的整数/饱和乘法家族
+  - system/debug/hint/trap/no-op 里尚未逐一撞过的剩余边界
+
+# 修改日志 2026-04-03 21:36
+
+## 本轮修改
+
+- 继续补齐 AdvSIMD 基础整数最小集，在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 新增：
+  - `SMAX/SMIN/UMAX/UMIN (vector)`
+- 这一轮补的是“同宽逐元素 max/min”，与已有实现的：
+  - `SMAXP/SMINP/UMAXP/UMINP` pairwise 家族
+  - `SMAXV/SMINV/UMAXV/UMINV` reduction 家族
+  - 明确区分开，避免把“已有 pairwise/reduce”误当成“同宽元素级 max/min 已完整”
+- 新增正式回归：
+  - [tests/arm64/fpsimd_minmax_more.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_minmax_more.S)
+    - 覆盖 `SMAX/SMIN/UMAX/UMIN (vector)`
+    - 同时覆盖 signed/unsigned 与 byte/halfword/word 三类元素宽度
+- 更新接入：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 1200s tests/arm64/build_tests.sh`
+- `env AARCHVM_BRK_MODE=halt timeout 120s ./build/aarchvm -bin tests/arm64/out/fpsimd_minmax_more.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- `SMAX/SMIN/UMAX/UMIN (vector)` 这一块的程序可见缺口已补上，并通过裸机全回归与 Linux UMP/SMP 回归验证。
+- 但我仍然不能自信地说“模拟器已经完整实现 Armv8-A 要求的最小集合”。
+- 在当前代码状态下，下一批最值得继续收口的真实缺口仍是：
+  - `SQDMULH/SQRDMULH` 及相邻的饱和乘法/高半返回家族
+  - 其他尚未系统覆盖到的 AdvSIMD 基础整数家族
+  - system/debug/hint/trap/no-op 的剩余解码与 `UNDEF`/trap/no-op 边界
+
+# 修改日志 2026-04-03 22:29
+
+## 本轮修改
+
+- 继续沿 AdvSIMD 饱和双倍乘长家族收口，在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 新增：
+  - `SQDMULL/SQDMULL2 (vector)`
+  - `SQDMLAL/SQDMLAL2 (vector)`
+  - `SQDMLSL/SQDMLSL2 (vector)`
+  - `SQDMULL (scalar)`
+  - `SQDMLAL (scalar)`
+  - `SQDMLSL (scalar)`
+  - `SQDMULL (by element, vector/scalar)`
+  - `SQDMLAL (by element, vector/scalar)`
+  - `SQDMLSL (by element, vector/scalar)`
+- 为避免再犯前一轮同类错误，本轮实现复用了宽位中间结果：
+  - 新增 `sqdmull_product_result()`
+  - 新增 `sqdml_long_accumulate_result()`
+  - 统一按 `__int128_t` 路径处理 `2 * element1 * element2`，避免宿主侧先溢出
+- 这批实现严格按 ARM ARM 的 `size / Q / H / L / M / index / part` 规则落地，尤其保持：
+  - 16-bit indexed 形式的元素源寄存器限制在 `v0..v15`
+  - `*2` 形式只切换窄源向量的 upper half，不改变 indexed element 提取规则
+  - 任一 lane 的乘法饱和或累加/累减二次饱和都会置 `FPSR.QC`
+- 新增覆盖测试：
+  - [tests/arm64/fpsimd_qdml_long_more.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_qdml_long_more.S)
+  - [tests/arm64/fpsimd_qdml_long_indexed_more.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_qdml_long_indexed_more.S)
+- 更新接入：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 1200s tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_qdml_long_more.bin -load 0x0 -entry 0x0 -steps 500000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_qdml_long_indexed_more.bin -load 0x0 -entry 0x0 -steps 500000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- `SQDMULL/SQDMLAL/SQDMLSL` 及其 `*2`、scalar、by-element 形式这一块已经补齐，并通过裸机全回归与 Linux UMP/SMP 回归验证。
+- 这一轮没有发现“因为掩码过宽而吞掉相邻编码”的回归：
+  - 新增测试覆盖了 register / indexed、vector / scalar、base / `*2` 三个维度的真实编码
+  - 新增分支也没有与现有 `SQDMULH/SQRDMULH`、`FMUL/FMLA`、`SADDL/SSUBL` 等邻近掩码发生冲突
+- 但到当前为止，我仍然不能自信地下结论说“模拟器已经完整实现 Armv8-A 要求的最小集合”。
+- 继续往下收口时，我认为仍应优先盯住：
+  - 其他尚未系统扫过的 AdvSIMD 整数基础族
+  - trap / undef / no-op / debug / system 边界里还没逐条撞过的剩余编码
+  - MMU / fault / barrier / SMP 可见行为里尚未形成差分闭环的角落
+
+# 修改日志 2026-04-03 23:27
+
+## 本轮修改
+
+- 继续沿 AdvSIMD 基础整数乘长页审计，确认此前仍缺少一整组基础非饱和长乘家族：
+  - `SMULL/SMULL2`
+  - `UMULL/UMULL2`
+  - `SMLAL/SMLAL2`
+  - `UMLAL/UMLAL2`
+  - `SMLSL/SMLSL2`
+  - `UMLSL/UMLSL2`
+- 在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中补齐了这批指令的执行语义：
+  - `vector` register forms
+  - `by element` vector forms
+- 为避免把这批新指令再做成零散复制逻辑，新增并复用了两组无饱和 helper：
+  - `long_multiply_result()`
+  - `long_multiply_accumulate_result()`
+- 本轮实现保持了 ARM ARM 对这批编码最关键的程序可见约束：
+  - `vector` 形式允许 `8->16 / 16->32 / 32->64` 三档长乘
+  - `by element` 形式只接受 `16->32 / 32->64`
+  - `*2` 形式只切换窄源向量 upper half
+  - 结果按 `2*esize` 宽度自然回绕，不做饱和，也不改 `FPSR.QC`
+  - `16-bit` indexed 形式继续遵守 `Vm` 仅 `v0..v15` 的编码约束
+- 新增正式裸机回归：
+  - [tests/arm64/fpsimd_longmul_more.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_longmul_more.S)
+  - [tests/arm64/fpsimd_longmul_indexed_more.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_longmul_indexed_more.S)
+- 更新接入：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 1200s tests/arm64/build_tests.sh`
+- `timeout 30s ./build/aarchvm -bin tests/arm64/out/fpsimd_longmul_more.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 30s ./build/aarchvm -bin tests/arm64/out/fpsimd_longmul_indexed_more.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- `SMULL/UMULL/SMLAL/UMLAL/SMLSL/UMLSL` 这一整组 AdvSIMD 基础长乘家族现在已经补齐到当前实现里，并通过裸机全回归与 Linux UMP/SMP 功能回归验证。
+- 这轮没有发现新的“宽掩码把相邻合法编码先吞掉”的回归；相反，补上的正是一组此前真实缺失的合法编码。
+- 但我仍然不能在当前代码状态下自信地说“模拟器已经完整实现 Armv8-A 要求的最小集合”。
+- 继续往下收口时，优先级仍应放在：
+  - `TODO.md` 中尚未勾掉的浮点 / AdvSIMD 语义一致性项，尤其 `NaN/subnormal/default-NaN/flags`
+  - 邻近 `AdvSIMD` 页里仍未逐条撞过的 reserved / `UNDEF` / decode overlap 边界
+  - `SMP` 同步原语、`MMU/TLB/fault` 一致性与 Linux/system-level 压力语义的剩余尾差

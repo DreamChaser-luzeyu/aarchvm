@@ -337,6 +337,16 @@ run_expect fpsimd_pairwise_int_more.bin 300000 P
 run_expect fpsimd_reduce_accum_more.bin 500000 A
 run_expect fpsimd_pairwise_scalar_int.bin 300000 J
 run_expect fpsimd_addhn_family.bin 300000 HN
+run_expect fpsimd_halving_more.bin 300000 H
+run_expect fpsimd_absdiff_more.bin 400000 AD
+run_expect fpsimd_minmax_more.bin 300000 MX
+run_expect fpsimd_mulacc_more.bin 400000 MA
+run_expect fpsimd_longmul_more.bin 400000 LM
+run_expect fpsimd_longmul_indexed_more.bin 400000 LX
+run_expect fpsimd_qdmulh_more.bin 400000 QD
+run_expect fpsimd_qdmulh_indexed_more.bin 400000 QI
+run_expect fpsimd_qdml_long_more.bin 500000 QL
+run_expect fpsimd_qdml_long_indexed_more.bin 500000 QX
 run_expect fpsimd_mov_elem.bin 300000 ME
 run_expect fpsimd_arith_shift_perm.bin 300000 V
 run_expect fpsimd_decode_overlap_regressions.bin 500000 O

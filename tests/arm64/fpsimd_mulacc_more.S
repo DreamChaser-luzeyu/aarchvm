@@ -1,0 +1,215 @@
+    .text
+    .global _start
+_start:
+    movz x20, #0x0000
+    movk x20, #0x0900, lsl #16
+    movz x25, #0x0030, lsl #16
+    msr  cpacr_el1, x25
+    isb
+
+    adr  x21, scratch
+
+    adr  x0, mla8b_acc
+    ldr  d0, [x0]
+    adr  x0, mla8b_lhs
+    ldr  d1, [x0]
+    adr  x0, mla8b_rhs
+    ldr  d2, [x0]
+    mla  v0.8b, v1.8b, v2.8b
+    str  q0, [x21]
+    mov  x0, x21
+    adr  x1, exp_mla8b
+    bl   check16
+
+    adr  x0, mls16b_acc
+    ldr  q3, [x0]
+    adr  x0, mls16b_lhs
+    ldr  q4, [x0]
+    adr  x0, mls16b_rhs
+    ldr  q5, [x0]
+    mls  v3.16b, v4.16b, v5.16b
+    str  q3, [x21, #16]
+    add  x0, x21, #16
+    adr  x1, exp_mls16b
+    bl   check16
+
+    adr  x0, mla4h_acc
+    ldr  d6, [x0]
+    adr  x0, mla4h_lhs
+    ldr  d7, [x0]
+    adr  x0, mla4h_rhs
+    ldr  d8, [x0]
+    mla  v6.4h, v7.4h, v8.4h
+    str  q6, [x21, #32]
+    add  x0, x21, #32
+    adr  x1, exp_mla4h
+    bl   check16
+
+    adr  x0, mls4s_acc
+    ldr  q9, [x0]
+    adr  x0, mls4s_lhs
+    ldr  q10, [x0]
+    adr  x0, mls4s_rhs
+    ldr  q11, [x0]
+    mls  v9.4s, v10.4s, v11.4s
+    str  q9, [x21, #48]
+    add  x0, x21, #48
+    adr  x1, exp_mls4s
+    bl   check16
+
+    adr  x0, mul8h_elem_src
+    ldr  q13, [x0]
+    adr  x0, mul8h_elem_vec
+    ldr  q14, [x0]
+    mul  v12.8h, v13.8h, v14.h[7]
+    str  q12, [x21, #64]
+    add  x0, x21, #64
+    adr  x1, exp_mul8h_elem
+    bl   check16
+
+    adr  x0, mla4h_elem_acc
+    ldr  d15, [x0]
+    adr  x0, mla4h_elem_lhs
+    ldr  d16, [x0]
+    adr  x0, mla4h_elem_vec
+    ldr  d1, [x0]
+    mla  v15.4h, v16.4h, v1.h[3]
+    str  q15, [x21, #80]
+    add  x0, x21, #80
+    adr  x1, exp_mla4h_elem
+    bl   check16
+
+    adr  x0, mls4s_elem_acc
+    ldr  q18, [x0]
+    adr  x0, mls4s_elem_lhs
+    ldr  q19, [x0]
+    adr  x0, mls4s_elem_vec
+    ldr  q20, [x0]
+    mls  v18.4s, v19.4s, v20.s[1]
+    str  q18, [x21, #96]
+    add  x0, x21, #96
+    adr  x1, exp_mls4s_elem
+    bl   check16
+
+    adr  x0, mul2s_elem_src
+    ldr  d22, [x0]
+    adr  x0, mul2s_elem_vec
+    ldr  q23, [x0]
+    mul  v21.2s, v22.2s, v23.s[1]
+    str  q21, [x21, #112]
+    add  x0, x21, #112
+    adr  x1, exp_mul2s_elem
+    bl   check16
+
+    movz x0, #'M'
+    str  x0, [x20]
+    movz x0, #'A'
+    str  x0, [x20]
+    brk  #0
+
+check16:
+    ldr  x2, [x0]
+    ldr  x3, [x1]
+    cmp  x2, x3
+    b.ne fail
+    ldr  x2, [x0, #8]
+    ldr  x3, [x1, #8]
+    cmp  x2, x3
+    b.ne fail
+    ret
+
+fail:
+    movz x0, #'F'
+    str  x0, [x20]
+    brk  #0
+
+    .data
+    .balign 16
+mla8b_acc:
+    .byte 0x01, 0x80, 0xff, 0x10, 0x33, 0x55, 0xaa, 0xfe
+mla8b_lhs:
+    .byte 0x02, 0xff, 0x10, 0x80, 0x03, 0x04, 0x05, 0x06
+mla8b_rhs:
+    .byte 0x03, 0x02, 0x10, 0x02, 0xff, 0x10, 0x11, 0x80
+exp_mla8b:
+    .byte 0x07, 0x7e, 0xff, 0x10, 0x30, 0x95, 0xff, 0xfe
+    .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+
+    .balign 16
+mls16b_acc:
+    .byte 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80
+    .byte 0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0, 0xf0, 0x01
+mls16b_lhs:
+    .byte 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09
+    .byte 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11
+mls16b_rhs:
+    .byte 0x11, 0x10, 0x0f, 0x0e, 0x0d, 0x0c, 0x0b, 0x0a
+    .byte 0x09, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02
+exp_mls16b:
+    .byte 0xee, 0xf0, 0xf4, 0xfa, 0x02, 0x0c, 0x18, 0x26
+    .byte 0x36, 0x48, 0x5c, 0x72, 0x8a, 0xa4, 0xc0, 0xdf
+
+    .balign 16
+mla4h_acc:
+    .hword 0x0001, 0x8000, 0xffff, 0x1234
+mla4h_lhs:
+    .hword 0x0002, 0xffff, 0x8000, 0x1111
+mla4h_rhs:
+    .hword 0x0003, 0x0002, 0x0002, 0xfffe
+exp_mla4h:
+    .byte 0x07, 0x00, 0xfe, 0x7f, 0xff, 0xff, 0x12, 0xf0
+    .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+
+    .balign 16
+mls4s_acc:
+    .word 0x00000010, 0x7fffffff, 0x80000000, 0xffffffff
+mls4s_lhs:
+    .word 0x00000002, 0xffffffff, 0x80000000, 0x12345678
+mls4s_rhs:
+    .word 0x00000003, 0x00000002, 0xffffffff, 0x00000010
+exp_mls4s:
+    .byte 0x0a, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x80
+    .byte 0x00, 0x00, 0x00, 0x00, 0x7f, 0x98, 0xba, 0xdc
+
+    .balign 16
+mul8h_elem_src:
+    .hword 0x0001, 0x0002, 0x0003, 0x0004, 0xfffe, 0x8000, 0x7fff, 0xaaaa
+mul8h_elem_vec:
+    .hword 0x0000, 0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x1234
+exp_mul8h_elem:
+    .byte 0x34, 0x12, 0x68, 0x24, 0x9c, 0x36, 0xd0, 0x48
+    .byte 0x98, 0xdb, 0x00, 0x00, 0xcc, 0xed, 0x88, 0x9e
+
+    .balign 16
+mla4h_elem_acc:
+    .hword 0x0001, 0x0002, 0x0003, 0x0004
+mla4h_elem_lhs:
+    .hword 0x0002, 0x0003, 0xfffe, 0x8000
+mla4h_elem_vec:
+    .hword 0x0000, 0x0001, 0x0002, 0x00f0
+exp_mla4h_elem:
+    .byte 0xe1, 0x01, 0xd2, 0x02, 0x23, 0xfe, 0x04, 0x00
+    .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+
+    .balign 16
+mls4s_elem_acc:
+    .word 0x10000000, 0x20000000, 0x30000000, 0x40000000
+mls4s_elem_lhs:
+    .word 0x00000002, 0x7fffffff, 0x80000000, 0xffffffff
+mls4s_elem_vec:
+    .word 0x00000000, 0xffff0001, 0x00000000, 0x00000000
+exp_mls4s_elem:
+    .byte 0xfe, 0xff, 0x01, 0x10, 0x01, 0x00, 0xff, 0x9f
+    .byte 0x00, 0x00, 0x00, 0xb0, 0x01, 0x00, 0xff, 0x3f
+
+    .balign 16
+mul2s_elem_src:
+    .word 0x00000002, 0xffffffff
+mul2s_elem_vec:
+    .word 0x00000000, 0x7fffffff, 0x00000000, 0x00000000
+exp_mul2s_elem:
+    .byte 0xfe, 0xff, 0xff, 0xff, 0x01, 0x00, 0x00, 0x80
+    .byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+
+scratch:
+    .space 128
