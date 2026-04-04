@@ -106,6 +106,65 @@ after_st1_whole_post:
     mov  x2, #16
     bl   check_mem
 
+    // Case 4: scalar-pair LDP with SP base must also fault before access.
+    adr  x16, expected_elr
+    adr  x17, fault_ldp_s_pair
+    str  x17, [x16]
+    adr  x18, resume_elr
+    adr  x19, after_ldp_s_pair
+    str  x19, [x18]
+    adr  x20, stack_area
+    add  x20, x20, #4
+    msr  sp_el0, x20
+    msr  spsel, #0
+
+fault_ldp_s_pair:
+    ldp  s4, s5, [sp]
+    b    fail
+
+after_ldp_s_pair:
+    msr  spsel, #1
+    bl   check_handler_sp
+
+    // Case 5: scalar-pair STP pre-index with SP base must fault before
+    // writeback or memory update.
+    adr  x0, store_source
+    ldp  d6, d7, [x0]
+    adr  x16, expected_elr
+    adr  x17, fault_stp_d_pair_pre
+    str  x17, [x16]
+    adr  x18, resume_elr
+    adr  x19, after_stp_d_pair_pre
+    str  x19, [x18]
+    adr  x20, expected_sp
+    adr  x21, store_target_pair
+    add  x22, x21, #8
+    str  x22, [x20]
+    msr  sp_el0, x22
+    msr  spsel, #0
+
+fault_stp_d_pair_pre:
+    stp  d6, d7, [sp, #16]!
+    b    fail
+
+after_stp_d_pair_pre:
+    msr  spsel, #1
+    bl   check_handler_sp
+
+    msr  spsel, #0
+    mov  x3, sp
+    msr  spsel, #1
+    adr  x4, expected_sp
+    ldr  x4, [x4]
+    subs xzr, x3, x4
+    b.ne fail
+
+    adr  x0, store_target_pair
+    add  x0, x0, #24
+    adr  x1, zero16
+    mov  x2, #16
+    bl   check_mem
+
     adr  x11, saved_sctlr
     ldr  x12, [x11]
     msr  sctlr_el1, x12
@@ -227,6 +286,8 @@ store_source:
     .byte 0xa0,0xa1,0xa2,0xa3,0xa4,0xa5,0xa6,0xa7
     .byte 0xa8,0xa9,0xaa,0xab,0xac,0xad,0xae,0xaf
 store_target:
+    .space 64
+store_target_pair:
     .space 64
 zero16:
     .space 16

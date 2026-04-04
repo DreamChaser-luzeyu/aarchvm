@@ -7392,3 +7392,95 @@
   - `TODO.md` 中尚未勾掉的浮点 / AdvSIMD 语义一致性项，尤其 `NaN/subnormal/default-NaN/flags`
   - 邻近 `AdvSIMD` 页里仍未逐条撞过的 reserved / `UNDEF` / decode overlap 边界
   - `SMP` 同步原语、`MMU/TLB/fault` 一致性与 Linux/system-level 压力语义的剩余尾差
+## 修改日志 2026-04-04 17:12
+
+- 修复 `PRFUM` 未被识别为 prefetch hint 的问题，避免其落入错误的 load/store 路径并引发访存异常。
+- 新增 `tests/arm64/prfum_hint.S`，覆盖 `PRFUM` 在无效地址上的 no-op / 不产生同步异常语义。
+- 修复 `FEAT_LRCPC2` 缺失时 `LDAPUR/STLUR` 家族会误落入普通 `LDUR/STUR` 路径的问题，改为按架构要求 `UNDEF`。
+- 新增 `tests/arm64/lrcpc2_absent_undef.S`，覆盖 `LDAPUR/STLUR` 家族在 EL1/EL0 下的 `UNDEF` 语义以及“不得发生真实访存”的要求。
+
+# 修改日志 2026-04-04 12:45
+
+## 本轮修改
+
+- 继续沿 load/store decode 边界审计，先把两组 absent-feature / hint 语义正式接入回归：
+  - 新增 [tests/arm64/lrcpc3_absent_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/lrcpc3_absent_undef.S)，覆盖 `!FEAT_LRCPC3` 下 `LDIAPP/STILP` 与 `LDAPUR/STLUR (SIMD&FP)` 的 `UNDEF` 语义，以及“无访存 / 无写回 / 寄存器不被修改”的边界。
+  - 新增 [tests/arm64/prfum_hint.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/prfum_hint.S)，把 `PRFUM` 作为 prefetch hint 的 `no-op / 不产生同步异常` 语义固定进正式回归。
+- 在继续审计时确认此前还存在一条真实的 Armv8-A 程序可见缺口，而不是仅仅缺测试：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 之前只实现了整数 `LDR literal`，完全缺少 `LDR (literal, SIMD&FP)` 的 `St/Dt/Qt` 三条执行路径。
+  - 同时 `insn_uses_fp_asimd()` 也漏掉了这组 literal load，导致 `CPACR_EL1` 在 EL1/EL0 下都不会把它们按 `EC=0x07` FP trap 处理。
+- 已补齐 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中的 `SIMD&FP LDR literal` decode/执行：
+  - 新增 `St/Dt/Qt` 的 PC-relative literal load 路径。
+  - 复用现有 `load_vec()` 语义，保持 `S/D` literal load 后高位清零、`Q` literal load 全 128-bit 装载。
+  - 把这一家族接入 `insn_uses_fp_asimd()`，恢复 `CPACR_EL1` 对它们的 trap 识别。
+- 实现过程中还抓到并修正了一处新的 decode overlap：
+  - 我最初给 `LDR (literal, SIMD&FP)` 写的掩码过宽，误吞了 `0x7C...` 这一类 `H` 的 scalar FP load/store 编码，导致既有 [tests/arm64/fp_scalar_unscaled.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_scalar_unscaled.S) 回归失败。
+  - 最终把 literal 掩码从过宽匹配收紧到只覆盖真正的 literal encoding，回归恢复通过。
+- 新增正式裸机回归：
+  - [tests/arm64/fp_literal_load.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_literal_load.S)
+  - [tests/arm64/cpacr_fp_literal_trap.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/cpacr_fp_literal_trap.S)
+- 更新接入：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+
+## 本轮测试
+
+- `timeout 1200s ./tests/arm64/build_tests.sh`
+- `timeout 1200s cmake --build build -j`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fp_literal_load.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/cpacr_fp_literal_trap.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fp_scalar_unscaled.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- `SIMD&FP LDR (literal)` 这一条此前真实缺失的基础 FP memory 指令家族现在已经补齐，并通过裸机全回归与 Linux UMP/SMP 功能回归验证。
+- 这轮除了补实现，还顺手把 `!FEAT_LRCPC3` 与 `PRFUM` 的语义正式固定进回归，减少后续 load/store decode 调整再次引入误吞的风险。
+- 即便如此，我仍不能诚实地说“模拟器已经完整实现 Armv8-A 要求的最小集合”。
+- 当前更接近的判断是：
+  - 基础 integer / MMU / trap / FP / AdvSIMD 主路径已经越来越接近收口；
+  - 但仍需继续审计剩余的 decode overlap / reserved / absent-feature 边界，以及 TODO 里还没勾掉的 `SMP` 同步原语、`MMU/TLB/fault` 一致性、以及 `FP/AdvSIMD` 细节尾差。
+
+## 修改日志 2026-04-04 13:15
+
+## 本轮修改
+
+- 继续沿 `FP/AdvSIMD load/store` decode 边界审计，确认 `SIMD&FP scalar pair transfer` 还存在三处真实缺口：
+  - `insn_uses_fp_asimd()` 漏掉了 `LDP/STP (SIMD&FP)` / `LDNP/STNP (SIMD&FP)` pair 家族，导致 `CPACR_EL1` 关闭时这组指令不会先走 `EC=0x07` trap。
+  - 执行器只实现了 `Dt/Qt` pair transfer，完全缺少 `St` pair transfer。
+  - 既有 `Dt/Qt` pair 路径没有复用现有 `checked_fp_mem_base()` / `CheckSPAlignment()` 逻辑，`Rn==SP` 时会漏掉程序可见的 `SP alignment fault` 语义。
+- 已在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中把 `SIMD&FP scalar pair transfer` 收成统一执行路径：
+  - 新增 `load_vec_pair/store_vec_pair` 与 `exec_fp_pair_transfer` helper。
+  - 补齐 `St/Dt/Qt` 在 signed-offset / pre-index / post-index / no-allocate pair 四类编码上的执行。
+  - pair transfer 现在统一复用 `load_vec_whole/store_vec_whole`，因此 `S/D` load 后高位清零、`Q` 全宽装载、data alignment、以及 `Rn==SP` 时的 `CheckSPAlignment()` 都与现有整寄存器路径保持一致。
+  - `insn_uses_fp_asimd()` 现已覆盖 `St/Dt/Qt` 的 `LDP/STP/LDNP/STNP` 家族，恢复 `CPACR_EL1` 对这组 pair transfer 的 trap 识别。
+- 新增正式裸机回归：
+  - [tests/arm64/fp_pair_scalar_ls.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_pair_scalar_ls.S)
+  - [tests/arm64/cpacr_fp_pair_trap.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/cpacr_fp_pair_trap.S)
+- 扩展既有裸机回归：
+  - [tests/arm64/fpsimd_sp_alignment_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_sp_alignment_fault.S) 现在额外覆盖 `ldp s,s,[sp]` 与 `stp d,d,[sp,#imm]!` 的 `SP alignment fault`，并锁定 fault 优先于写回和内存更新。
+- 更新接入：
+  - [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)
+  - [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 1200s ./tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fp_pair_scalar_ls.bin -load 0x0 -entry 0x0 -steps 500000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/cpacr_fp_pair_trap.bin -load 0x0 -entry 0x0 -steps 500000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_sp_alignment_fault.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- `SIMD&FP scalar pair transfer` 这一块此前真实缺失/不完整的程序可见语义本轮已经补齐：`St` 正常执行、`CPACR_EL1` trap 覆盖、以及 `SP` 基址对齐 fault 都已经有正式回归锁住。
+- 经过裸机全回归与 Linux UMP/SMP 功能回归验证，这轮修改没有引入新的系统级回归。
+- 即便如此，我仍然不能在当前代码状态下自信地说“模拟器已经完整实现 Armv8-A 要求的最小集合”。
+- 当前更接近的判断是：
+  - `FP/AdvSIMD memory` 这条主路径已经又收口了一截，尤其是 pair transfer / trap / SP-base 语义的尾差已经去掉；
+  - 但仍需继续审计 `TODO.md` 里尚未勾掉的异常编码一致性、剩余 decode overlap / reserved / absent-feature 边界，以及 `SMP` 同步原语与 `MMU/TLB/fault` 一致性的尾差。

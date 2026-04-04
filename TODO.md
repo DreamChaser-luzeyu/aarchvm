@@ -56,6 +56,8 @@
 - [x] 已修正 `FCVTN/FCVTXN` 的 narrowing exception flags 尾差：`double -> float` overflow 现在会按程序可见语义置 `FPSR.OFC|IXC`，underflow/tiny inexact 现在会置 `FPSR.UFC|IXC`，并新增裸机回归分别锁定 regular `FCVTN` 与 round-to-odd `FCVTXN` 的 overflow / underflow / exact-subnormal 边界。
 - [x] 已修正 `FRECPE` 对“倒数估计会溢出到 `Inf` 的极小 subnormal”只置 `FPSR.IXC` 的尾差；当前 scalar/vector `single/double` 共享 helper 会按程序可见语义置 `FPSR.OFC|IXC`，并新增裸机回归锁定 smallest-subnormal 的正/负 `single` 与 `double` 边界，同时把既有 `fpsimd_fp_estimate` 中 `tiny` case 的旧错误期望一并收正。
 - [x] 已新增 `fp_fcvt_special_scalar` 正式裸机回归，锁定 scalar `FCVT*` 在 `qNaN/sNaN/±Inf`、`-0.6/-0.5` 近零负数，以及 `FPCR.FZ=1` 下 subnormal-to-int 的程序可见结果与 `FPSR`（`IOC/IXC/IDC`）组合，覆盖 signed/unsigned 与 `W/X` 目的寄存器边界。
+- [x] 已补齐 `LDR (literal, SIMD&FP)` 的 `St/Dt/Qt` 三条程序可见路径，并把这一家族接入 `CPACR_EL1` 的 `EC=0x07` FP trap 识别；新增 `fp_literal_load` 与 `cpacr_fp_literal_trap` 裸机回归，覆盖标量 `S/D` literal load 后高位清零、`Q` literal load 正向执行，以及 EL1/EL0 下 trap 优先于执行的边界。
+- [x] 已补齐 `LDP/STP (SIMD&FP)` scalar pair transfer 的 `St/Dt/Qt` 路径，覆盖 signed-offset / pre-index / post-index / no-allocate pair 形式，并把整个 pair 家族接入 `CPACR_EL1` 的 `EC=0x07` trap 识别；同时统一复用 `load_vec_whole/store_vec_whole`，修正 `Rn==SP` 时 pair transfer 漏掉 `CheckSPAlignment()` 的尾差，并新增 `fp_pair_scalar_ls`、`cpacr_fp_pair_trap` 与扩展后的 `fpsimd_sp_alignment_fault` 裸机回归锁定正常执行、trap 优先级、fault 优先于写回与内存更新的边界。
 
 ### 2. 异常 / 系统寄存器 / trap 语义收尾
 
@@ -188,6 +190,8 @@
 - [x] 已新增 host 侧 `tests/linux/run_qemu_user_diff.sh`，把 `fpsimd_selftest`、`fpint_selftest`、`mprotect_exec_stress`、`pthread_sync_stress` 固化为 `qemu-aarch64` 差分验证入口。
 - [x] 已新增 `ls64_absent_undef` 裸机回归，把当前 `!FEAT_LS64` 模型下 `LD64B/ST64B/ST64BV/ST64BV0` 的 absent-feature 行为固定进正式回归，防止后续 generic load/store 解码调整再次把这组 64-byte single-copy atomic 指令误吞成普通 load/store。
 - [x] 已新增 `lrcpc_absent_undef` 裸机回归，把当前 `!FEAT_LRCPC` 模型下 `LDAPR W/X`、`LDAPRB W`、`LDAPRH W` 的 absent-feature 语义固定进正式回归，避免后续 generic load/store 解码调整再次把它们误吞成已实现指令。
+- [x] 已新增 `lrcpc2_absent_undef` / `lrcpc3_absent_undef` 裸机回归，把当前 `!FEAT_LRCPC2` / `!FEAT_LRCPC3` 模型下 `LDAPUR/STLUR`、`LDIAPP/STILP` 及 `LDAPUR/STLUR (SIMD&FP)` 的 absent-feature 语义固定进正式回归，显式锁定 `EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`，以及“无真实访存 / 无写回 / 寄存器不被修改”的边界。
+- [x] 已新增 `prfum_hint` 裸机回归，把 `PRFUM` 在当前模型下作为 prefetch hint 的 `no-op / 不产生同步异常 / 不发生 guest 可见访存` 语义固定进正式回归，防止后续 load/store 解码调整把它误吞成真实访存。
 - [x] 已新增 `at_pan2_absent_undef` 裸机回归，把当前 `!FEAT_PAN2` 模型下 `AT S1E1RP/WP` 的 absent-feature 语义固定进正式回归，显式锁定 `EL1/EL0` 下的 `EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`，以及 `PAR_EL1` 与源寄存器都不应发生修改。
 
 ### 6. 建议实施顺序

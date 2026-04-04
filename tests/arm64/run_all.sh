@@ -186,6 +186,9 @@ run_expect gic_timer_phys_sysreg.bin 2000000 P
 run_expect bitfield_basic.bin 400000 U
 run_expect p1_core.bin 600000 V
 run_expect atomics_minimal.bin 400000 A
+run_expect lrcpc2_absent_undef.bin 1200000 2
+run_expect lrcpc3_absent_undef.bin 2000000 3
+run_expect prfum_hint.bin 400000 U
 run_expect crc32_family.bin 400000 R
 run_expect signext_loads.bin 400000 N
 run_expect signext_postindex.bin 400000 W
@@ -272,6 +275,8 @@ run_expect fpsimd_minimal.bin 400000 W
 run_expect fpsimd_mvni.bin 400000 W
 run_expect fpsimd_logic_more.bin 400000 W
 run_expect fp_scalar_ls.bin 400000 W
+run_expect fp_literal_load.bin 400000 L
+run_expect fp_pair_scalar_ls.bin 500000 P
 run_expect fp_scalar_regoffset.bin 400000 R
 run_expect fp_scalar_unscaled.bin 400000 U
 run_expect fpsimd_ext.bin 400000 W
@@ -370,6 +375,8 @@ run_expect cpacr_fp_trap.bin 300000 C
 run_expect cpacr_visible_bits.bin 200000 P
 run_expect cpacr_fp_sysreg_trap.bin 300000 R
 run_expect cpacr_fp_mem_trap.bin 300000 T
+run_expect cpacr_fp_literal_trap.bin 300000 V
+run_expect cpacr_fp_pair_trap.bin 400000 Y
 run_expect cpacr_fp_structured_trap.bin 400000 T
 run_expect cpacr_fp_structured_regpost_trap.bin 400000 T
 run_expect pstate_pan.bin 200000 W

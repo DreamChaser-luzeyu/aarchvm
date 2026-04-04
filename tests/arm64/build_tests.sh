@@ -42,6 +42,8 @@ build_asm_prog fpsimd_minimal
 build_asm_prog fpsimd_mvni
 build_asm_prog fpsimd_logic_more
 build_asm_prog fp_scalar_ls
+build_asm_prog fp_literal_load
+build_asm_prog fp_pair_scalar_ls
 build_asm_prog fp_scalar_regoffset
 build_asm_prog fp_scalar_unscaled
 build_asm_prog fpsimd_ext
@@ -141,6 +143,8 @@ build_asm_prog cpacr_fp_trap
 build_asm_prog cpacr_visible_bits
 build_asm_prog cpacr_fp_sysreg_trap
 build_asm_prog cpacr_fp_mem_trap
+build_asm_prog cpacr_fp_literal_trap
+build_asm_prog cpacr_fp_pair_trap
 build_asm_prog cpacr_fp_structured_trap
 build_asm_prog cpacr_fp_structured_regpost_trap
 build_asm_prog pstate_pan
@@ -279,6 +283,9 @@ build_asm_prog gic_timer_phys_sysreg
 build_asm_prog bitfield_basic
 build_asm_prog p1_core
 build_asm_prog atomics_minimal
+build_asm_prog lrcpc2_absent_undef
+build_asm_prog lrcpc3_absent_undef
+build_asm_prog prfum_hint
 build_asm_prog crc32_family
 build_asm_prog signext_loads
 build_asm_prog signext_postindex

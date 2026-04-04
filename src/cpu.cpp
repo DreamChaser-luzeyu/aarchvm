@@ -3781,6 +3781,13 @@ bool Cpu::insn_uses_fp_asimd(std::uint32_t insn) const {
     return true;
   }
 
+  const bool fp_ls_literal =
+      (insn & 0x3F000000u) == 0x1C000000u &&
+      ((insn >> 30) & 0x3u) != 0x3u;
+  if (fp_ls_literal) {
+    return true;
+  }
+
   if ((insn & 0xFFE00000u) == 0xD5200000u || (insn & 0xFFE00000u) == 0xD5000000u) {
     const std::uint32_t op0 = (insn >> 19) & 0x3u;
     const std::uint32_t op1 = (insn >> 16) & 0x7u;
@@ -3821,6 +3828,19 @@ bool Cpu::insn_uses_fp_asimd(std::uint32_t insn) const {
       (insn & 0xFFC00C00u) == 0x7C000000u || (insn & 0xFFC00C00u) == 0x7C400000u ||
       (insn & 0xFFC00C00u) == 0xBC000000u || (insn & 0xFFC00C00u) == 0xBC400000u ||
       (insn & 0xFFC00C00u) == 0xFC000000u || (insn & 0xFFC00C00u) == 0xFC400000u;
+  const bool fp_ls_pair =
+      (insn & 0xFFC00000u) == 0x2D800000u || (insn & 0xFFC00000u) == 0x2C800000u ||
+      (insn & 0xFFC00000u) == 0x2D000000u || (insn & 0xFFC00000u) == 0x2C000000u ||
+      (insn & 0xFFC00000u) == 0x2DC00000u || (insn & 0xFFC00000u) == 0x2CC00000u ||
+      (insn & 0xFFC00000u) == 0x2D400000u || (insn & 0xFFC00000u) == 0x2C400000u ||
+      (insn & 0xFFC00000u) == 0x6D800000u || (insn & 0xFFC00000u) == 0x6C800000u ||
+      (insn & 0xFFC00000u) == 0x6D000000u || (insn & 0xFFC00000u) == 0x6C000000u ||
+      (insn & 0xFFC00000u) == 0x6DC00000u || (insn & 0xFFC00000u) == 0x6CC00000u ||
+      (insn & 0xFFC00000u) == 0x6D400000u || (insn & 0xFFC00000u) == 0x6C400000u ||
+      (insn & 0xFFC00000u) == 0xAD800000u || (insn & 0xFFC00000u) == 0xAC800000u ||
+      (insn & 0xFFC00000u) == 0xAD000000u || (insn & 0xFFC00000u) == 0xAC000000u ||
+      (insn & 0xFFC00000u) == 0xADC00000u || (insn & 0xFFC00000u) == 0xACC00000u ||
+      (insn & 0xFFC00000u) == 0xAD400000u || (insn & 0xFFC00000u) == 0xAC400000u;
   const bool asimd_structured_ls =
       (insn & 0xBFFFFC00u) == 0x0C407000u || (insn & 0xBFFFFC00u) == 0x0C007000u ||
       (insn & 0xBFE0FC00u) == 0x0CC07000u || (insn & 0xBFE0FC00u) == 0x0C807000u ||
@@ -3837,7 +3857,8 @@ bool Cpu::insn_uses_fp_asimd(std::uint32_t insn) const {
       (insn & 0xBFFFFC00u) == 0x0C400000u || (insn & 0xBFFFFC00u) == 0x0C000000u ||
       (insn & 0xBFE0FC00u) == 0x0CC00000u || (insn & 0xBFE0FC00u) == 0x0C800000u ||
       (insn & 0xBF9F0000u) == 0x0D000000u || (insn & 0xBF800000u) == 0x0D800000u;
-  if (fp_ls_unsigned_imm || fp_ls_pre_post || fp_ls_regoffset || fp_ls_unscaled || asimd_structured_ls) {
+  if (fp_ls_unsigned_imm || fp_ls_pre_post || fp_ls_regoffset || fp_ls_unscaled ||
+      fp_ls_pair || asimd_structured_ls) {
     return true;
   }
 
@@ -12501,23 +12522,25 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     access_failed |= !ok;
     return ok;
   };
-  const auto load_vec_pair_whole = [&](std::uint64_t addr,
-                                       std::uint32_t vt,
-                                       std::uint32_t vt2,
-                                       std::uint64_t& fault_addr) -> bool {
-    if (!load_vec_whole(addr, vt, 16u, fault_addr)) {
+  const auto load_vec_pair = [&](std::uint64_t addr,
+                                 std::uint32_t vt,
+                                 std::uint32_t vt2,
+                                 std::size_t elem_size,
+                                 std::uint64_t& fault_addr) -> bool {
+    if (!load_vec_whole(addr, vt, elem_size, fault_addr)) {
       return false;
     }
-    return load_vec_whole(addr + 16u, vt2, 16u, fault_addr);
+    return load_vec_whole(addr + elem_size, vt2, elem_size, fault_addr);
   };
-  const auto store_vec_pair_whole = [&](std::uint64_t addr,
-                                        std::uint32_t vt,
-                                        std::uint32_t vt2,
-                                        std::uint64_t& fault_addr) -> bool {
-    if (!store_vec_whole(addr, vt, 16u, fault_addr)) {
+  const auto store_vec_pair = [&](std::uint64_t addr,
+                                  std::uint32_t vt,
+                                  std::uint32_t vt2,
+                                  std::size_t elem_size,
+                                  std::uint64_t& fault_addr) -> bool {
+    if (!store_vec_whole(addr, vt, elem_size, fault_addr)) {
       return false;
     }
-    return store_vec_whole(addr + 16u, vt2, 16u, fault_addr);
+    return store_vec_whole(addr + elem_size, vt2, elem_size, fault_addr);
   };
   const auto load_vec_seq_element_bytes = [&](std::uint64_t addr,
                                               std::uint32_t vt,
@@ -12795,6 +12818,37 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
     const std::uint64_t off = rm == 31u ? reg_bytes * reg_count : reg(rm);
     set_sp_or_reg(rn, addr + off, false);
+    return true;
+  };
+  const auto exec_fp_pair_transfer = [&](std::size_t elem_size,
+                                         bool is_load,
+                                         bool writeback,
+                                         bool post_index) -> bool {
+    const auto base = checked_fp_mem_base();
+    if (!base.has_value()) {
+      return true;
+    }
+    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
+    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) *
+                              static_cast<std::int64_t>(elem_size);
+    const std::uint64_t base_addr = *base;
+    const std::uint64_t addr =
+        post_index ? base_addr
+                   : static_cast<std::uint64_t>(static_cast<std::int64_t>(base_addr) + imm7);
+    std::uint64_t fault_addr = addr;
+    const bool ok =
+        is_load ? load_vec_pair(addr, rt, rt2, elem_size, fault_addr)
+                : store_vec_pair(addr, rt, rt2, elem_size, fault_addr);
+    if (!ok) {
+      data_abort(fault_addr);
+      return true;
+    }
+    if (writeback) {
+      const std::uint64_t wb_addr =
+          post_index ? static_cast<std::uint64_t>(static_cast<std::int64_t>(base_addr) + imm7)
+                     : addr;
+      set_sp_or_reg(rn, wb_addr, false);
+    }
     return true;
   };
 
@@ -13343,11 +13397,13 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     }
   }
 
-  // PRFM (literal / unsigned immediate / register offset).
-  // Model as a no-op hint for the current single-core Linux bring-up path.
+  // PRFM / PRFUM.
+  // Architecturally these are prefetch hints. The PE may treat them as NOPs,
+  // and they must not raise synchronous exceptions.
   if ((insn & 0xFF000000u) == 0xD8000000u ||
       (insn & 0xFFC00000u) == 0xF9800000u ||
-      (insn & 0xFFE00C00u) == 0xF8A00800u) {
+      (insn & 0xFFE00C00u) == 0xF8A00800u ||
+      (insn & 0xFFE00C00u) == 0xF8800000u) {
     return true;
   }
 
@@ -13618,6 +13674,28 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     }
   }
 
+  // FEAT_LRCPC2 is absent in the current model. The unscaled-immediate
+  // LDAPUR/STLUR family overlaps the ordinary LDUR/STUR decode space, so keep
+  // the whole family architecturally UNDEFINED instead of letting the generic
+  // unscaled handlers perform guest-visible accesses.
+  {
+    const std::uint32_t tag = insn & 0xFFE00C00u;
+    if (tag == 0x19400000u ||  // LDAPURB Wt, [Xn|SP, #simm9]
+        tag == 0x19C00000u ||  // LDAPURSB Wt, [Xn|SP, #simm9]
+        tag == 0x19800000u ||  // LDAPURSB Xt, [Xn|SP, #simm9]
+        tag == 0x59400000u ||  // LDAPURH Wt, [Xn|SP, #simm9]
+        tag == 0x59C00000u ||  // LDAPURSH Wt, [Xn|SP, #simm9]
+        tag == 0x59800000u ||  // LDAPURSH Xt, [Xn|SP, #simm9]
+        tag == 0x99400000u ||  // LDAPUR Wt, [Xn|SP, #simm9]
+        tag == 0x99800000u ||  // LDAPURSW Xt, [Xn|SP, #simm9]
+        tag == 0x19000000u ||  // STLURB Wt, [Xn|SP, #simm9]
+        tag == 0x59000000u ||  // STLURH Wt, [Xn|SP, #simm9]
+        tag == 0x99000000u) {  // STLUR Wt/Xt, [Xn|SP, #simm9]
+      enter_sync_exception(pc_ - 4u, 0x00u, 0u, false, 0u);
+      return true;
+    }
+  }
+
   // FEAT_LS64 / FEAT_LS64_V / FEAT_LS64_ACCDATA are absent in the current
   // model. LD64B/ST64B/ST64BV/ST64BV0 live in generic load/store decode
   // space; without an explicit intercept they alias unrelated unscaled
@@ -13843,6 +13921,21 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     }
     set_reg(rt, static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(*value & 0xFFFFFFFFu))));
     return true;
+  }
+
+  // LDR St/Dt/Qt, #imm19 (literal)
+  if ((insn & 0x3F000000u) == 0x1C000000u) {
+    const std::uint32_t opc = (insn >> 30) & 0x3u;
+    if (opc != 0x3u) {
+      const std::size_t size = 4u << opc;
+      const std::int64_t imm19 = sign_extend((insn >> 5) & 0x7FFFFu, 19) << 2u;
+      const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(pc_ - 4) + imm19);
+      if (!load_vec(addr, rt, size)) {
+        data_abort(last_data_fault_va_.value_or(addr));
+        return true;
+      }
+      return true;
+    }
   }
 
   // Post-index / pre-index loads-stores (minimal no-sign-extend family).
@@ -14153,174 +14246,62 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     return true;
   }
 
-  // STP/LDP Dt1, Dt2 pair transfers.
+  // STP/LDP scalar SIMD&FP pair transfers, including no-allocate pair forms.
+  if ((insn & 0xFFC00000u) == 0x2D800000u) {
+    return exec_fp_pair_transfer(4u, false, true, false);
+  }
+  if ((insn & 0xFFC00000u) == 0x2C800000u) {
+    return exec_fp_pair_transfer(4u, false, true, true);
+  }
+  if ((insn & 0xFFC00000u) == 0x2D000000u || (insn & 0xFFC00000u) == 0x2C000000u) {
+    return exec_fp_pair_transfer(4u, false, false, false);
+  }
+  if ((insn & 0xFFC00000u) == 0x2DC00000u) {
+    return exec_fp_pair_transfer(4u, true, true, false);
+  }
+  if ((insn & 0xFFC00000u) == 0x2CC00000u) {
+    return exec_fp_pair_transfer(4u, true, true, true);
+  }
+  if ((insn & 0xFFC00000u) == 0x2D400000u || (insn & 0xFFC00000u) == 0x2C400000u) {
+    return exec_fp_pair_transfer(4u, true, false, false);
+  }
+
   if ((insn & 0xFFC00000u) == 0x6D800000u) {
-    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
-    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 3u;
-    const std::uint64_t base = sp_or_reg(rn);
-    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + imm7);
-    if (!mmu_write(addr, q_reg_lane(rt, 0), 8) || !mmu_write(addr + 8, q_reg_lane(rt2, 0), 8)) {
-      data_abort(addr);
-      return true;
-    }
-    set_sp_or_reg(rn, addr, false);
-    return true;
+    return exec_fp_pair_transfer(8u, false, true, false);
   }
-
   if ((insn & 0xFFC00000u) == 0x6C800000u) {
-    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
-    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 3u;
-    const std::uint64_t addr = sp_or_reg(rn);
-    if (!mmu_write(addr, q_reg_lane(rt, 0), 8) || !mmu_write(addr + 8, q_reg_lane(rt2, 0), 8)) {
-      data_abort(addr);
-      return true;
-    }
-    set_sp_or_reg(rn, static_cast<std::uint64_t>(static_cast<std::int64_t>(addr) + imm7), false);
-    return true;
+    return exec_fp_pair_transfer(8u, false, true, true);
   }
-
   if ((insn & 0xFFC00000u) == 0x6D000000u || (insn & 0xFFC00000u) == 0x6C000000u) {
-    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
-    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 3u;
-    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + imm7);
-    if (!mmu_write(addr, q_reg_lane(rt, 0), 8) || !mmu_write(addr + 8, q_reg_lane(rt2, 0), 8)) {
-      data_abort(addr);
-      return true;
-    }
-    return true;
+    return exec_fp_pair_transfer(8u, false, false, false);
   }
-
   if ((insn & 0xFFC00000u) == 0x6DC00000u) {
-    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
-    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 3u;
-    const std::uint64_t base = sp_or_reg(rn);
-    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + imm7);
-    const auto v0 = mmu_read(addr, 8);
-    const auto v1 = mmu_read(addr + 8, 8);
-    if (!v0.has_value() || !v1.has_value()) {
-      data_abort(addr);
-      return true;
-    }
-    set_q_reg_lane(rt, 0, *v0);
-    set_q_reg_lane(rt, 1, 0u);
-    set_q_reg_lane(rt2, 0, *v1);
-    set_q_reg_lane(rt2, 1, 0u);
-    set_sp_or_reg(rn, addr, false);
-    return true;
+    return exec_fp_pair_transfer(8u, true, true, false);
   }
-
   if ((insn & 0xFFC00000u) == 0x6CC00000u) {
-    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
-    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 3u;
-    const std::uint64_t addr = sp_or_reg(rn);
-    const auto v0 = mmu_read(addr, 8);
-    const auto v1 = mmu_read(addr + 8, 8);
-    if (!v0.has_value() || !v1.has_value()) {
-      data_abort(addr);
-      return true;
-    }
-    set_q_reg_lane(rt, 0, *v0);
-    set_q_reg_lane(rt, 1, 0u);
-    set_q_reg_lane(rt2, 0, *v1);
-    set_q_reg_lane(rt2, 1, 0u);
-    set_sp_or_reg(rn, static_cast<std::uint64_t>(static_cast<std::int64_t>(addr) + imm7), false);
-    return true;
+    return exec_fp_pair_transfer(8u, true, true, true);
   }
-
   if ((insn & 0xFFC00000u) == 0x6D400000u || (insn & 0xFFC00000u) == 0x6C400000u) {
-    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
-    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 3u;
-    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + imm7);
-    const auto v0 = mmu_read(addr, 8);
-    const auto v1 = mmu_read(addr + 8, 8);
-    if (!v0.has_value() || !v1.has_value()) {
-      data_abort(addr);
-      return true;
-    }
-    set_q_reg_lane(rt, 0, *v0);
-    set_q_reg_lane(rt, 1, 0u);
-    set_q_reg_lane(rt2, 0, *v1);
-    set_q_reg_lane(rt2, 1, 0u);
-    return true;
+    return exec_fp_pair_transfer(8u, true, false, false);
   }
 
-  // STP/LDP Qt1, Qt2 pair transfers.
   if ((insn & 0xFFC00000u) == 0xAD800000u) {
-    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
-    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 4u;
-    const std::uint64_t base = sp_or_reg(rn);
-    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + imm7);
-    std::uint64_t fault_addr = addr;
-    if (!store_vec_pair_whole(addr, rt, rt2, fault_addr)) {
-      data_abort(fault_addr);
-      return true;
-    }
-    set_sp_or_reg(rn, addr, false);
-    return true;
+    return exec_fp_pair_transfer(16u, false, true, false);
   }
-
   if ((insn & 0xFFC00000u) == 0xAC800000u) {
-    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
-    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 4u;
-    const std::uint64_t addr = sp_or_reg(rn);
-    std::uint64_t fault_addr = addr;
-    if (!store_vec_pair_whole(addr, rt, rt2, fault_addr)) {
-      data_abort(fault_addr);
-      return true;
-    }
-    set_sp_or_reg(rn, static_cast<std::uint64_t>(static_cast<std::int64_t>(addr) + imm7), false);
-    return true;
+    return exec_fp_pair_transfer(16u, false, true, true);
   }
-
   if ((insn & 0xFFC00000u) == 0xAD000000u || (insn & 0xFFC00000u) == 0xAC000000u) {
-    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
-    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 4u;
-    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + imm7);
-    std::uint64_t fault_addr = addr;
-    if (!store_vec_pair_whole(addr, rt, rt2, fault_addr)) {
-      data_abort(fault_addr);
-      return true;
-    }
-    return true;
+    return exec_fp_pair_transfer(16u, false, false, false);
   }
-
   if ((insn & 0xFFC00000u) == 0xADC00000u) {
-    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
-    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 4u;
-    const std::uint64_t base = sp_or_reg(rn);
-    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + imm7);
-    std::uint64_t fault_addr = addr;
-    if (!load_vec_pair_whole(addr, rt, rt2, fault_addr)) {
-      data_abort(fault_addr);
-      return true;
-    }
-    set_sp_or_reg(rn, addr, false);
-    return true;
+    return exec_fp_pair_transfer(16u, true, true, false);
   }
-
   if ((insn & 0xFFC00000u) == 0xACC00000u) {
-    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
-    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 4u;
-    const std::uint64_t addr = sp_or_reg(rn);
-    std::uint64_t fault_addr = addr;
-    if (!load_vec_pair_whole(addr, rt, rt2, fault_addr)) {
-      data_abort(fault_addr);
-      return true;
-    }
-    set_sp_or_reg(rn, static_cast<std::uint64_t>(static_cast<std::int64_t>(addr) + imm7), false);
-    return true;
+    return exec_fp_pair_transfer(16u, true, true, true);
   }
-
   if ((insn & 0xFFC00000u) == 0xAD400000u || (insn & 0xFFC00000u) == 0xAC400000u) {
-    const std::uint32_t rt2 = (insn >> 10) & 0x1Fu;
-    const std::int64_t imm7 = sign_extend((insn >> 15) & 0x7Fu, 7) << 4u;
-    const std::uint64_t addr = static_cast<std::uint64_t>(static_cast<std::int64_t>(sp_or_reg(rn)) + imm7);
-    std::uint64_t fault_addr = addr;
-    if (!load_vec_pair_whole(addr, rt, rt2, fault_addr)) {
-      data_abort(fault_addr);
-      return true;
-    }
-    return true;
+    return exec_fp_pair_transfer(16u, true, false, false);
   }
 
   // STP Xt1, Xt2, [Xn|SP, #imm]!
