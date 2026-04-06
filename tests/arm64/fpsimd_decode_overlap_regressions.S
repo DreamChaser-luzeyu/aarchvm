@@ -139,6 +139,15 @@ _start:
     adr  x1, exp_overlap_fcvtns_d
     bl   check16
 
+    adr  x22, overlap_fcvtn_d2s_src
+    ldr  q4, [x22]
+    fcvtn v5.2s, v4.2d
+    str  q5, [x21, #224]
+    movz x24, #'f'
+    add  x0, x21, #224
+    adr  x1, exp_overlap_fcvtn_d2s
+    bl   check16
+
     movz x0, #'O'
     str  x0, [x20]
     movz x0, #'\n'
@@ -242,5 +251,10 @@ overlap_fcvt_d_src:
 exp_overlap_fcvtns_d:
     .quad 0x0000000000000002, 0xfffffffffffffffe
 
+overlap_fcvtn_d2s_src:
+    .quad 0x3ff8000000000000, 0xc002000000000000
+exp_overlap_fcvtn_d2s:
+    .word 0x3fc00000, 0xc0100000, 0x00000000, 0x00000000
+
 scratch:
-    .space 224
+    .space 240

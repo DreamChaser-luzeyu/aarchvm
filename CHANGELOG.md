@@ -1,3 +1,403 @@
+# 修改日志 2026-04-06 03:13
+
+## 本轮修改
+
+- 继续沿 `!FEAT_FP16` 与 optional SIMD&FP absent-feature 的 decode overlap 边界审计，在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中确认并修掉了一组真实回退：
+  - 先前为了把更多 half-precision compare / misc 指令纳入 `insn_requires_fp16_feature()`，新增的若干掩码仍有过宽问题。
+  - 其中最直接的一条是真实 mandatory 指令 `frecpe d0, d1`（编码 `0x5ee1d820`）会被误匹配成 half `FCMEQ Hd, Hn, #0.0` 家族，从而在当前 `!FEAT_FP16` 模型下错误落入同步 `UNDEFINED (EC=0)`。
+- 对应修正：
+  - half scalar `FABD`、zero-compare family（`FCMEQ/FCMGE/FCMGT/FCMLE/FCMLT`）以及 register-compare family（`FCMEQ/FCMGE/FCMGT/FACGE/FACGT`）的 absent-feature 掩码全部收紧到真实 half 编码。
+  - half vector `FABD`、register-compare family 与 zero-compare family 的掩码也同步收紧，避免再把 `single/double` 或其他 mandatory SIMD&FP 指令错截成 `!FEAT_FP16` 的 `UNDEFINED`。
+- 同时继续扩展并复用现有正式裸机回归，确认：
+  - `fp_frecpe_flags` 不再被 `!FEAT_FP16` 错杀；
+  - `fp_scalar_compare_misc`、`fpsimd_fp_vector` 仍保持原有 mandatory 行为；
+  - `cpacr_fp16_absent_misc_undef` 仍保持 `FPEN=0` 下的正确 `UNDEFINED` 分类。
+- 本轮还重新审计了 `src/soc.cpp` 的 SMP 主循环和 `src/cpu.cpp` 的访存提交模型，并把结论写回源码注释、[TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md) 与 [doc/armv8a-program-visible-audit.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/doc/armv8a-program-visible-audit.md)：
+  - 当前模型对 guest 可见内存效果提供单一全序；
+  - 因此 `DMB/DSB` 的 no-op 实现与 LSE acquire/release 变体折叠在当前执行模型下是保守且自洽的，不再作为首要未闭环点。
+
+## 本轮测试
+
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fp_frecpe_flags.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fp_scalar_compare_misc.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_fp_vector.bin -load 0x0 -entry 0x0 -steps 500000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/cpacr_fp16_absent_misc_undef.bin -load 0x0 -entry 0x0 -steps 1200000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_qemu_user_diff.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮修掉的是一组真实的 FP16 absent-feature decode overlap 回退，不是脚本层规避，也不是特殊地址/字节匹配的绕过。
+- 回归完成后，当前代码状态下可以把“`barrier/LSE` 顺序语义是否成立”从首要疑点里移出；当前最主要的剩余收口点收缩为：
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 的异常家族逐类对账；
+  - `MMU/TLB/fault` 与 fast-path / predecode 的细颗粒一致性；
+  - 缺失的 `qemu-system-aarch64` 系统级差分路径。
+- 截至这一轮，我仍然不打算贸然宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”，但离这个目标又收缩了一步。
+
+# 修改日志 2026-04-06 02:31
+
+## 本轮修改
+
+- 继续沿 `FPCR.FZ/AH` 的程序可见边界审计，确认当前普通 FP helper 里还残留一类真实语义缺口：
+  - Arm ARM 要求在 `FPCR.FZ=1` 且有效 `AH==0` 时，对 subnormal output 的判断发生在 rounding 之前。
+  - 但原先 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中 `fp_binary_arith_bits()`、`fp_mulx_bits()`、`fp_fma_bits()`、`fp_sqrt_bits()` 都是先走宿主浮点求值与舍入，再在结果阶段调用 `fp_flush_output_denormal_bits(...)`。
+  - 这样会把一类“精确结果仍是 tiny，但舍入后恰好抬成最小正规数”的边界 case 误算成 normal result，导致 `FZ=1` 下少刷成零、少置 `UFC`。
+- 在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中新增 exact-value 辅助路径，用整数精确表示 `single/double` 的有限值，并在 `FZ` 快路径下先判断 exact result 是否落在 tiny-before-round 区间：
+  - 覆盖 `ADD/SUB/MUL/DIV`、`FMULX`、`FMA/FMSUB/FNMADD/FNMSUB` 与 `FSQRT`。
+  - 命中该边界时，直接按程序可见语义返回带符号零并置 `FPSR.UFC`，不再让宿主舍入结果把它“抬出” tiny 区间。
+  - 同时为避免 `boost::multiprecision::cpp_int` 动态左移在当前编译选项下触发 `-Werror`，把相关比较/缩放改成更保守的实现，而没有改变 guest 可见语义。
+- 新增正式裸机回归 [tests/arm64/fp_fz_preround_arith.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp_fz_preround_arith.S)：
+  - 锁定 `FMUL S`、`FMADD S` 与 `FMUL D` 在“精确结果 tiny、舍入后可抬成最小正规数”的中点边界上，`FZ=1` 时必须返回零并置 `UFC`；
+  - 同时锁定 `FZ=0` 下同一组 case 仍返回最小正规数并置 `UFC|IXC`。
+- 将新回归接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j4`
+- `timeout 1200s ./tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fp_fz_preround_arith.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_qemu_user_diff.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮修掉的不是某个 case 的特判，而是普通 FP arithmetic helper 在 `FZ` 下共享的一类真实程序可见语义缺口。
+- 当前 `FZ=1`、`AH==0` 模型下，至少以下几条主路径已经补上了“tiny-before-round”行为：
+  - `ADD/SUB/MUL/DIV`
+  - `FMULX`
+  - `FMA/FMSUB/FNMADD/FNMSUB`
+  - `FSQRT`
+- 新增裸机回归、裸机全量回归、`qemu-user diff`、Linux UMP 功能回归、Linux SMP 功能回归都已通过。
+- 截至这一轮，我仍不能负责任地宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”；剩余最值得继续逐类对账的仍是：
+  - `FP/AdvSIMD` 里尚未系统锁定的 `DN/FZ/AH/FPSR/NaN/payload/subnormal/±0` 细节；
+  - `SMP` 下 barrier / LSE 顺序语义；
+  - `MMU/TLB/fault` 与 fast-path / predecode 的一致性边界。
+
+# 修改日志 2026-04-06 01:21
+
+## 本轮修改
+
+- 继续沿 `optional SIMD&FP absent-feature` 与 decode overlap 边界审计，在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中确认并修掉了两处真实的程序可见 bug：
+  - `BF16` absent helper 先前只按 `0x0E216800 / 0x4E216800` 的粗位形判断 `BFCVTN/BFCVTN2`，但没有额外区分 `ftype`，结果会把当前模型里 mandatory 的 `FCVTN/FCVTN2` 也误判成 `!FEAT_BF16` 的同步 `UNDEFINED`。
+  - `RDM` absent helper 的 by-element vector/scalar 掩码先前过宽，会把当前模型里 mandatory 的 `SQRDMULH (by element)` 误判成 `SQRDMLAH/SQRDMLSH`，导致 `!FEAT_RDM` 路径错误吞掉合法指令。
+- 对应修正：
+  - `BF16` helper 现在额外要求 `ftype == 2`，把 `BFCVTN/BFCVTN2` 与普通 `FCVTN/FCVTN2` 明确分开。
+  - `RDM` helper 的 by-element vector/scalar 掩码已经收紧到真实 `SQRDMLAH/SQRDMLSH` 编码：`0x6F00D000/0x6F00F000/0x7F00D000/0x7F00F000`，不再覆盖 `SQRDMULH`。
+- 同步扩展正式裸机回归 [tests/arm64/fpsimd_decode_overlap_regressions.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_decode_overlap_regressions.S)，新增 `FCVTN v5.2s, v4.2d` regression case，防止以后再把 `FCVTN` 错截成 `BF16 absent`。
+
+## 本轮测试
+
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fp_fcvtn_flags.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/bf16_absent_undef.bin -load 0x0 -entry 0x0 -steps 1200000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/cpacr_fp_absent_more_undef.bin -load 0x0 -entry 0x0 -steps 2200000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_qdmulh_indexed_more.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/rdm_absent_undef.bin -load 0x0 -entry 0x0 -steps 1200000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_decode_overlap_regressions.bin -load 0x0 -entry 0x0 -steps 500000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮修掉的是两处真实的 decode-overlap 级 bug，不是通过特殊地址、特殊字节或脚本绕过去的。
+- 修正后，当前模型里：
+  - mandatory `FCVTN/FCVTN2` 不会再被 `!FEAT_BF16` 错杀；
+  - mandatory `SQRDMULH (by element)` 不会再被 `!FEAT_RDM` 错杀；
+  - `BF16/RDM` 当前声明 absent 的真正 optional 指令仍保持同步 `UNDEFINED`。
+- 截至这轮，`tests/arm64/run_all.sh`、Linux UMP 功能回归、Linux SMP 功能回归都已通过，但我仍不能在当前代码状态下宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”。
+  现在最主要的剩余高优先级风险，已经缩小到：
+  - `SMP` 下 barrier / LSE 顺序语义仍主要依赖当前更强的单线程 round-robin 模型成立；
+  - `MMU/TLB/fault` 与 fast-path / predecode 的一致性仍需继续逐类对账；
+  - `异常 / trap / undef / no-op` 与 optional absent-feature 的剩余编码边界仍需继续审。
+
+# 修改日志 2026-04-06 00:26
+
+## 本轮修改
+
+- 继续沿 `FEAT_FP16 absent + CPACR_EL1.FPEN` 的优先级边界做收口，定位并修复了一条真实程序可见缺口：
+  - `FCCMP/FCCMPE Hn, Hm, #nzcv, cond` 在当前 `ID_AA64PFR0_EL1.FP=0b0000` 模型下本应属于 half-precision data-processing 空间，架构要求表现为同步 `UNDEFINED (EC=0)`。
+  - 但原先 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 里的 `insn_requires_fp16_feature()` 对这组 half 标量条件比较使用了过窄掩码，导致 `FCCMP H` 在 `FPEN=0` 时没有先被归入 `!FEAT_FP16` 的 `UNDEFINED`，而是会误落入 `EC=0x07` 的 FP access trap 路径。
+- 在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中将 half `FCCMP/FCCMPE` 的 `!FEAT_FP16` 识别掩码修正为能同时覆盖 `S/D/H` 家族固定位、并正确忽略 `fccmp/fccmpe` 的 signaling 区别与条件/NZCV 变位的形式：
+  - 这样 `FPEN=0` 时不会再被 `CPACR_EL1` 抢先吞成 FP trap；
+  - 随后会在数据处理解码层按当前模型既有行为落入同步 `UNDEFINED (EC=0)`。
+- 扩展正式裸机回归：
+  - [tests/arm64/fp16_absent_misc_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp16_absent_misc_undef.S) 新增 `FCCMPE H1, H2, #0, EQ`
+  - [tests/arm64/cpacr_fp16_absent_misc_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/cpacr_fp16_absent_misc_undef.S) 同步新增 `FCCMPE H1, H2, #0, EQ`
+  - 顺延后续 case 编号，确保 `FCCMP/FCCMPE H` 两条 half 条件比较在 direct-undef 与 `FPEN=0` 两个路径上都被正式锁定
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j4`
+- `timeout 1200s tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fp16_absent_misc_undef.bin -load 0x0 -entry 0x0 -steps 1500000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/cpacr_fp16_absent_misc_undef.bin -load 0x0 -entry 0x0 -steps 1500000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_qemu_user_diff.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮修掉的是一条真实的 `trap/undef` 分类缺口，不是测试偶然性，也不是通过特殊地址/字节匹配绕过去的。
+- 当前 `!FEAT_FP16` 模型下，`FCCMP/FCCMPE H` 现在都已被两层回归正式覆盖：
+  - `FPEN=开启` 时保持 direct `UNDEFINED`
+  - `FPEN=0` 时仍保持 `UNDEFINED`，不会误报成 `EC=0x07` 的 FP trap
+- 截至当前这轮收口后，我仍不能负责任地宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”。
+  剩余仍应继续逐类对账的高优先级方向主要是：
+  - `SMP` 下 barrier / LSE 的程序可见顺序语义
+  - `MMU/TLB/fault` 与 fast-path / predecode 的一致性边界
+  - `FP/AdvSIMD` 里尚未逐项锁死的 absent-feature / overlap / trap precedence 尾差
+
+# 修改日志 2026-04-05 15:00
+
+## 本轮修改
+
+- 继续沿 `FP/AdvSIMD absent-feature` 与 `CPACR_EL1.FPEN` 优先级边界审计，又确认出一组真实缺口：
+  - 当前模型 `ID_AA64PFR0_EL1.FP=0b0000`，不支持 `FEAT_FP16` 的 half data-processing。
+  - 但 `FMUL/FDIV/FMAX/FMINNM/FNMUL`、`FCVTAS Wd, Hn`，以及 `FMUL/FDIV/FMAX/FMINNM V*.4H/8H` 在 `FPEN=0` 时仍可能被 `insn_uses_fp_asimd()` 误判成 `EC=0x07` 的 FP trap，而不是架构要求的同步 `UNDEFINED (EC=0)`。
+- 在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中补齐了这组 `!FEAT_FP16` half data-processing 编码的 `FP trap` 预判排除：
+  - scalar: `FMUL/FDIV/FMAX/FMIN/FMAXNM/FMINNM/FNMUL`
+  - scalar convert-to-int family: `FCVT{N/U/A/P/M}{S/U} Wd|Xd, Hn`
+  - vector: `FMUL/FDIV/FMAX/FMIN/FMAXNM/FMINNM V*.4H/8H`
+- 这轮还顺手抓到并修掉了一条真实 `decode overlap`：
+  - `FMAXNM/FMINNM V*.4H/8H` 先前会落进更前面的 `DUP (element)` 宽掩码。
+  - 现已把该冲突位形显式从 `DUP` 路径里分流；当前 `!FEAT_FP16` 模型下保持 `UNDEFINED`，同时避免未来 `FEAT_FP16` 模型错误执行整数 `DUP` 语义。
+- 新增正式裸机回归：
+  - [tests/arm64/fp16_absent_more_undef2.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp16_absent_more_undef2.S)
+    - 覆盖 `FMUL/FDIV/FMAX/FMINNM/FNMUL H`、`FCVTAS Wd, Hn`、`FMUL/FDIV/FMAX/FMINNM V*.8H`
+    - 锁定 `FPEN=开启` 时的 direct-undef 行为、`EC=0/IL=1/ISS=0/FAR=0`，以及目的寄存器不变
+  - [tests/arm64/cpacr_fp16_absent_more_undef2.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/cpacr_fp16_absent_more_undef2.S)
+    - 覆盖同一组编码在 `FPEN=0` 时仍保持同步 `UNDEFINED`，不会被误吞成 `EC=0x07`
+- 将新回归接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 1200s ./tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fp16_absent_more_undef2.bin -load 0x0 -entry 0x0 -steps 1000000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/cpacr_fp16_absent_more_undef2.bin -load 0x0 -entry 0x0 -steps 1200000`
+- `timeout 120s ./build/aarchvm -bin tests/arm64/out/fpsimd_dup_elem.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_qemu_user_diff.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮修掉的不是测试噪音，而是两类真实程序可见问题：
+  - `!FEAT_FP16 + FPEN` 下的 `trap/undef` 分类尾差
+  - `FMAXNM/FMINNM .4H/.8H` 被 `DUP (element)` 宽掩码误吞的 decode overlap
+- 修改后，新增 half absent-feature 回归通过，裸机全量回归通过，`qemu-aarch64` 用户态差分通过，Linux UMP/SMP 功能回归通过。
+- 截至现在，我仍不能负责任地宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”；下一步仍应继续沿 `FP/AdvSIMD` 剩余 absent-feature / overlap 边界，以及 `MMU/TLB/fault`、`SMP` 程序可见语义做逐类对账。
+
+# 修改日志 2026-04-05 12:08
+
+## 本轮修改
+
+- 继续沿 `FP/AdvSIMD absent-feature` 与 `CPACR_EL1.FPEN` 优先级边界审计，确认当前实现里还残留一处真实的 trap 分类缺口：
+  - 当前模型 `ID_AA64ISAR1_EL1.FRINTTS=0`
+  - 但 `FRINT32Z/FRINT32X/FRINT64Z/FRINT64X` 在 `FPEN` 关闭时仍会被 `insn_uses_fp_asimd()` 误判成 `EC=0x07` 的 FP 访问 trap
+  - 架构要求这里应保持同步 `UNDEFINED (EC=0)`，而不是先被 `CPACR_EL1` 吞成 FP trap
+- 在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中修正了 `FEAT_FRINTTS` absent-feature 的 trap 预判：
+  - 读取 `ID_AA64ISAR1_EL1.FRINTTS`
+  - 当 `FRINTTS=0` 时，将 scalar/vector `FRINT32Z/FRINT32X/FRINT64Z/FRINT64X` 的全部现有编码从 `FP trap` 预判集中精确排除
+  - 这里使用逐条常量匹配，而不是宽掩码“顺手吞一片”式判断，避免再把相邻编码误算进 trap 集
+- 扩展正式裸机回归：
+  - [tests/arm64/cpacr_fp_absent_more_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/cpacr_fp_absent_more_undef.S) 新增 `FRINT32Z S0, S1` 与 `FRINT64X V0.2D, V1.2D`，锁定 `FPEN=0` 时的 `EC=0/IL=1/ISS=0/FAR=0/目的寄存器不变`
+  - [tests/arm64/fpsimd_optional_absent_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_optional_absent_undef.S) 新增 `FRINT32X S0, S1` 与 `FRINT64Z V0.4S, V1.4S`，锁定 `FPEN=开启` 时仍保持直接 `UNDEFINED`
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 1200s ./tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/cpacr_fp_absent_more_undef.bin -load 0x0 -entry 0x0 -steps 2200000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_optional_absent_undef.bin -load 0x0 -entry 0x0 -steps 1500000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_qemu_user_diff.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮确认并修掉的是一条真实的 `trap/undef` 分类尾差，不是测试空洞，也不是性能路径调整。
+- 当前 `FRINTTS=0` 模型下，`FRINT32Z/FRINT32X/FRINT64Z/FRINT64X` 现在不会再被 `FPEN=0` 错误吞成 `EC=0x07` 的 FP trap。
+- 这次修改后，相关回归已补齐到：
+  - 裸机全量回归通过
+  - `qemu-aarch64` 用户态差分回归通过
+  - Linux UMP/SMP 功能回归通过
+- 截至现在，我仍不能负责任地宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”；剩余高优先级仍是 `SMP` 屏障/LSE 顺序语义、`MMU/TLB/fault` 一致性，以及 `FP/AdvSIMD` 剩余边界的继续逐类对账。
+
+# 修改日志 2026-04-05 11:32
+
+## 本轮修改
+
+- 继续沿 `FP/AdvSIMD absent-feature` 边界做代码对账，补上此前还没被正式回归点到的一组 `AES<2` 代表性编码：
+  - `PMUL V0.8B, V1.8B, V2.8B`
+  - `PMULL V0.8H, V1.8B, V2.8B`
+- 扩展 [tests/arm64/cpacr_fp_absent_more_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/cpacr_fp_absent_more_undef.S)：
+  - 把 `PMUL/PMULL` 加进 `FPEN=0` 的 absent-feature / trap 优先级回归。
+  - 显式锁定在当前 `ID_AA64ISAR0_EL1.AES=0` 模型下，这两条编码不会被误报成 `EC=0x07` 以外的错误 trap，也不会真正执行或修改 `V0`。
+- 扩展 [tests/arm64/fpsimd_optional_absent_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_optional_absent_undef.S)：
+  - 把 `PMUL/PMULL` 加进 `FPEN=开启` 时的 direct-undef 回归。
+  - 显式锁定这两条编码在当前模型下仍保持同步 `UNDEFINED`，避免后续 generic SIMD decode 调整把 `AES/PMULL` 这组 absent-feature 编码误吞成半实现路径。
+
+## 本轮测试
+
+- `timeout 300s ./tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/cpacr_fp_absent_more_undef.bin -load 0x0 -entry 0x0 -steps 2500000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_optional_absent_undef.bin -load 0x0 -entry 0x0 -steps 1500000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `touch out/linux-usertests-shell-v1-build.log`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮同样没有暴露出新的执行语义 bug，但又收紧了一块之前尚未被正式回归锁定的 absent-feature 边界：`AES<2` 时 `PMUL/PMULL` 现在同时被 `FPEN=0` 和 `FPEN=开启` 两层回归覆盖。
+- 截至现在，我仍不能自信宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”。
+- 剩余最高优先级仍是：
+  - `SMP` 下 barrier / LSE 顺序语义；
+  - `MMU/TLB/fault` 与 predecode / fast-path 一致性；
+  - `FP/AdvSIMD` 的 `DN/FZ/FPSR/NaN/subnormal` 细节逐家族对账。
+
+# 修改日志 2026-04-05 11:22
+
+## 本轮修改
+
+- 继续沿 `Armv8-A` 程序可见最小集合里的 `FP/AdvSIMD absent-feature` 边界审计，但这轮重点不再只是 `FPEN=0` 时的 trap 优先级，而是把“当前模型明确声明 absent 的可选 SIMD&FP 指令在 `FPEN=开启` 时也必须保持 `UNDEFINED`”正式锁进回归。
+- 扩展了 [tests/arm64/fp16_absent_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fp16_absent_undef.S)：
+  - 在原先 half arithmetic / compare / `FMOV` / int-convert 的基础上，新增 `FSQRT/FRINTA/FRINTI/UCVTF/FCVTZU/FCSEL/FCCMP` 的 half 形式。
+  - 显式断言当前 `!FEAT_FP16` 模型下，这些编码仍应表现为同步 `UNDEFINED`，并锁定 `ESR_EL1.EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`，以及目的寄存器或 `NZCV` 不被修改。
+- 新增 [tests/arm64/fpsimd_optional_absent_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_optional_absent_undef.S)：
+  - 覆盖当前模型里声明 absent 的多类 optional SIMD&FP 特性代表指令直接执行语义，而不是只测 `CPACR_EL1.FPEN=0` 下的 trap 分类。
+  - 目前覆盖代表性编码包括 `FCADD`、`FMLAL`、`UMMLA`、`UDOT`、`AESE`、`SHA1C`、`SHA256H`、`EOR3`、`SM3SS1`、`SM4E`、`SHA512H`、`FCMLA (by element)`。
+  - 每条都显式锁定为同步 `UNDEFINED`，并检查 `V0` 不被修改，避免未来 generic decode 调整把这些 absent-feature 编码误吞成半实现路径。
+- 将新回归接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)。
+
+## 本轮测试
+
+- `timeout 300s ./tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fp16_absent_undef.bin -load 0x0 -entry 0x0 -steps 1200000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_optional_absent_undef.bin -load 0x0 -entry 0x0 -steps 1500000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `touch out/linux-usertests-shell-v1-build.log`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮没有再发现新的模拟器执行语义 bug，但把两类此前仍偏“靠代码阅读判断”的 absent-feature 边界正式固化进了回归：
+  - `!FEAT_FP16` 下更多 half 标量指令家族不会被误吞；
+  - 一批当前模型明确声明 absent 的 optional SIMD&FP 特性在 `FPEN=开启` 时也不会误执行。
+- 截至这轮，我仍不能负责任地宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”。
+- 当前更接近的判断是：
+  - `FP/AdvSIMD absent-feature / trap / undef` 这条线又收口了一截，回归把 `FPEN=0` 与 `FPEN=开启` 两层都覆盖到了；
+  - 但仍需继续审 `SMP` 下 barrier/LSE 顺序语义、`MMU/TLB/fault` 一致性，以及 `FP/AdvSIMD` 剩余 `NaN/default-NaN/subnormal/FPSR` 细节，才能更接近“最小集合已完整收口”的结论。
+
+# 修改日志 2026-04-05 01:31
+
+## 本轮修改
+
+- 继续沿 `FP/AdvSIMD absent-feature` 与 `CPACR_EL1.FPEN` 优先级边界审计，确认当前实现里还残留一处真实的 trap 分类缺口：
+  - `FEAT_FCMA` 不只包含 `FCADD/FCMLA (vector)`，还包含 `FCMLA (by element)`
+  - 当前模型 `ID_AA64ISAR1_EL1.FCMA=0`，但 `insn_uses_fp_asimd()` 之前没有把 by-element 这条家族从 `FP trap` 判定里排除
+  - 结果 `FCMLA Vd.4S, Vn.4S, Vm.S[index], #rot` 在 `FPEN=0` 时会被误报成 `EC=0x07`，而不是按架构要求保持同步 `UNDEFINED`
+- 在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 修正了 `FEAT_FCMA` absent-feature 过滤：
+  - 补齐 `FCMLA (by element, half-precision)`
+  - 补齐 `FCMLA (by element, single-precision)`
+  - 保持这两类编码在当前 `FCMA=0` 模型下不参与 `CPACR_EL1` 的 FP trap 分类
+- 扩展正式裸机回归 [tests/arm64/cpacr_fp_absent_more_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/cpacr_fp_absent_more_undef.S)：
+  - 新增 `FCMLA V0.4S, V1.4S, V2.S[1], #90`
+  - 新增 `FCMLA V0.8H, V1.8H, V2.H[0], #90`
+  - 显式锁定这两条指令在 `FPEN=0` 时必须表现为 `EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`，且 `V0` 保持不变
+
+## 本轮测试
+
+- `timeout 300s cmake --build build -j`
+- `timeout 300s ./tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/cpacr_fp_absent_more_undef.bin -load 0x0 -entry 0x0 -steps 2500000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮收掉的是一条真实的 `trap/undef` 分类尾差，不是测试噪音，也不是 decode 性能优化。
+- 当前 `FCMA=0` 模型下，`FCMLA (by element)` 现在不会再被 `FPEN=0` 错误吞成 `EC=0x07` 的 FP trap。
+- 但我仍不能在这一刻负责任地宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”；剩余仍最值得继续审的，还是 `SMP` 下 barrier/LSE 顺序语义、`MMU/TLB/fault` 一致性，以及 `FP/AdvSIMD` 其他尚未逐家族对账的 trap/undef/no-op 边界。
+
+# 修改日志 2026-04-05 00:20
+
+## 本轮修改
+
+- 继续沿 `FP/AdvSIMD absent-feature` 与 `CPACR_EL1.FPEN` 优先级边界审计，确认当前实现里仍有一处真实的 trap 分类 bug：
+  - 顶层 `insn_uses_fp_asimd()` 预判会先把一部分当前模型明确声明 absent 的 `FP/AdvSIMD` 编码认成“会访问 FP/SIMD 状态的合法指令”
+  - 结果这些编码在 `FPEN` 关闭时会被误报成 `EC=0x07` 的 FP trap，而不是按架构要求保持 `EC=0` 的同步 `UNDEFINED`
+- 在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中修正了这条优先级路径：
+  - 保留“当前特性 absent 时不参与 FP trap 判定”的前置过滤
+  - 修正 `BF16` 过滤里 `BFCVTN/BFCVTN2` 的错误匹配值，从先前写错的 value 改为实际编码对应的 `0x0E216800 / 0x4E216800`
+  - 移除了为定位问题临时加入的 `AARCHVM_DEBUG_FPTRAP` / `FPTRAP-DBG` 调试输出，避免调试残留堆积在主路径代码里
+- 同时修正了正式回归 [tests/arm64/cpacr_fp_absent_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/cpacr_fp_absent_undef.S) 的一个测试自身问题：
+  - `EL0` 异常返回后，测试错误地继续把已被 handler 改写的 `x11` 当作 `handled` 指针使用
+  - 现已在 `after_fcadd_el0` 处重新取 `handled` 地址，避免把测试自身寄存器污染误判成模拟器回归
+
+## 本轮测试
+
+- `timeout 300s cmake --build build -j`
+- `timeout 300s ./tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/cpacr_fp_absent_undef.bin -load 0x0 -entry 0x0 -steps 1200000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/bf16_absent_undef.bin -load 0x0 -entry 0x0 -steps 1000000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fjcvtzs_absent_undef.bin -load 0x0 -entry 0x0 -steps 600000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮确认并修掉的不是“某条指令没实现”，而是一个更隐蔽的程序可见行为缺口：当 `FPEN` 关闭时，`absent-feature` 编码与 `FP trap` 的优先级先前并不正确。
+- 修正后，当前模型下的 `FJCVTZS/BFCVTN/BFCVTN2/FCADD/AESE/UDOT` 在 `EL1/EL0` 上都能稳定保持 `UNDEFINED` 分类，而不会再被误吞成 `EC=0x07`。
+- 本轮之后，我仍不能诚实宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”；但 `FP absent-feature` 与 `CPACR_EL1` 交界处又收掉了一块真实缺口，后续仍需继续审剩余 `trap/undef/no-op`、`MMU/fault/TLB`、`SMP` 与 `FP/AdvSIMD` 边界。
+
+# 修改日志 2026-04-04 23:29
+
+## 本轮修改
+
+- 继续沿 `FP/AdvSIMD absent-feature` 与 decode overlap 边界审计，新增了正式裸机回归 [tests/arm64/bf16_absent_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/bf16_absent_undef.S)。
+- 这条新回归覆盖了当前 `ID_AA64ISAR1_EL1.BF16=0` 模型下的 6 条 `BF16` 指令：
+  - `BFCVT`
+  - `BFCVTN`
+  - `BFCVTN2`
+  - `BFMLALB`
+  - `BFDOT`
+  - `BFMMLA`
+- 审计过程中发现一个真实执行语义 bug，而不是单纯测试空洞：
+  - [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 里 `FCVTN/FCVTN2` 的向量窄化转换解码没有检查原始 `ftype`
+  - 结果 `BFCVTN/BFCVTN2` 会在 `!FEAT_BF16` 时被误吞成普通 `FCVTN/FCVTN2` 执行，而不是 `UNDEFINED`
+- 已在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中修正该 overlap：
+  - 在现有 `FCVTN/FCVTXN/FCVTL` 分支内部读取原始 `ftype`
+  - 对 `ftype == 2` 且落在 `BFCVTN/BFCVTN2` 编码位形的情况，依据 `ID_AA64ISAR1_EL1.BF16`
+    - 当前 `BF16=0` 时显式进入 `EC=0` 的同步 `UNDEFINED`
+    - 非当前模型的未来 `BF16!=0` 情况不再错误执行旧的 `FCVTN` 路径
+  - 同时把 `FCVTN/FCVTXN` 与 `FCVTL` 的合法 `ftype` 约束也顺手收紧，避免相邻位形再被宽掩码误吞
+- 为了让 CPU 侧能够直接读取这一 feature 声明，在 [include/aarchvm/system_registers.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/system_registers.hpp) 新增了 `id_aa64isar1_el1()` accessor。
+- 新回归已接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 1200s ./tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/bf16_absent_undef.bin -load 0x0 -entry 0x0 -steps 1000000`
+
+## 当前结论
+
+- 这轮确认并修掉了一处真实的 `decode overlap` 缺口：`BFCVTN/BFCVTN2` 先前确实会在当前 `!FEAT_BF16` 模型下被误执行。
+- 修正后，`BF16` 这组当前明确声明 absent 的编码不再依赖“碰巧没实现”来保持正确，而是被正式回归锁到了明确的 `UNDEFINED` 语义上。
+- 但截至这轮，我仍不能诚实宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”；接下来仍需继续审计其余 `FP/AdvSIMD`、`trap/undef/no-op`、`MMU/fault/TLB` 与 `SMP` 边界。
+
 ## 本轮修改 2026-04-03 23:37
 
 - 继续沿 AdvSIMD 基础整数乘法页审计解码边界，确认当前实现仍缺少三类真实的 Armv8-A 程序可见指令：
@@ -7484,3 +7884,86 @@
 - 当前更接近的判断是：
   - `FP/AdvSIMD memory` 这条主路径已经又收口了一截，尤其是 pair transfer / trap / SP-base 语义的尾差已经去掉；
   - 但仍需继续审计 `TODO.md` 里尚未勾掉的异常编码一致性、剩余 decode overlap / reserved / absent-feature 边界，以及 `SMP` 同步原语与 `MMU/TLB/fault` 一致性的尾差。
+
+# 修改日志 2026-04-04 22:22
+
+## 本轮修改
+
+- 继续沿“Armv8-A 程序可见正确性收尾计划”的验证基础设施审计，发现 [tests/arm64/fpsimd_debian_unimpl.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fpsimd_debian_unimpl.S) 虽然已经纳入构建，但此前并没有接进正式裸机总回归。
+- 这条用例覆盖的是一组历史上真实挡过 Debian/systemd 的 `FP/AdvSIMD` 指令族，因此把它停留在“只 build、不 execute”的状态会直接降低我们对 `FP/AdvSIMD` 收口结论的可信度。
+- 已将该用例正式接入 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)，以 `AARCHVM_BRK_MODE=halt` 下的单次成功输出 `J` 作为通过判据。
+- 同步更新了 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md) 的“正确性验证基础设施补强”当前进展，记录这处回归覆盖空洞已经补上。
+
+## 本轮测试
+
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/fpsimd_debian_unimpl.bin -load 0x0 -entry 0x0 -steps 1000000`
+- `timeout 1200s ./tests/linux/run_qemu_user_diff.sh`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+
+## 当前结论
+
+- 这一轮没有发现新的模拟器执行语义 bug，但确认并补上了一处真实的回归覆盖空洞。
+- `fpsimd_debian_unimpl` 现在会被正式回归执行，后续如果 `FP/AdvSIMD` decode 或语义再次回退到 Debian/systemd 曾经打到的缺口，`run_all.sh` 会直接报错，而不会再被“只编译不运行”静默放过。
+- 即便如此，我仍不能宣称“当前模拟器已经完整实现 Armv8-A 要求的最小集合”；当前仍未收口的重点依然是：
+  - `FP/AdvSIMD` 剩余 `NaN/subnormal/default-NaN/FPSR` 细节；
+  - `异常 / trap / undef / no-op` 的剩余编码边界；
+  - `SMP` 同步原语和 `MMU/TLB/fault` 一致性在多核/长期 workload 下的尾差。
+
+# 修改日志 2026-04-04 23:09
+
+## 本轮修改
+
+- 在 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh) 中新增 `verify_build_run_parity()` 自检，启动正式裸机总回归前会读取 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh)，确认所有已构建的 `arm64` 测试产物都已经被 `run_all.sh` 正式引用。
+- 这样后续如果再出现“测试已经 build 出来，但没有接进正式回归执行”的情况，脚本会直接失败，而不会继续静默漏检。
+- 同步更新了 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md) 的“正确性验证基础设施补强”当前进展，记录这项构建/执行一致性自检已经补上。
+
+## 本轮测试
+
+- `timeout 5400s ./tests/arm64/run_all.sh`
+
+## 当前结论
+
+- 这一轮仍未发现新的模拟器执行语义 bug，但把上一轮暴露出的“build/run 一致性”风险固化成了自动检查。
+- 现在单靠人工把新用例追加到 `build_tests.sh` 而忘记接进 `run_all.sh`，已经不会再被正式回归静默放过。
+
+# 修改日志 2026-04-04 23:41
+
+## 本轮修改
+
+- 在审计当前 `!FEAT_JSCVT` 边界时，确认 [src/system_registers.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/system_registers.cpp) 里 `ID_AA64ISAR1_EL1=0`，也就是 `FEAT_JSCVT` 当前明确声明 absent。
+- 结合本地 Arm ARM 文本 [agent_work/armarm.txt](/media/luzeyu/Storage2/FOSS_src/aarchvm/agent_work/armarm.txt) 中 `FJCVTZS` 的 decode 规则，补了新的正式裸机回归 [tests/arm64/fjcvtzs_absent_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/fjcvtzs_absent_undef.S)，把这条 JavaScript conversion 指令在当前模型下必须表现为 `UNDEFINED` 的程序可见语义固定进正式回归。
+- 同步把该用例接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 和 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)，并在 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md) 的“正确性验证基础设施补强”里记录这项覆盖已经补上。
+
+## 本轮测试
+
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin agent_work/fjcvtzs_undef.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+
+## 当前结论
+
+- 这轮没有发现新的模拟器执行语义 bug；`FJCVTZS` 当前行为已经符合 `!FEAT_JSCVT` 的 `UNDEFINED` 语义。
+- 但此前缺的是“正式回归锁定”，现在这条 absent-feature 边界已经纳入 `tests/arm64/run_all.sh`，后续如果相关 decode 调整把它误吞成其它已实现 `FP`/convert 指令，会被正式回归直接抓住。
+
+# 修改日志 2026-04-05 20:25
+
+## 本轮修改
+
+- 继续按 `TODO.md` 审计 `SMP` 同步原语与屏障语义，确认当前实现仍是单线程 round-robin，因此 `DMB/DSB/ISB` 与 acquire/release 家族在实现层面主要依赖“访存立即全局可见”的更强模型成立；但此前正式回归对这部分 litmus 覆盖仍然偏少。
+- 新增 [tests/arm64/smp_dmb_message_passing.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/smp_dmb_message_passing.S)，用 2 核 `STR + DMB ISH + STR` / `LDR + DMB ISH + LDR` 的 classic message passing 场景，外加 `DSB ISH + SEV/WFE` 配合，锁定当前模型下 barrier 路径的程序可见结果。
+- 新增 [tests/arm64/smp_lse_casa_publish.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/smp_lse_casa_publish.S)，用 `CASAL` 发布 flag、`CASA` 获取 flag 后读取 payload 的 2 核场景，补上 LSE acquire/release/ordered 变体的一条更直接的 SMP 正式回归。
+- 已把两条新用例接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)，并同步更新 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md) 的 SMP 收口进展记录。
+
+## 本轮测试
+
+- `timeout 1200s ./tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -smp 2 -bin tests/arm64/out/smp_dmb_message_passing.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -smp 2 -bin tests/arm64/out/smp_lse_casa_publish.bin -load 0x0 -entry 0x0 -steps 300000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `touch out/linux-usertests-shell-v1-build.log`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这一轮的目标不是改模拟器热路径，而是把此前尚未被正式锁住的 `SMP barrier / LSE aq-rel` 程序可见语义补进回归。
+- 即便这两条 litmus 与全回归都通过，我仍不能据此宣称“Armv8-A 最小集合已经完整收口”；它只意味着 `TODO.md` 里 `SMP` 这条主线又少了一块明显空洞。

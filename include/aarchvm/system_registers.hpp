@@ -62,6 +62,7 @@ public:
   void set_mpidr_el1(std::uint64_t value) { mpidr_el1_ = value; }
   [[nodiscard]] std::uint64_t id_aa64pfr0_el1() const { return id_aa64pfr0_el1_; }
   [[nodiscard]] std::uint64_t id_aa64isar0_el1() const { return id_aa64isar0_el1_; }
+  [[nodiscard]] std::uint64_t id_aa64isar1_el1() const { return id_aa64isar1_el1_; }
   [[nodiscard]] std::uint64_t id_aa64mmfr0_el1() const { return id_aa64mmfr0_el1_; }
   [[nodiscard]] std::uint32_t breakpoint_resource_count() const;
   [[nodiscard]] std::uint32_t watchpoint_resource_count() const;

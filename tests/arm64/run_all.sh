@@ -10,6 +10,35 @@ cmake --build build -j
 
 tests/arm64/build_tests.sh
 
+verify_build_run_parity() {
+  python - "$ROOT_DIR/tests/arm64/build_tests.sh" "$ROOT_DIR/tests/arm64/run_all.sh" <<'PY'
+import pathlib
+import re
+import sys
+
+build_path = pathlib.Path(sys.argv[1])
+run_path = pathlib.Path(sys.argv[2])
+
+build_text = build_path.read_text()
+run_text = run_path.read_text()
+
+build_names = re.findall(r'build_(?:asm|c)_prog\s+([A-Za-z0-9_]+)', build_text)
+missing = []
+for name in build_names:
+    pattern = rf'\b{re.escape(name)}\.(?:bin|snap)\b'
+    if re.search(pattern, run_text) is None:
+        missing.append(name)
+
+if missing:
+    print("run_all.sh is missing built arm64 test artifacts:", file=sys.stderr)
+    for name in missing:
+        print(f"  - {name}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+verify_build_run_parity
+
 export AARCHVM_BRK_MODE=halt
 
 CAPTURE_STATUS=0
@@ -229,6 +258,15 @@ test "$(./build/aarchvm -bin tests/arm64/out/msr_imm_absent_features_undef.bin -
 test "$(./build/aarchvm -bin tests/arm64/out/el0_eret_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'E'
 test "$(./build/aarchvm -bin tests/arm64/out/el0_hvc_smc_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'H'
 test "$(./build/aarchvm -bin tests/arm64/out/el1_hvc_smc_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'J'
+test "$(./build/aarchvm -bin tests/arm64/out/bf16_absent_undef.bin -load 0x0 -entry 0x0 -steps 1000000 | tr -d '\r\n')" = 'F'
+test "$(./build/aarchvm -bin tests/arm64/out/fjcvtzs_absent_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'J'
+test "$(./build/aarchvm -bin tests/arm64/out/rdm_absent_undef.bin -load 0x0 -entry 0x0 -steps 1000000 | tr -d '\r\n')" = 'R'
+test "$(./build/aarchvm -bin tests/arm64/out/fp16_absent_more_undef2.bin -load 0x0 -entry 0x0 -steps 1000000 | tr -d '\r\n')" = 'G'
+test "$(./build/aarchvm -bin tests/arm64/out/fp16_absent_misc_undef.bin -load 0x0 -entry 0x0 -steps 1000000 | tr -d '\r\n')" = 'M'
+test "$(./build/aarchvm -bin tests/arm64/out/cpacr_fp_absent_undef.bin -load 0x0 -entry 0x0 -steps 1200000 | tr -d '\r\n')" = 'Q'
+test "$(./build/aarchvm -bin tests/arm64/out/cpacr_fp_absent_more_undef.bin -load 0x0 -entry 0x0 -steps 2200000 | tr -d '\r\n')" = 'N'
+test "$(./build/aarchvm -bin tests/arm64/out/cpacr_fp16_absent_more_undef2.bin -load 0x0 -entry 0x0 -steps 1200000 | tr -d '\r\n')" = 'C'
+test "$(./build/aarchvm -bin tests/arm64/out/cpacr_fp16_absent_misc_undef.bin -load 0x0 -entry 0x0 -steps 1200000 | tr -d '\r\n')" = 'P'
 test "$(./build/aarchvm -bin tests/arm64/out/pc_alignment_fault.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'P'
 test "$(./build/aarchvm -bin tests/arm64/out/sp_special_sysreg_access.bin -load 0x0 -entry 0x0 -steps 800000 | tr -d '\r\n')" = 'R'
 test "$(./build/aarchvm -bin tests/arm64/out/sysreg_xzr_semantics.bin -load 0x0 -entry 0x0 -steps 400000 | tr -d '\r\n')" = 'Z'
@@ -310,8 +348,10 @@ run_expect fp_scalar_fcsel.bin 200000 W
 run_expect fp_scalar_fma.bin 200000 W
 run_expect fp_arith_fpcr_flags.bin 300000 A
 run_expect fp_fz_arith_compare.bin 300000 F
+run_expect fp_fz_preround_arith.bin 300000 A
 run_expect fp_fz_minmax.bin 300000 W
 run_expect fp_fz_misc.bin 500000 Z
+run_expect fp_fz_preround_convert.bin 300000 B
 run_expect fp_fz_to_int.bin 400000 T
 run_expect fp_scalar_misc.bin 200000 P
 run_expect fp_sqrt_flags.bin 300000 Q
@@ -323,6 +363,10 @@ run_expect fp_scalar_compare_misc.bin 300000 J
 run_expect fp_scalar_pairwise.bin 300000 Y
 run_expect fp_scalar_frecpx.bin 300000 X
 run_expect fp_ah_absent_ignored.bin 400000 H
+run_expect fp_half_scalar_convert.bin 300000 K
+run_expect fp16_absent_undef.bin 400000 U
+run_expect fpsimd_fp_half_convert_long_narrow.bin 400000 v
+run_expect fpsimd_optional_absent_undef.bin 1400000 O
 run_expect fpcr_visible_bits.bin 200000 P
 run_expect fpsimd_ins_xtl.bin 300000 W
 run_expect fpsimd_fcvt_rounding.bin 400000 O
@@ -362,6 +406,7 @@ run_expect fpsimd_cmp_zero_vector.bin 400000 Z
 run_expect fpsimd_fp_vector.bin 400000 V
 run_expect fpsimd_more_perm_fp.bin 400000 M
 run_expect fpsimd_cmp_reg_family.bin 300000 C
+run_expect fpsimd_debian_unimpl.bin 1000000 J
 run_expect fpsimd_xtn.bin 400000 N
 run_expect fpsimd_structured_ls.bin 400000 T
 run_expect fpsimd_structured_ls_more.bin 600000 Y
@@ -372,6 +417,9 @@ run_expect fpsimd_subtract_sat_more.bin 500000 S
 run_expect fpsimd_shift_narrow_more.bin 400000 N
 run_expect fpsr_qc_saturation.bin 400000 Q
 run_expect cpacr_fp_trap.bin 300000 C
+run_expect cpacr_fp_absent_undef.bin 1200000 Q
+run_expect cpacr_fp_absent_more_undef.bin 1600000 N
+run_expect rdm_absent_undef.bin 1000000 R
 run_expect cpacr_visible_bits.bin 200000 P
 run_expect cpacr_fp_sysreg_trap.bin 300000 R
 run_expect cpacr_fp_mem_trap.bin 300000 T
@@ -450,6 +498,8 @@ run_expect_smp smp_ldxr_invalidate.bin 200000 I
 run_expect_smp smp_ldxr_invalidate_mmu.bin 1200000 V
 run_expect_smp smp_spinlock_ldaxr_stlxr.bin 600000 L
 run_expect_smp smp_lse_ldaddal_counter.bin 600000 J
+run_expect_smp smp_dmb_message_passing.bin 300000 B
+run_expect_smp smp_lse_casa_publish.bin 300000 C
 run_expect_smp smp_tlbi_broadcast.bin 1200000 M
 run_expect_smp smp_wfe_monitor_event.bin 300000 M
 run_expect_smp smp_wfe_store_no_event.bin 300000 N

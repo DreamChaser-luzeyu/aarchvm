@@ -77,8 +77,10 @@ build_asm_prog fp_scalar_fcsel
 build_asm_prog fp_scalar_fma
 build_asm_prog fp_arith_fpcr_flags
 build_asm_prog fp_fz_arith_compare
+build_asm_prog fp_fz_preround_arith
 build_asm_prog fp_fz_minmax
 build_asm_prog fp_fz_misc
+build_asm_prog fp_fz_preround_convert
 build_asm_prog fp_fz_to_int
 build_asm_prog fp_scalar_misc
 build_asm_prog fp_sqrt_flags
@@ -90,6 +92,12 @@ build_asm_prog fp_scalar_compare_misc
 build_asm_prog fp_scalar_pairwise
 build_asm_prog fp_scalar_frecpx
 build_asm_prog fp_ah_absent_ignored
+build_asm_prog fp_half_scalar_convert
+build_asm_prog fp16_absent_undef
+build_asm_prog fp16_absent_more_undef2
+build_asm_prog fp16_absent_misc_undef
+build_asm_prog fpsimd_fp_half_convert_long_narrow
+build_asm_prog fpsimd_optional_absent_undef
 build_asm_prog fpcr_visible_bits
 build_asm_prog fpsimd_ins_xtl
 build_asm_prog fpsimd_fcvt_rounding
@@ -140,6 +148,10 @@ build_asm_prog fpsimd_subtract_sat_more
 build_asm_prog fpsimd_shift_narrow_more
 build_asm_prog fpsr_qc_saturation
 build_asm_prog cpacr_fp_trap
+build_asm_prog cpacr_fp_absent_undef
+build_asm_prog cpacr_fp_absent_more_undef
+build_asm_prog cpacr_fp16_absent_more_undef2
+build_asm_prog cpacr_fp16_absent_misc_undef
 build_asm_prog cpacr_visible_bits
 build_asm_prog cpacr_fp_sysreg_trap
 build_asm_prog cpacr_fp_mem_trap
@@ -181,6 +193,9 @@ build_asm_prog msr_imm_absent_features_undef
 build_asm_prog el0_eret_undef
 build_asm_prog el0_hvc_smc_undef
 build_asm_prog el1_hvc_smc_undef
+build_asm_prog bf16_absent_undef
+build_asm_prog fjcvtzs_absent_undef
+build_asm_prog rdm_absent_undef
 build_asm_prog brk_exception
 build_asm_prog hlt_undef
 build_asm_prog pc_alignment_fault
@@ -320,6 +335,8 @@ build_asm_prog smp_ldxr_invalidate
 build_asm_prog smp_ldxr_invalidate_mmu
 build_asm_prog smp_spinlock_ldaxr_stlxr
 build_asm_prog smp_lse_ldaddal_counter
+build_asm_prog smp_dmb_message_passing
+build_asm_prog smp_lse_casa_publish
 build_asm_prog smp_tlbi_broadcast
 build_asm_prog smp_wfe_monitor_event
 build_asm_prog smp_wfe_store_no_event

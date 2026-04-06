@@ -2,6 +2,8 @@
 
 #include "aarchvm/snapshot_io.hpp"
 
+#include <boost/multiprecision/cpp_int.hpp>
+
 #include <cfenv>
 #include <bit>
 #include <cmath>
@@ -15,6 +17,8 @@
 namespace aarchvm {
 
 namespace {
+
+using boost::multiprecision::cpp_int;
 
 bool env_flag_enabled(const char* name) {
   const char* value = std::getenv(name);
@@ -34,6 +38,286 @@ bool branch_zero_trace_enabled() {
 bool debug_slow_mode_enabled() {
   static const bool enabled = env_flag_enabled("AARCHVM_DEBUG_SLOW");
   return enabled;
+}
+
+bool feat_fp16_absent(std::uint64_t id_aa64pfr0_el1) {
+  return ((id_aa64pfr0_el1 >> 16) & 0xFu) == 0u;
+}
+
+bool insn_requires_fp16_feature(std::uint32_t insn) {
+  const auto matches = [&](std::uint32_t mask, std::uint32_t value) {
+    return (insn & mask) == value;
+  };
+  const std::uint32_t ftype = (insn >> 22) & 0x3u;
+
+  // When FEAT_FP16 is absent, the half-precision data-processing space is
+  // UNDEFINED. Only the H<->S/D conversion instructions remain architecturally
+  // allocated.
+  const bool scalar_half =
+      (ftype == 3u) &&
+      (matches(0xFF20FC00u, 0x1E202800u) ||   // FADD Hd, Hn, Hm
+       matches(0xFF20FC00u, 0x1E203800u) ||   // FSUB Hd, Hn, Hm
+       matches(0xFF20FC00u, 0x1E200800u) ||   // FMUL Hd, Hn, Hm
+       matches(0xFF20FC00u, 0x1E201800u) ||   // FDIV Hd, Hn, Hm
+       matches(0xFF20FC00u, 0x1E204800u) ||   // FMAX Hd, Hn, Hm
+       matches(0xFF20FC00u, 0x1E205800u) ||   // FMIN Hd, Hn, Hm
+       matches(0xFF20FC00u, 0x1E206800u) ||   // FMAXNM Hd, Hn, Hm
+       matches(0xFF20FC00u, 0x1E207800u) ||   // FMINNM Hd, Hn, Hm
+       matches(0xFF20FC00u, 0x1E208800u) ||   // FNMUL Hd, Hn, Hm
+       matches(0xFF3FFC00u, 0x5E39D800u) ||   // FRECPE Hd, Hn
+       matches(0xFF3FFC00u, 0x5E39F800u) ||   // FRECPX Hd, Hn
+       matches(0xFF3FFC00u, 0x7E39D800u) ||   // FRSQRTE Hd, Hn
+       matches(0xFFE0FC00u, 0x5EC03C00u) ||   // FRSQRTS Hd, Hn, Hm
+       matches(0xFF208000u, 0x1F000000u) ||   // FMADD/FMSUB/FNMADD/FNMSUB (half)
+       matches(0xFF208000u, 0x1F008000u) ||
+       matches(0xFF208000u, 0x1F200000u) ||
+       matches(0xFF208000u, 0x1F208000u) ||
+       matches(0xFF201FE0u, 0x1E201000u) ||   // FMOV Hd, #imm
+       matches(0xFF3FFC00u, 0x1E204000u) ||   // FMOV Hd, Hn
+       matches(0xFF3FFC00u, 0x1E20C000u) ||   // FABS Hd, Hn
+       matches(0xFF3FFC00u, 0x1E214000u) ||   // FNEG Hd, Hn
+       matches(0xFF3FFC00u, 0x1E21C000u) ||   // FSQRT Hd, Hn
+       matches(0xFF3FFC00u, 0x1E220000u) ||   // SCVTF Hd, Wn|Xn
+       matches(0xFF3FFC00u, 0x9E220000u) ||
+       matches(0xFF3FFC00u, 0x1E230000u) ||   // UCVTF Hd, Wn|Xn
+       matches(0xFF3FFC00u, 0x9E230000u) ||
+       matches(0xFF3FFC00u, 0x1E244000u) ||   // FRINTN/P/M/Z/A/X/I Hd, Hn
+       matches(0xFF3FFC00u, 0x1E24C000u) ||
+       matches(0xFF3FFC00u, 0x1E254000u) ||
+       matches(0xFF3FFC00u, 0x1E25C000u) ||
+       matches(0xFF3FFC00u, 0x1E264000u) ||
+       matches(0xFF3FFC00u, 0x1E274000u) ||
+       matches(0xFF3FFC00u, 0x1E27C000u) ||
+       matches(0xFF3FFC00u, 0x1E380000u) ||   // FCVTZS Hd-source variants
+       matches(0xFF3FFC00u, 0x9E380000u) ||
+       matches(0xFF3FFC00u, 0x1E390000u) ||   // FCVTZU Hd-source variants
+       matches(0xFF3FFC00u, 0x9E390000u) ||
+       matches(0xFF20FC00u, 0x1E200000u) ||   // FCVT{N/U/A/P/M}{S/U} Wd|Xd, Hn
+       matches(0xFF3FFC00u, 0x1E260000u) ||   // FMOV Wt, Hn
+       matches(0xFF3FFC00u, 0x1E270000u) ||   // FMOV Hd, Wn
+       matches(0xFF200C00u, 0x1E200C00u) ||   // FCSEL Hd, Hn, Hm, cond
+       matches(0xFF3CAF00u, 0x1E200400u) ||   // FCCMP/FCCMPE Hn, Hm, #nzcv, cond
+       (insn & 0xFF20FC1Fu) == 0x1E202000u || // FCMP/FCMPE Hn, Hm
+       (insn & 0xFF20FC1Fu) == 0x1E202010u ||
+       (insn & 0xFF20FC1Fu) == 0x1E202008u || // FCMP/FCMPE Hn, #0.0
+       (insn & 0xFF20FC1Fu) == 0x1E202018u ||
+       matches(0xFFFFFC00u, 0x7EC21400u) ||   // FABD Hd, Hn, Hm
+       matches(0xFFFFFC00u, 0x5EF8D800u) ||   // FCMEQ Hd, Hn, #0.0
+       matches(0xFFFFFC00u, 0x7EF8C800u) ||   // FCMGE Hd, Hn, #0.0
+       matches(0xFFFFFC00u, 0x5EF8C800u) ||   // FCMGT Hd, Hn, #0.0
+       matches(0xFFFFFC00u, 0x7EF8D800u) ||   // FCMLE Hd, Hn, #0.0
+       matches(0xFFFFFC00u, 0x5EF8E800u));    // FCMLT Hd, Hn, #0.0
+
+  const bool scalar_half_compare_reg =
+      matches(0xFFFFFC00u, 0x5E422400u) ||     // FCMEQ Hd, Hn, Hm
+      matches(0xFFFFFC00u, 0x7E422400u) ||     // FCMGE Hd, Hn, Hm
+      matches(0xFFFFFC00u, 0x7EC22400u) ||     // FCMGT Hd, Hn, Hm
+      matches(0xFFFFFC00u, 0x7E422C00u) ||     // FACGE Hd, Hn, Hm
+      matches(0xFFFFFC00u, 0x7EC22C00u);       // FACGT Hd, Hn, Hm
+
+  const bool vector_half =
+      matches(0xFF20FC00u, 0x5E001C00u) ||     // FMULX Hd, Hn, Hm
+      matches(0xFFE0FC00u, 0x5E403C00u) ||     // FRECPS Hd, Hn, Hm
+      matches(0xBF20FC00u, 0x0E001400u) ||     // FADD/FSUB Vd.4H|8H, Vn.4H|8H, Vm.4H|8H
+      matches(0xBF20FC00u, 0x2E001C00u) ||     // FMUL Vd.4H|8H, Vn.4H|8H, Vm.4H|8H
+      (matches(0xBF20FC00u, 0x0E001C00u) &&    // FMULX Vd.4H|8H, Vn.4H|8H, Vm.4H|8H
+       ((insn >> 22) & 1u) != 0u) ||          // distinguish from INS/MOV (element)
+      matches(0xBFE0FC00u, 0x2E403C00u) ||     // FDIV Vd.4H|8H, Vn.4H|8H, Vm.4H|8H
+      matches(0xBFFFFC00u, 0x2EC21400u) ||     // FABD Vd.4H|8H, Vn.4H|8H, Vm.4H|8H
+      matches(0xBFFFFC00u, 0x0E422400u) ||     // FCMEQ Vd.4H|8H, Vn.4H|8H, Vm.4H|8H
+      matches(0xBFFFFC00u, 0x2E422400u) ||     // FCMGE Vd.4H|8H, Vn.4H|8H, Vm.4H|8H
+      matches(0xBFFFFC00u, 0x2EC22400u) ||     // FCMGT Vd.4H|8H, Vn.4H|8H, Vm.4H|8H
+      matches(0xBFFFFC00u, 0x0EF8D800u) ||     // FCMEQ Vd.4H|8H, Vn.4H|8H, #0.0
+      matches(0xBFFFFC00u, 0x2EF8C800u) ||     // FCMGE Vd.4H|8H, Vn.4H|8H, #0.0
+      matches(0xBFFFFC00u, 0x0EF8C800u) ||     // FCMGT Vd.4H|8H, Vn.4H|8H, #0.0
+      matches(0xBFFFFC00u, 0x2EF8D800u) ||     // FCMLE Vd.4H|8H, Vn.4H|8H, #0.0
+      matches(0xBFFFFC00u, 0x0EF8E800u) ||     // FCMLT Vd.4H|8H, Vn.4H|8H, #0.0
+      matches(0x9F20FC00u, 0x0E003400u) ||     // FMAX/FMIN Vd.4H|8H, Vn.4H|8H, Vm.4H|8H
+      (matches(0x9F20FC00u, 0x0E000400u) &&    // FMAXNM/FMINNM Vd.4H|8H, Vn.4H|8H, Vm.4H|8H
+       ((insn >> 22) & 1u) != 0u) ||          // distinguish from DUP (element)
+      matches(0xBF80F400u, 0x2F009000u);       // FMULX Vd.4H|8H, Vn.4H|8H, Vm.H[index]
+
+  return scalar_half || scalar_half_compare_reg || vector_half;
+}
+
+bool insn_undef_due_to_absent_fp_asimd_feature(std::uint32_t insn,
+                                               std::uint64_t pfr0,
+                                               std::uint64_t isar0,
+                                               std::uint64_t isar1) {
+  const auto matches = [&](std::uint32_t mask, std::uint32_t value) {
+    return (insn & mask) == value;
+  };
+
+  const std::uint32_t aes = static_cast<std::uint32_t>((isar0 >> 4) & 0xFu);
+  const std::uint32_t sha1 = static_cast<std::uint32_t>((isar0 >> 8) & 0xFu);
+  const std::uint32_t sha2 = static_cast<std::uint32_t>((isar0 >> 12) & 0xFu);
+  const std::uint32_t rdm = static_cast<std::uint32_t>((isar0 >> 28) & 0xFu);
+  const std::uint32_t sha3 = static_cast<std::uint32_t>((isar0 >> 32) & 0xFu);
+  const std::uint32_t sm3 = static_cast<std::uint32_t>((isar0 >> 36) & 0xFu);
+  const std::uint32_t sm4 = static_cast<std::uint32_t>((isar0 >> 40) & 0xFu);
+  const std::uint32_t dotprod = static_cast<std::uint32_t>((isar0 >> 44) & 0xFu);
+  const std::uint32_t fhm = static_cast<std::uint32_t>((isar0 >> 48) & 0xFu);
+  const std::uint32_t jscvt = static_cast<std::uint32_t>((isar1 >> 12) & 0xFu);
+  const std::uint32_t fcma = static_cast<std::uint32_t>((isar1 >> 16) & 0xFu);
+  const std::uint32_t frintts = static_cast<std::uint32_t>((isar1 >> 32) & 0xFu);
+  const std::uint32_t bf16 = static_cast<std::uint32_t>((isar1 >> 44) & 0xFu);
+  const std::uint32_t i8mm = static_cast<std::uint32_t>((isar1 >> 52) & 0xFu);
+
+  if (jscvt == 0u && matches(0xFFFFFC00u, 0x1E7E0000u)) { // FJCVTZS Wd, Dn
+    return true;
+  }
+
+  if (feat_fp16_absent(pfr0) && insn_requires_fp16_feature(insn)) {
+    return true;
+  }
+
+  if (frintts == 0u &&
+      (matches(0xFFFFFC00u, 0x1E284000u) ||   // FRINT32Z Sd, Sn
+       matches(0xFFFFFC00u, 0x1E684000u) ||   // FRINT32Z Dd, Dn
+       matches(0xFFFFFC00u, 0x1E28C000u) ||   // FRINT32X Sd, Sn
+       matches(0xFFFFFC00u, 0x1E68C000u) ||   // FRINT32X Dd, Dn
+       matches(0xFFFFFC00u, 0x1E294000u) ||   // FRINT64Z Sd, Sn
+       matches(0xFFFFFC00u, 0x1E694000u) ||   // FRINT64Z Dd, Dn
+       matches(0xFFFFFC00u, 0x1E29C000u) ||   // FRINT64X Sd, Sn
+       matches(0xFFFFFC00u, 0x1E69C000u) ||   // FRINT64X Dd, Dn
+       matches(0xFFFFFC00u, 0x0E21E800u) ||   // FRINT32Z Vd.2S, Vn.2S
+       matches(0xFFFFFC00u, 0x4E21E800u) ||   // FRINT32Z Vd.4S, Vn.4S
+       matches(0xFFFFFC00u, 0x4E61E800u) ||   // FRINT32Z Vd.2D, Vn.2D
+       matches(0xFFFFFC00u, 0x2E21E800u) ||   // FRINT32X Vd.2S, Vn.2S
+       matches(0xFFFFFC00u, 0x6E21E800u) ||   // FRINT32X Vd.4S, Vn.4S
+       matches(0xFFFFFC00u, 0x6E61E800u) ||   // FRINT32X Vd.2D, Vn.2D
+       matches(0xFFFFFC00u, 0x0E21F800u) ||   // FRINT64Z Vd.2S, Vn.2S
+       matches(0xFFFFFC00u, 0x4E21F800u) ||   // FRINT64Z Vd.4S, Vn.4S
+       matches(0xFFFFFC00u, 0x4E61F800u) ||   // FRINT64Z Vd.2D, Vn.2D
+       matches(0xFFFFFC00u, 0x2E21F800u) ||   // FRINT64X Vd.2S, Vn.2S
+       matches(0xFFFFFC00u, 0x6E21F800u) ||   // FRINT64X Vd.4S, Vn.4S
+       matches(0xFFFFFC00u, 0x6E61F800u))) {  // FRINT64X Vd.2D, Vn.2D
+    return true;
+  }
+
+  if (bf16 == 0u &&
+      (matches(0xFFFFFC00u, 0x1E634000u) ||   // BFCVT Hd, Sn
+       ((((insn >> 22) & 0x3u) == 2u) &&      // BFCVTN/BFCVTN2 use the BF16 ftype
+        (matches(0xFF3FFC00u, 0x0E216800u) ||
+         matches(0xFF3FFC00u, 0x4E216800u))) ||
+       matches(0xBFF8FF5Cu, 0x2EC0FC00u) ||   // BFMLALB/BFMLALT
+       matches(0xBFF8FF5Cu, 0x2E40FC00u) ||   // BFDOT
+       matches(0xBFF8FF5Cu, 0x2E40EC00u))) {  // BFMMLA
+    return true;
+  }
+
+  if (fcma == 0u &&
+      (matches(0xBF20EC00u, 0x2E00E400u) ||   // FCADD
+       matches(0xBF20EC00u, 0x2E00CC00u) ||   // FCMLA (vector)
+       matches(0xBF809400u, 0x2F001000u) ||   // FCMLA (by element, half-precision)
+       matches(0xBF809400u, 0x2F801000u))) {  // FCMLA (by element, single-precision)
+    return true;
+  }
+
+  if (rdm == 0u &&
+      (matches(0xBF20FC00u, 0x2E008400u) ||   // SQRDMLAH (vector)
+       matches(0xBF20FC00u, 0x2E008C00u) ||   // SQRDMLSH (vector)
+       matches(0xFF20FC00u, 0x7E008400u) ||   // SQRDMLAH (scalar)
+       matches(0xFF20FC00u, 0x7E008C00u) ||   // SQRDMLSH (scalar)
+       matches(0xFF00F400u, 0x6F00D000u) ||   // SQRDMLAH (by element, vector)
+       matches(0xFF00F400u, 0x6F00F000u) ||   // SQRDMLSH (by element, vector)
+       matches(0xFF00F400u, 0x7F00D000u) ||   // SQRDMLAH (by element, scalar)
+       matches(0xFF00F400u, 0x7F00F000u))) {  // SQRDMLSH (by element, scalar)
+    return true;
+  }
+
+  if (dotprod == 0u &&
+      (matches(0xBFF8FF5Cu, 0x2E809400u) ||   // UDOT
+       matches(0xBFF8FF5Cu, 0x0E809400u))) {  // SDOT
+    return true;
+  }
+
+  if (fhm == 0u &&
+      (matches(0xBFF8FF5Cu, 0x0E20EC00u) ||   // FMLAL (vector)
+       matches(0xFFFCFE50u, 0x6E28CC40u) ||   // FMLAL2 (vector)
+       matches(0xBFE0FC5Cu, 0x0EA0EC0Cu) ||   // FMLSL (vector)
+       matches(0xFFFCFF58u, 0x6EB4CE50u) ||   // FMLSL2 (vector)
+       matches(0xBFC0F800u, 0x0F800000u) ||   // FMLAL/FMLAL2 (by element)
+       matches(0xBFC0F800u, 0x0F804000u))) {  // FMLSL/FMLSL2 (by element)
+    return true;
+  }
+
+  if (i8mm == 0u &&
+      (matches(0xFFF0FC00u, 0x4E80A400u) ||   // SMMLA
+       matches(0xFFF0FC00u, 0x6E80A400u) ||   // UMMLA
+       matches(0xFFF0FC00u, 0x4E80AC00u) ||   // USMMLA
+       matches(0xBFF0FC00u, 0x0E809C00u) ||   // USDOT (vector)
+       matches(0xFF80F400u, 0x4F80F000u) ||   // USDOT (by element)
+       matches(0xFF80F400u, 0x4F00F000u))) {  // SUDOT (by element)
+    return true;
+  }
+
+  if (aes == 0u &&
+      (matches(0xFFFFFC00u, 0x4E284800u) ||   // AESE
+       matches(0xFFFFFC00u, 0x4E285800u) ||   // AESD
+       matches(0xFFFFFC00u, 0x4E286800u) ||   // AESMC
+       matches(0xFFFFFC00u, 0x4E287800u))) {  // AESIMC
+    return true;
+  }
+
+  if (aes < 2u &&
+      (matches(0xBF20FC00u, 0x2E209C00u) ||   // PMUL
+       matches(0xBF20FC00u, 0x0E20E000u))) {  // PMULL/PMULL2
+    return true;
+  }
+
+  if (sha1 == 0u &&
+      (matches(0xFFF8FF5Cu, 0x5E000000u) ||   // SHA1C
+       matches(0xFFF8FF5Cu, 0x5E001000u) ||   // SHA1P
+       matches(0xFFF8FF5Cu, 0x5E002000u) ||   // SHA1M
+       matches(0xFFF8FF5Cu, 0x5E003000u) ||   // SHA1SU0
+       matches(0xFFFFFC00u, 0x5E280800u) ||   // SHA1H
+       matches(0xFFFFFC00u, 0x5E281800u))) {  // SHA1SU1
+    return true;
+  }
+
+  if (sha2 == 0u &&
+      (matches(0xFFF8FF5Cu, 0x5E004000u) ||   // SHA256H
+       matches(0xFFF8FF5Cu, 0x5E005000u) ||   // SHA256H2
+       matches(0xFFF8FF5Cu, 0x5E006000u) ||   // SHA256SU1
+       matches(0xFFFFFC00u, 0x5E282800u))) {  // SHA256SU0
+    return true;
+  }
+
+  if (sha3 == 0u &&
+      (matches(0xFFE08000u, 0xCE000000u) ||   // EOR3
+       matches(0xFFE08000u, 0xCE200000u) ||   // BCAX
+       matches(0xFFE0FC00u, 0xCE608C00u) ||   // RAX1
+       matches(0xFFE00000u, 0xCE800000u))) {  // XAR
+    return true;
+  }
+
+  if (sm3 == 0u &&
+      (matches(0xFFE08000u, 0xCE400000u) ||   // SM3SS1
+       matches(0xFFE0CC00u, 0xCE408000u) ||   // SM3TT1A
+       matches(0xFFE0CC00u, 0xCE408400u) ||   // SM3TT1B
+       matches(0xFFE0CC00u, 0xCE408800u) ||   // SM3TT2A
+       matches(0xFFE0CC00u, 0xCE408C00u) ||   // SM3TT2B
+       matches(0xFFE0FC00u, 0xCE60C000u) ||   // SM3PARTW1
+       matches(0xFFE0FC00u, 0xCE60C400u))) {  // SM3PARTW2
+    return true;
+  }
+
+  if (sm4 == 0u &&
+      (matches(0xFFFFFC00u, 0xCEC08400u) ||   // SM4E
+       matches(0xFFE0FC00u, 0xCE60C800u))) {  // SM4EKEY
+    return true;
+  }
+
+  if (sha2 < 2u &&
+      (matches(0xFFE0FC00u, 0xCE608000u) ||   // SHA512H
+       matches(0xFFE0FC00u, 0xCE608400u) ||   // SHA512H2
+       matches(0xFFFFFC00u, 0xCEC08000u) ||   // SHA512SU0
+       matches(0xFFE0FC00u, 0xCE608800u))) {  // SHA512SU1
+    return true;
+  }
+
+  return false;
 }
 
 bool brk_halt_mode_enabled() {
@@ -424,6 +708,7 @@ int fpcr_rounding_mode_to_host(std::uint32_t fpcr_mode) {
 
 constexpr std::uint32_t kFpcrCtlDn = 1u << 2;
 constexpr std::uint32_t kFpcrCtlFz = 1u << 3;
+constexpr std::uint32_t kFpcrCtlAhp = 1u << 4;
 
 inline bool fpcr_default_nan_enabled(std::uint32_t fpcr_mode) {
   return (fpcr_mode & kFpcrCtlDn) != 0u;
@@ -431,6 +716,10 @@ inline bool fpcr_default_nan_enabled(std::uint32_t fpcr_mode) {
 
 inline bool fpcr_flush_to_zero_enabled(std::uint32_t fpcr_mode) {
   return (fpcr_mode & kFpcrCtlFz) != 0u;
+}
+
+inline bool fpcr_alternative_half_enabled(std::uint32_t fpcr_mode) {
+  return (fpcr_mode & kFpcrCtlAhp) != 0u;
 }
 
 template <typename UIntT>
@@ -455,6 +744,57 @@ template <typename UIntT>
 UIntT fp_flush_output_denormal_bits(UIntT bits,
                                     std::uint32_t fpcr_mode,
                                     std::uint64_t& fpsr_bits);
+
+template <typename UIntT>
+constexpr UIntT fp_sign_mask_bits();
+
+template <typename UIntT>
+constexpr UIntT fp_exp_mask_bits();
+
+template <typename UIntT>
+constexpr UIntT fp_frac_mask_bits();
+
+template <typename UIntT>
+constexpr std::uint32_t fp_frac_bits_count();
+
+template <typename UIntT>
+constexpr std::uint32_t fp_exp_bits_count();
+
+template <typename UIntT>
+constexpr int fp_exp_bias();
+
+template <typename UIntT>
+struct ExactFpValue {
+  bool finite = true;
+  bool zero = true;
+  bool negative = false;
+  cpp_int magnitude = 0;
+  int exp2 = 0;
+};
+
+template <typename UIntT>
+constexpr UIntT fp_zero_bits(bool sign);
+
+template <typename UIntT>
+bool fp_add_sub_tiny_before_round(UIntT lhs_bits,
+                                  UIntT rhs_bits,
+                                  bool subtract_rhs,
+                                  bool* negative_result);
+
+template <typename UIntT>
+bool fp_mul_tiny_before_round(UIntT lhs_bits, UIntT rhs_bits, bool* negative_result);
+
+template <typename UIntT>
+bool fp_div_tiny_before_round(UIntT lhs_bits, UIntT rhs_bits, bool* negative_result);
+
+template <typename UIntT>
+bool fp_fma_tiny_before_round(UIntT lhs_bits,
+                              UIntT rhs_bits,
+                              UIntT addend_bits,
+                              bool* negative_result);
+
+template <typename UIntT>
+bool fp_sqrt_tiny_before_round(UIntT bits);
 
 std::uint64_t host_fp_exceptions_to_fpsr(int exceptions) {
   std::uint64_t fpsr_bits = 0u;
@@ -515,6 +855,28 @@ UIntT fp_binary_arith_bits(UIntT lhs_bits,
   }
   lhs_bits = fp_flush_input_denormal_bits(lhs_bits, fpcr_mode, fpsr_bits);
   rhs_bits = fp_flush_input_denormal_bits(rhs_bits, fpcr_mode, fpsr_bits);
+  if (fpcr_flush_to_zero_enabled(fpcr_mode)) {
+    bool negative_result = false;
+    bool tiny = false;
+    switch (op) {
+      case HostFpBinaryOp::Add:
+        tiny = fp_add_sub_tiny_before_round(lhs_bits, rhs_bits, false, &negative_result);
+        break;
+      case HostFpBinaryOp::Sub:
+        tiny = fp_add_sub_tiny_before_round(lhs_bits, rhs_bits, true, &negative_result);
+        break;
+      case HostFpBinaryOp::Mul:
+        tiny = fp_mul_tiny_before_round(lhs_bits, rhs_bits, &negative_result);
+        break;
+      case HostFpBinaryOp::Div:
+        tiny = fp_div_tiny_before_round(lhs_bits, rhs_bits, &negative_result);
+        break;
+    }
+    if (tiny) {
+      fpsr_bits |= kFpsrUfc;
+      return fp_zero_bits<UIntT>(negative_result);
+    }
+  }
   const FloatT lhs = std::bit_cast<FloatT>(lhs_bits);
   const FloatT rhs = std::bit_cast<FloatT>(rhs_bits);
   int exceptions = 0;
@@ -547,6 +909,13 @@ UIntT fp_mulx_bits(UIntT lhs_bits, UIntT rhs_bits, std::uint32_t fpcr_mode, std:
   }
   lhs_bits = fp_flush_input_denormal_bits(lhs_bits, fpcr_mode, fpsr_bits);
   rhs_bits = fp_flush_input_denormal_bits(rhs_bits, fpcr_mode, fpsr_bits);
+  if (fpcr_flush_to_zero_enabled(fpcr_mode)) {
+    bool negative_result = false;
+    if (fp_mul_tiny_before_round(lhs_bits, rhs_bits, &negative_result)) {
+      fpsr_bits |= kFpsrUfc;
+      return fp_zero_bits<UIntT>(negative_result);
+    }
+  }
   const UIntT sign_mask = fp_sign_mask_bits<UIntT>();
   const UIntT exp_mask = []() constexpr -> UIntT {
     if constexpr (sizeof(UIntT) == 4u) {
@@ -609,6 +978,13 @@ UIntT fp_fma_bits(UIntT lhs_bits,
   lhs_bits = fp_flush_input_denormal_bits(lhs_bits, fpcr_mode, fpsr_bits);
   rhs_bits = fp_flush_input_denormal_bits(rhs_bits, fpcr_mode, fpsr_bits);
   addend_bits = fp_flush_input_denormal_bits(addend_bits, fpcr_mode, fpsr_bits);
+  if (fpcr_flush_to_zero_enabled(fpcr_mode)) {
+    bool negative_result = false;
+    if (fp_fma_tiny_before_round(lhs_bits, rhs_bits, addend_bits, &negative_result)) {
+      fpsr_bits |= kFpsrUfc;
+      return fp_zero_bits<UIntT>(negative_result);
+    }
+  }
   const FloatT lhs = std::bit_cast<FloatT>(lhs_bits);
   const FloatT rhs = std::bit_cast<FloatT>(rhs_bits);
   const FloatT addend = std::bit_cast<FloatT>(addend_bits);
@@ -629,7 +1005,9 @@ UIntT fp_fma_bits(UIntT lhs_bits,
 
 template <typename UIntT>
 bool fp_is_nan_bits(UIntT bits) {
-  if constexpr (sizeof(UIntT) == 4u) {
+  if constexpr (sizeof(UIntT) == 2u) {
+    return (bits & 0x7C00u) == 0x7C00u && (bits & 0x03FFu) != 0u;
+  } else if constexpr (sizeof(UIntT) == 4u) {
     return (bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu) != 0u;
   } else {
     return (bits & 0x7FF0000000000000ull) == 0x7FF0000000000000ull &&
@@ -642,7 +1020,9 @@ bool fp_is_signaling_nan_bits(UIntT bits) {
   if (!fp_is_nan_bits(bits)) {
     return false;
   }
-  if constexpr (sizeof(UIntT) == 4u) {
+  if constexpr (sizeof(UIntT) == 2u) {
+    return (bits & 0x0200u) == 0u;
+  } else if constexpr (sizeof(UIntT) == 4u) {
     return (bits & 0x00400000u) == 0u;
   } else {
     return (bits & 0x0008000000000000ull) == 0u;
@@ -662,7 +1042,9 @@ std::uint64_t fp_compare_fpsr_bits(UIntT lhs_bits, UIntT rhs_bits, bool signalin
 
 template <typename UIntT>
 constexpr UIntT fp_sign_mask_bits() {
-  if constexpr (sizeof(UIntT) == 4u) {
+  if constexpr (sizeof(UIntT) == 2u) {
+    return 0x8000u;
+  } else if constexpr (sizeof(UIntT) == 4u) {
     return 0x80000000u;
   } else {
     return 0x8000000000000000ull;
@@ -671,7 +1053,9 @@ constexpr UIntT fp_sign_mask_bits() {
 
 template <typename UIntT>
 constexpr UIntT fp_exp_mask_bits() {
-  if constexpr (sizeof(UIntT) == 4u) {
+  if constexpr (sizeof(UIntT) == 2u) {
+    return 0x7C00u;
+  } else if constexpr (sizeof(UIntT) == 4u) {
     return 0x7F800000u;
   } else {
     return 0x7FF0000000000000ull;
@@ -680,7 +1064,9 @@ constexpr UIntT fp_exp_mask_bits() {
 
 template <typename UIntT>
 constexpr UIntT fp_frac_mask_bits() {
-  if constexpr (sizeof(UIntT) == 4u) {
+  if constexpr (sizeof(UIntT) == 2u) {
+    return 0x03FFu;
+  } else if constexpr (sizeof(UIntT) == 4u) {
     return 0x007FFFFFu;
   } else {
     return 0x000FFFFFFFFFFFFFull;
@@ -689,7 +1075,9 @@ constexpr UIntT fp_frac_mask_bits() {
 
 template <typename UIntT>
 constexpr std::uint32_t fp_frac_bits_count() {
-  if constexpr (sizeof(UIntT) == 4u) {
+  if constexpr (sizeof(UIntT) == 2u) {
+    return 10u;
+  } else if constexpr (sizeof(UIntT) == 4u) {
     return 23u;
   } else {
     return 52u;
@@ -698,7 +1086,9 @@ constexpr std::uint32_t fp_frac_bits_count() {
 
 template <typename UIntT>
 constexpr UIntT fp_quiet_nan_bit() {
-  if constexpr (sizeof(UIntT) == 4u) {
+  if constexpr (sizeof(UIntT) == 2u) {
+    return 0x0200u;
+  } else if constexpr (sizeof(UIntT) == 4u) {
     return 0x00400000u;
   } else {
     return 0x0008000000000000ull;
@@ -793,7 +1183,9 @@ std::optional<UIntT> fp_process_nan_ternary(UIntT op1_bits,
 
 template <typename UIntT>
 constexpr std::uint32_t fp_exp_bits_count() {
-  if constexpr (sizeof(UIntT) == 4u) {
+  if constexpr (sizeof(UIntT) == 2u) {
+    return 5u;
+  } else if constexpr (sizeof(UIntT) == 4u) {
     return 8u;
   } else {
     return 11u;
@@ -802,7 +1194,9 @@ constexpr std::uint32_t fp_exp_bits_count() {
 
 template <typename UIntT>
 constexpr int fp_exp_bias() {
-  if constexpr (sizeof(UIntT) == 4u) {
+  if constexpr (sizeof(UIntT) == 2u) {
+    return 15;
+  } else if constexpr (sizeof(UIntT) == 4u) {
     return 127;
   } else {
     return 1023;
@@ -852,6 +1246,173 @@ UIntT fp_flush_output_denormal_bits(UIntT bits,
     return fp_zero_bits<UIntT>((bits & fp_sign_mask_bits<UIntT>()) != 0u);
   }
   return bits;
+}
+
+template <typename UIntT>
+ExactFpValue<UIntT> fp_exact_value_bits(UIntT bits) {
+  ExactFpValue<UIntT> value{};
+  value.negative = (bits & fp_sign_mask_bits<UIntT>()) != 0u;
+  const std::uint32_t frac_bits = fp_frac_bits_count<UIntT>();
+  const std::uint32_t exp_bits = fp_exp_bits_count<UIntT>();
+  const UIntT exp_mask = fp_exp_mask_bits<UIntT>();
+  const UIntT frac_mask = fp_frac_mask_bits<UIntT>();
+  const std::uint32_t exp = static_cast<std::uint32_t>((bits & exp_mask) >> frac_bits);
+  const UIntT frac = bits & frac_mask;
+  if (exp == ((1u << exp_bits) - 1u)) {
+    value.finite = false;
+    return value;
+  }
+  if (exp == 0u) {
+    if (frac == 0u) {
+      return value;
+    }
+    value.zero = false;
+    value.magnitude = static_cast<std::uint64_t>(frac);
+    value.exp2 = 1 - fp_exp_bias<UIntT>() - static_cast<int>(frac_bits);
+    return value;
+  }
+  value.zero = false;
+  cpp_int implicit = 1;
+  for (std::uint32_t i = 0; i < frac_bits; ++i) {
+    implicit *= 2;
+  }
+  value.magnitude = implicit + static_cast<std::uint64_t>(frac);
+  value.exp2 = static_cast<int>(exp) - fp_exp_bias<UIntT>() - static_cast<int>(frac_bits);
+  return value;
+}
+
+cpp_int exact_scale_pow2(cpp_int value, unsigned shift) {
+  for (unsigned i = 0; i < shift; ++i) {
+    value *= 2;
+  }
+  return value;
+}
+
+bool exact_abs_lt_power_of_two(const cpp_int& magnitude, int exp2, int threshold_exp2) {
+  if (magnitude == 0) {
+    return false;
+  }
+  if (exp2 >= threshold_exp2) {
+    return false;
+  }
+  return boost::multiprecision::msb(magnitude) < static_cast<unsigned>(threshold_exp2 - exp2);
+}
+
+template <typename UIntT>
+bool fp_exact_tiny_sum_terms(bool lhs_negative,
+                             const cpp_int& lhs_magnitude,
+                             int lhs_exp2,
+                             bool rhs_negative,
+                             const cpp_int& rhs_magnitude,
+                             int rhs_exp2,
+                             bool* negative_result) {
+  const int common_exp2 = std::min(lhs_exp2, rhs_exp2);
+  cpp_int lhs = exact_scale_pow2(lhs_magnitude, static_cast<unsigned>(lhs_exp2 - common_exp2));
+  cpp_int rhs = exact_scale_pow2(rhs_magnitude, static_cast<unsigned>(rhs_exp2 - common_exp2));
+  if (lhs_negative) {
+    lhs = -lhs;
+  }
+  if (rhs_negative) {
+    rhs = -rhs;
+  }
+  const cpp_int sum = lhs + rhs;
+  if (sum == 0) {
+    return false;
+  }
+  *negative_result = sum < 0;
+  const cpp_int magnitude = (sum < 0) ? -sum : sum;
+  return exact_abs_lt_power_of_two(magnitude, common_exp2, 1 - fp_exp_bias<UIntT>());
+}
+
+template <typename UIntT>
+bool fp_add_sub_tiny_before_round(UIntT lhs_bits,
+                                  UIntT rhs_bits,
+                                  bool subtract_rhs,
+                                  bool* negative_result) {
+  const ExactFpValue<UIntT> lhs = fp_exact_value_bits(lhs_bits);
+  const ExactFpValue<UIntT> rhs = fp_exact_value_bits(rhs_bits);
+  if (!lhs.finite || !rhs.finite || (lhs.zero && rhs.zero)) {
+    return false;
+  }
+  return fp_exact_tiny_sum_terms<UIntT>(lhs.negative,
+                                        lhs.magnitude,
+                                        lhs.exp2,
+                                        subtract_rhs ? !rhs.negative : rhs.negative,
+                                        rhs.magnitude,
+                                        rhs.exp2,
+                                        negative_result);
+}
+
+template <typename UIntT>
+bool fp_mul_tiny_before_round(UIntT lhs_bits, UIntT rhs_bits, bool* negative_result) {
+  const ExactFpValue<UIntT> lhs = fp_exact_value_bits(lhs_bits);
+  const ExactFpValue<UIntT> rhs = fp_exact_value_bits(rhs_bits);
+  if (!lhs.finite || !rhs.finite || lhs.zero || rhs.zero) {
+    return false;
+  }
+  *negative_result = lhs.negative != rhs.negative;
+  return exact_abs_lt_power_of_two(lhs.magnitude * rhs.magnitude,
+                                   lhs.exp2 + rhs.exp2,
+                                   1 - fp_exp_bias<UIntT>());
+}
+
+template <typename UIntT>
+bool fp_div_tiny_before_round(UIntT lhs_bits, UIntT rhs_bits, bool* negative_result) {
+  const ExactFpValue<UIntT> lhs = fp_exact_value_bits(lhs_bits);
+  const ExactFpValue<UIntT> rhs = fp_exact_value_bits(rhs_bits);
+  if (!lhs.finite || !rhs.finite || lhs.zero || rhs.zero) {
+    return false;
+  }
+  *negative_result = lhs.negative != rhs.negative;
+  const int delta = lhs.exp2 - rhs.exp2 - (1 - fp_exp_bias<UIntT>());
+  if (delta >= 0) {
+    return exact_scale_pow2(lhs.magnitude, static_cast<unsigned>(delta)) < rhs.magnitude;
+  }
+  return lhs.magnitude < exact_scale_pow2(rhs.magnitude, static_cast<unsigned>(-delta));
+}
+
+template <typename UIntT>
+bool fp_fma_tiny_before_round(UIntT lhs_bits,
+                              UIntT rhs_bits,
+                              UIntT addend_bits,
+                              bool* negative_result) {
+  const ExactFpValue<UIntT> lhs = fp_exact_value_bits(lhs_bits);
+  const ExactFpValue<UIntT> rhs = fp_exact_value_bits(rhs_bits);
+  const ExactFpValue<UIntT> addend = fp_exact_value_bits(addend_bits);
+  if (!lhs.finite || !rhs.finite || !addend.finite) {
+    return false;
+  }
+  if (lhs.zero || rhs.zero) {
+    if (addend.zero) {
+      return false;
+    }
+    *negative_result = addend.negative;
+    return exact_abs_lt_power_of_two(addend.magnitude, addend.exp2, 1 - fp_exp_bias<UIntT>());
+  }
+  if (addend.zero) {
+    *negative_result = lhs.negative != rhs.negative;
+    return exact_abs_lt_power_of_two(lhs.magnitude * rhs.magnitude,
+                                     lhs.exp2 + rhs.exp2,
+                                     1 - fp_exp_bias<UIntT>());
+  }
+  return fp_exact_tiny_sum_terms<UIntT>(lhs.negative != rhs.negative,
+                                        lhs.magnitude * rhs.magnitude,
+                                        lhs.exp2 + rhs.exp2,
+                                        addend.negative,
+                                        addend.magnitude,
+                                        addend.exp2,
+                                        negative_result);
+}
+
+template <typename UIntT>
+bool fp_sqrt_tiny_before_round(UIntT bits) {
+  const ExactFpValue<UIntT> value = fp_exact_value_bits(bits);
+  if (!value.finite || value.zero || value.negative) {
+    return false;
+  }
+  return exact_abs_lt_power_of_two(value.magnitude,
+                                   value.exp2,
+                                   2 * (1 - fp_exp_bias<UIntT>()));
 }
 
 template <typename UIntT>
@@ -962,6 +1523,10 @@ UIntT fp_sqrt_bits(UIntT bits, std::uint32_t fpcr_mode, std::uint64_t& fpsr_bits
   if (sign) {
     fpsr_bits |= kFpsrIoc;
     return fp_default_nan_bits<UIntT>();
+  }
+  if (fpcr_flush_to_zero_enabled(fpcr_mode) && fp_sqrt_tiny_before_round(bits)) {
+    fpsr_bits |= kFpsrUfc;
+    return fp_zero_bits<UIntT>(false);
   }
 
   const FloatT value = std::bit_cast<FloatT>(bits);
@@ -1176,6 +1741,15 @@ std::uint32_t fp64_to_fp32_bits(std::uint64_t bits, std::uint32_t fpcr_mode, std
     return overflow_result();
   }
 
+  // With AH effectively 0 in the current model, Arm requires FZ to detect
+  // denormalized single-precision outputs before rounding is applied. Without
+  // this, values just below the min-normal boundary would incorrectly round up
+  // to 0x00800000 instead of flushing to signed zero.
+  if (fpcr_flush_to_zero_enabled(fpcr_mode) && exponent < -126) {
+    fpsr_bits |= kFpsrUfc;
+    return sign_bit;
+  }
+
   bool inexact = false;
   if (exponent >= -126) {
     std::uint64_t rounded = fp_round_shift_right(significand, 29u, fpcr_mode, sign, inexact);
@@ -1286,6 +1860,14 @@ std::uint32_t fp64_to_fp32_bits_round_to_odd(std::uint64_t bits,
 
   if (exponent > 127) {
     return overflow_result();
+  }
+
+  // FCVTXN shares the same denormalized-output flushing rule as FCVT:
+  // when AH is 0, FZ observes the pre-rounding tiny result rather than the
+  // post-rounding single-precision encoding.
+  if (fpcr_flush_to_zero_enabled(fpcr_mode) && exponent < -126) {
+    fpsr_bits |= kFpsrUfc;
+    return sign_bit;
   }
 
   bool inexact = false;
@@ -1709,6 +2291,194 @@ std::uint64_t fp32_to_fp64_bits(std::uint32_t bits, std::uint32_t fpcr_mode, std
 
   const double result = static_cast<double>(std::bit_cast<float>(bits));
   return std::bit_cast<std::uint64_t>(result);
+}
+
+template <typename DstUIntT>
+DstUIntT fp16_to_fp_bits(std::uint16_t bits, std::uint32_t fpcr_mode, std::uint64_t& fpsr_bits) {
+  static_assert(sizeof(DstUIntT) == 4u || sizeof(DstUIntT) == 8u);
+
+  constexpr std::uint32_t kHalfExpBits = 5u;
+  constexpr std::uint32_t kHalfFracBits = 10u;
+  constexpr std::uint16_t kHalfSignMask = 0x8000u;
+  constexpr std::uint16_t kHalfExpMask = 0x7C00u;
+  constexpr std::uint16_t kHalfFracMask = 0x03FFu;
+  constexpr std::uint16_t kHalfQuietNanBit = 0x0200u;
+
+  fpsr_bits = 0u;
+  const bool alt_hp = fpcr_alternative_half_enabled(fpcr_mode);
+  const bool sign = (bits & kHalfSignMask) != 0u;
+  const DstUIntT sign_bit = sign ? fp_sign_mask_bits<DstUIntT>() : 0u;
+  const std::uint32_t exp = static_cast<std::uint32_t>((bits & kHalfExpMask) >> kHalfFracBits);
+  const std::uint32_t frac = bits & kHalfFracMask;
+
+  if (exp == ((1u << kHalfExpBits) - 1u) && !alt_hp) {
+    if (frac == 0u) {
+      return sign_bit | fp_exp_mask_bits<DstUIntT>();
+    }
+    const bool signaling_nan = (bits & kHalfQuietNanBit) == 0u;
+    if (fpcr_default_nan_enabled(fpcr_mode)) {
+      if (signaling_nan) {
+        fpsr_bits |= kFpsrIoc;
+      }
+      return fp_default_nan_bits<DstUIntT>();
+    }
+    if (signaling_nan) {
+      fpsr_bits |= kFpsrIoc;
+    }
+    DstUIntT payload =
+        static_cast<DstUIntT>(frac) << (fp_frac_bits_count<DstUIntT>() - kHalfFracBits);
+    payload |= fp_quiet_nan_bit<DstUIntT>();
+    if ((payload & (fp_quiet_nan_bit<DstUIntT>() - 1u)) == 0u) {
+      payload |= 1u;
+    }
+    return sign_bit | fp_exp_mask_bits<DstUIntT>() | (payload & fp_frac_mask_bits<DstUIntT>());
+  }
+
+  if (exp == 0u && frac == 0u) {
+    return sign_bit;
+  }
+
+  std::uint32_t normalized_frac = frac;
+  int exponent = 0;
+  if (exp == 0u) {
+    exponent = -14;
+    while ((normalized_frac & 0x400u) == 0u) {
+      normalized_frac <<= 1u;
+      --exponent;
+    }
+    normalized_frac &= kHalfFracMask;
+  } else {
+    exponent = (alt_hp && exp == ((1u << kHalfExpBits) - 1u)) ? 16 : static_cast<int>(exp) - 15;
+  }
+
+  return sign_bit |
+         (static_cast<DstUIntT>(exponent + fp_exp_bias<DstUIntT>()) << fp_frac_bits_count<DstUIntT>()) |
+         (static_cast<DstUIntT>(normalized_frac) << (fp_frac_bits_count<DstUIntT>() - kHalfFracBits));
+}
+
+template <typename SrcUIntT>
+std::uint16_t fp_to_fp16_bits(SrcUIntT bits, std::uint32_t fpcr_mode, std::uint64_t& fpsr_bits) {
+  static_assert(sizeof(SrcUIntT) == 4u || sizeof(SrcUIntT) == 8u);
+
+  constexpr std::uint32_t kHalfFracBits = 10u;
+  constexpr std::uint16_t kHalfExpMask = 0x7C00u;
+  constexpr std::uint16_t kHalfQuietNanBit = 0x0200u;
+  constexpr std::uint16_t kHalfFracMask = 0x03FFu;
+  constexpr int kHalfIeeeMaxExp = 15;
+  constexpr int kHalfAltMaxExp = 16;
+  constexpr int kHalfMinExp = -14;
+
+  fpsr_bits = 0u;
+  const bool alt_hp = fpcr_alternative_half_enabled(fpcr_mode);
+  bool sign = (bits & fp_sign_mask_bits<SrcUIntT>()) != 0u;
+  const std::uint16_t sign_bit = sign ? 0x8000u : 0u;
+  using SrcUnsigned =
+      std::conditional_t<sizeof(SrcUIntT) == 4u, std::uint32_t, std::uint64_t>;
+  const std::uint32_t src_frac_bits = fp_frac_bits_count<SrcUIntT>();
+  const SrcUnsigned exp_mask = fp_exp_mask_bits<SrcUIntT>();
+  const std::uint32_t exp = static_cast<std::uint32_t>((bits & exp_mask) >> src_frac_bits);
+  const SrcUnsigned frac_mask = fp_frac_mask_bits<SrcUIntT>();
+  const SrcUnsigned frac = bits & frac_mask;
+
+  if (exp == ((1u << fp_exp_bits_count<SrcUIntT>()) - 1u)) {
+    if (frac == 0u) {
+      if (alt_hp) {
+        fpsr_bits |= kFpsrIoc;
+        return sign_bit | static_cast<std::uint16_t>(0x7FFFu);
+      }
+      return sign_bit | kHalfExpMask;
+    }
+    if (alt_hp) {
+      fpsr_bits |= kFpsrIoc;
+      return sign_bit;
+    }
+    if (fpcr_default_nan_enabled(fpcr_mode)) {
+      if (fp_is_signaling_nan_bits(bits)) {
+        fpsr_bits |= kFpsrIoc;
+      }
+      return fp_default_nan_bits<std::uint16_t>();
+    }
+    if (fp_is_signaling_nan_bits(bits)) {
+      fpsr_bits |= kFpsrIoc;
+    }
+    std::uint16_t payload = static_cast<std::uint16_t>(frac >> (src_frac_bits - kHalfFracBits));
+    payload |= kHalfQuietNanBit;
+    if ((payload & kHalfFracMask) == kHalfQuietNanBit) {
+      payload |= 1u;
+    }
+    return sign_bit | kHalfExpMask | (payload & kHalfFracMask);
+  }
+
+  bits = fp_flush_input_denormal_bits(bits, fpcr_mode, fpsr_bits);
+  sign = (bits & fp_sign_mask_bits<SrcUIntT>()) != 0u;
+  const std::uint16_t sign_bit_after_flush = sign ? 0x8000u : 0u;
+  const std::uint32_t exp_after_flush =
+      static_cast<std::uint32_t>((bits & exp_mask) >> src_frac_bits);
+  const SrcUnsigned frac_after_flush = bits & frac_mask;
+
+  if (exp_after_flush == 0u && frac_after_flush == 0u) {
+    return sign_bit_after_flush;
+  }
+
+  std::uint64_t significand = 0u;
+  int exponent = 0;
+  if (exp_after_flush == 0u) {
+    const int msb = 63 - __builtin_clzll(static_cast<std::uint64_t>(frac_after_flush));
+    const int normalize_shift = static_cast<int>(src_frac_bits) - msb;
+    significand = static_cast<std::uint64_t>(frac_after_flush) << normalize_shift;
+    exponent = (1 - fp_exp_bias<SrcUIntT>()) - normalize_shift;
+  } else {
+    significand = (1ull << src_frac_bits) | static_cast<std::uint64_t>(frac_after_flush);
+    exponent = static_cast<int>(exp_after_flush) - fp_exp_bias<SrcUIntT>();
+  }
+
+  const int half_max_exp = alt_hp ? kHalfAltMaxExp : kHalfIeeeMaxExp;
+
+  const auto overflow_result = [&]() -> std::uint16_t {
+    if (alt_hp) {
+      fpsr_bits |= kFpsrIoc;
+      return sign_bit_after_flush | static_cast<std::uint16_t>(0x7FFFu);
+    }
+    fpsr_bits |= kFpsrOfc | kFpsrIxc;
+    return sign_bit_after_flush |
+           (fp_round_overflow_to_inf(fpcr_mode, sign) ? kHalfExpMask : static_cast<std::uint16_t>(0x7BFFu));
+  };
+
+  if (exponent > half_max_exp) {
+    return overflow_result();
+  }
+
+  const std::uint32_t round_shift = src_frac_bits - kHalfFracBits;
+  bool inexact = false;
+  if (exponent >= kHalfMinExp) {
+    std::uint64_t rounded = fp_round_shift_right(significand, round_shift, fpcr_mode, sign, inexact);
+    if (rounded == (1ull << (kHalfFracBits + 1u))) {
+      rounded >>= 1u;
+      ++exponent;
+    }
+    if (exponent > half_max_exp) {
+      return overflow_result();
+    }
+    if (inexact) {
+      fpsr_bits |= kFpsrIxc;
+    }
+    return sign_bit_after_flush |
+           (static_cast<std::uint16_t>(exponent + 15) << kHalfFracBits) |
+           static_cast<std::uint16_t>(rounded & kHalfFracMask);
+  }
+
+  const std::uint32_t sub_shift = round_shift + static_cast<std::uint32_t>(kHalfMinExp - exponent);
+  const std::uint64_t rounded = fp_round_shift_right(significand, sub_shift, fpcr_mode, sign, inexact);
+  if (rounded >= (1ull << kHalfFracBits)) {
+    if (inexact) {
+      fpsr_bits |= kFpsrUfc | kFpsrIxc;
+    }
+    return sign_bit_after_flush | static_cast<std::uint16_t>(0x0400u);
+  }
+  if (inexact) {
+    fpsr_bits |= kFpsrUfc | kFpsrIxc;
+  }
+  return sign_bit_after_flush | static_cast<std::uint16_t>(rounded);
 }
 
 template <typename DstUIntT, typename IntT>
@@ -3776,6 +4546,18 @@ bool Cpu::fp_asimd_traps_enabled_for_current_el() const {
 }
 
 bool Cpu::insn_uses_fp_asimd(std::uint32_t insn) const {
+  // CPACR_EL1 FP traps apply only to instructions that are architecturally
+  // valid and actually use SIMD&FP state. A number of optional encodings live
+  // inside the generic 0x0E/0x1E SIMD&FP decode space, but when the
+  // corresponding feature is absent they must remain UNDEFINED rather than
+  // being misreported as EC=0x07 FP access traps.
+  const std::uint64_t pfr0 = sysregs_.id_aa64pfr0_el1();
+  const std::uint64_t isar0 = sysregs_.id_aa64isar0_el1();
+  const std::uint64_t isar1 = sysregs_.id_aa64isar1_el1();
+  if (insn_undef_due_to_absent_fp_asimd_feature(insn, pfr0, isar0, isar1)) {
+    return false;
+  }
+
   if ((insn & 0x0E000000u) == 0x0E000000u ||
       (insn & 0x1E000000u) == 0x1E000000u) {
     return true;
@@ -4334,6 +5116,15 @@ bool Cpu::step() {
 
   if (fp_asimd_traps_enabled_for_current_el() && insn_uses_fp_asimd(insn)) {
     trap_fp_asimd_access();
+    return finish_instruction(true);
+  }
+
+  if (insn_undef_due_to_absent_fp_asimd_feature(
+          insn,
+          sysregs_.id_aa64pfr0_el1(),
+          sysregs_.id_aa64isar0_el1(),
+          sysregs_.id_aa64isar1_el1())) {
+    enter_sync_exception(this_pc, 0x00u, 0u, false, 0u);
     return finish_instruction(true);
   }
 
@@ -5334,16 +6125,26 @@ bool Cpu::exec_system(std::uint32_t insn) {
   }
 
   // DMB <option>
+  // The SoC executes guest instructions one step at a time and commits each
+  // memory effect synchronously into a single global order, so the current
+  // program-visible model is already stronger than the ordering guaranteed by
+  // DMB. Keep it as a semantic no-op in this model.
   if ((insn & 0xFFFFF0FFu) == 0xD50330BFu) {
     return true;
   }
 
   // DSB <option>
+  // As with DMB, all prior guest-visible memory effects are already completed
+  // before later instructions run, so DSB does not need extra machinery in the
+  // current execution model.
   if ((insn & 0xFFFFF0FFu) == 0xD503309Fu) {
     return true;
   }
 
   // ISB <option>
+  // Context-changing operations in this model update CPU-visible state
+  // immediately, and decode/TLB invalidation is performed at the point where
+  // the architected state changes. That makes ISB a program-visible no-op.
   if ((insn & 0xFFFFF0FFu) == 0xD50330DFu) {
     return true;
   }
@@ -6468,6 +7269,12 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
+  if (feat_fp16_absent(sysregs_.id_aa64pfr0_el1()) &&
+      insn_requires_fp16_feature(insn)) {
+    enter_sync_exception(pc_ - 4u, 0x00u, 0u, false, 0u);
+    return true;
+  }
+
   const auto read_fp32 = [&](std::uint32_t idx) -> float {
     return std::bit_cast<float>(static_cast<std::uint32_t>(qregs_[idx][0] & 0xFFFFFFFFu));
   };
@@ -6570,7 +7377,8 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     const std::uint64_t fpcr = sysregs_.fpcr();
     return static_cast<std::uint32_t>(((fpcr >> 22) & 0x3u) |
                                       (((fpcr >> 25) & 0x1u) << 2) |
-                                      (((fpcr >> 24) & 0x1u) << 3));
+                                      (((fpcr >> 24) & 0x1u) << 3) |
+                                      (((fpcr >> 26) & 0x1u) << 4));
   };
   const auto fp_round_int_bits = [&](auto bits, auto round_fn, bool exact) {
     using UIntT = decltype(bits);
@@ -6621,6 +7429,18 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
   }
 
   if ((insn & 0xBF20FC00u) == 0x0E000400u) { // DUP (element)
+    // Half-precision FMAXNM/FMINNM shares this coarse decode space. Without
+    // FEAT_FP16 it must stay UNDEFINED instead of being mis-decoded as DUP,
+    // and future FP16-enabled models must not silently execute the wrong
+    // integer AdvSIMD operation either.
+    if ((insn & 0x9F20FC00u) == 0x0E000400u && ((insn >> 22) & 1u) != 0u) {
+      const std::uint32_t fp = static_cast<std::uint32_t>((sysregs_.id_aa64pfr0_el1() >> 16) & 0xFu);
+      if (fp == 0u) {
+        enter_sync_exception(pc_ - 4u, 0x00u, 0u, false, 0u);
+        return true;
+      }
+      return false;
+    }
     const bool q = ((insn >> 30) & 1u) != 0u;
     const std::uint32_t imm5 = (insn >> 16) & 0x1Fu;
     const std::uint32_t imm4 = (insn >> 11) & 0xFu;
@@ -6668,6 +7488,18 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
   }
 
   if ((insn & 0xFFE08400u) == 0x6E000400u) { // INS/MOV (element)
+    // Half-precision FMULX shares this coarse decode space. Without
+    // FEAT_FP16 it must stay UNDEFINED instead of being mis-decoded as
+    // INS/MOV, and future FP16-enabled models must not silently execute the
+    // wrong integer permutation either.
+    if ((insn & 0xBF20FC00u) == 0x0E001C00u && ((insn >> 22) & 1u) != 0u) {
+      const std::uint32_t fp = static_cast<std::uint32_t>((sysregs_.id_aa64pfr0_el1() >> 16) & 0xFu);
+      if (fp == 0u) {
+        enter_sync_exception(pc_ - 4u, 0x00u, 0u, false, 0u);
+        return true;
+      }
+      return false;
+    }
     const std::uint32_t imm5 = (insn >> 16) & 0x1Fu;
     const std::uint32_t imm4 = (insn >> 11) & 0xFu;
     if (imm5 == 0u) {
@@ -7365,6 +8197,26 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
+  if ((insn & 0xFFFFFC00u) == 0x1EE24000u) { // FCVT Sd, Hn
+    std::uint64_t fpsr_bits = 0u;
+    const std::uint16_t src = static_cast<std::uint16_t>(qregs_[rn][0] & 0xFFFFu);
+    const std::uint32_t result = fp16_to_fp_bits<std::uint32_t>(src, current_fpcr_ctl(), fpsr_bits);
+    sysregs_.fp_or_fpsr(fpsr_bits);
+    qregs_[rd][0] = result;
+    qregs_[rd][1] = 0u;
+    return true;
+  }
+
+  if ((insn & 0xFFFFFC00u) == 0x1EE2C000u) { // FCVT Dd, Hn
+    std::uint64_t fpsr_bits = 0u;
+    const std::uint16_t src = static_cast<std::uint16_t>(qregs_[rn][0] & 0xFFFFu);
+    const std::uint64_t result = fp16_to_fp_bits<std::uint64_t>(src, current_fpcr_ctl(), fpsr_bits);
+    sysregs_.fp_or_fpsr(fpsr_bits);
+    qregs_[rd][0] = result;
+    qregs_[rd][1] = 0u;
+    return true;
+  }
+
   if ((insn & 0xFFFFFC00u) == 0x1E22C000u) { // FCVT Dd, Sn
     std::uint64_t fpsr_bits = 0u;
     const std::uint64_t result = fp32_to_fp64_bits(
@@ -7380,6 +8232,26 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
   if ((insn & 0xFFFFFC00u) == 0x1E624000u) { // FCVT Sd, Dn
     std::uint64_t fpsr_bits = 0u;
     const std::uint32_t result = fp64_to_fp32_bits(qregs_[rn][0], current_fpcr_ctl(), fpsr_bits);
+    sysregs_.fp_or_fpsr(fpsr_bits);
+    qregs_[rd][0] = result;
+    qregs_[rd][1] = 0u;
+    return true;
+  }
+
+  if ((insn & 0xFF3FFC00u) == 0x1E23C000u) { // FCVT Hd, Sn / Dn
+    std::uint64_t fpsr_bits = 0u;
+    const std::uint32_t ftype = (insn >> 22) & 0x3u;
+    std::uint16_t result = 0u;
+    if (ftype == 0u) {
+      result = fp_to_fp16_bits<std::uint32_t>(
+          static_cast<std::uint32_t>(qregs_[rn][0] & 0xFFFFFFFFu),
+          current_fpcr_ctl(),
+          fpsr_bits);
+    } else if (ftype == 1u) {
+      result = fp_to_fp16_bits<std::uint64_t>(qregs_[rn][0], current_fpcr_ctl(), fpsr_bits);
+    } else {
+      return false;
+    }
     sysregs_.fp_or_fpsr(fpsr_bits);
     qregs_[rd][0] = result;
     qregs_[rd][1] = 0u;
@@ -8144,7 +9016,7 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
-  if ((insn & 0x9F20FC00u) == 0x0E20EC00u) { // FACGE/FACGT (vector)
+  if ((insn & 0xDF20FC00u) == 0x4E20EC00u) { // FACGE/FACGT (vector)
     const std::uint32_t rm = (insn >> 16) & 0x1Fu;
     const bool is_gt = ((insn >> 23) & 1u) != 0u;
     const std::uint32_t fpcr_mode = current_fpcr_ctl();
@@ -8296,47 +9168,100 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     case 0x0E217800u: // FCVTL Vd.2D, Vn.2S
     case 0x4E217800u: { // FCVTL2 Vd.2D, Vn.4S
       const std::uint32_t opcode = insn & 0xFF3FFC00u;
+      const std::uint32_t ftype = (insn >> 22) & 0x3u;
       const bool upper = ((insn >> 30) & 1u) != 0u;
       std::uint64_t fpsr_bits = 0u;
       if (opcode == 0x0E216800u || opcode == 0x4E216800u ||
           opcode == 0x2E216800u || opcode == 0x6E216800u) {
-        const std::uint32_t fpcr_mode = current_fpcr_ctl();
+        if (ftype == 2u && (opcode == 0x0E216800u || opcode == 0x4E216800u)) {
+          const std::uint32_t bf16 = static_cast<std::uint32_t>((sysregs_.id_aa64isar1_el1() >> 44) & 0xFu);
+          if (bf16 == 0u) {
+            enter_sync_exception(pc_ - 4u, 0x00u, 0u, false, 0u);
+            return true;
+          }
+          return false;
+        }
         const bool round_to_odd = opcode == 0x2E216800u || opcode == 0x6E216800u;
-        std::array<std::uint64_t, 2> dst = upper ? qregs_[rd] : std::array<std::uint64_t, 2>{0u, 0u};
-        std::uint64_t result64 = 0u;
+        const std::uint32_t fpcr_mode = current_fpcr_ctl();
+        if (ftype == 1u) {
+          std::array<std::uint64_t, 2> dst = upper ? qregs_[rd] : std::array<std::uint64_t, 2>{0u, 0u};
+          std::uint64_t result64 = 0u;
+          for (std::uint32_t lane = 0; lane < 2u; ++lane) {
+            std::uint64_t lane_fpsr = 0u;
+            const std::uint32_t result = round_to_odd
+                ? fp64_to_fp32_bits_round_to_odd(vector_get_elem(qregs_[rn], 64u, lane), fpcr_mode, lane_fpsr)
+                : fp64_to_fp32_bits(vector_get_elem(qregs_[rn], 64u, lane), fpcr_mode, lane_fpsr);
+            fpsr_bits |= lane_fpsr;
+            result64 |= static_cast<std::uint64_t>(result) << (lane * 32u);
+          }
+          if (!upper) {
+            dst[0] = result64;
+            dst[1] = 0u;
+          } else {
+            dst[1] = result64;
+          }
+          sysregs_.fp_or_fpsr(fpsr_bits);
+          qregs_[rd] = dst;
+          return true;
+        }
+        if (ftype == 0u && !round_to_odd) {
+          std::array<std::uint64_t, 2> dst = upper ? qregs_[rd] : std::array<std::uint64_t, 2>{0u, 0u};
+          std::uint64_t result64 = 0u;
+          for (std::uint32_t lane = 0; lane < 4u; ++lane) {
+            std::uint64_t lane_fpsr = 0u;
+            const std::uint16_t result = fp_to_fp16_bits<std::uint32_t>(
+                static_cast<std::uint32_t>(vector_get_elem(qregs_[rn], 32u, lane)),
+                fpcr_mode,
+                lane_fpsr);
+            fpsr_bits |= lane_fpsr;
+            result64 |= static_cast<std::uint64_t>(result) << (lane * 16u);
+          }
+          if (!upper) {
+            dst[0] = result64;
+            dst[1] = 0u;
+          } else {
+            dst[1] = result64;
+          }
+          sysregs_.fp_or_fpsr(fpsr_bits);
+          qregs_[rd] = dst;
+          return true;
+        }
+        return false;
+      }
+
+      if (ftype == 1u) {
+        std::array<std::uint64_t, 2> dst = {0u, 0u};
         for (std::uint32_t lane = 0; lane < 2u; ++lane) {
           std::uint64_t lane_fpsr = 0u;
-          const std::uint32_t result = round_to_odd
-              ? fp64_to_fp32_bits_round_to_odd(vector_get_elem(qregs_[rn], 64u, lane), fpcr_mode, lane_fpsr)
-              : fp64_to_fp32_bits(vector_get_elem(qregs_[rn], 64u, lane), fpcr_mode, lane_fpsr);
+          const std::uint32_t src_lane = upper ? lane + 2u : lane;
+          const std::uint64_t result = fp32_to_fp64_bits(
+              static_cast<std::uint32_t>(vector_get_elem(qregs_[rn], 32u, src_lane)),
+              current_fpcr_ctl(),
+              lane_fpsr);
           fpsr_bits |= lane_fpsr;
-          result64 |= static_cast<std::uint64_t>(result) << (lane * 32u);
-        }
-        if (!upper) {
-          dst[0] = result64;
-          dst[1] = 0u;
-        } else {
-          dst[1] = result64;
+          vector_set_elem(dst, 64u, lane, result);
         }
         sysregs_.fp_or_fpsr(fpsr_bits);
         qregs_[rd] = dst;
         return true;
       }
-
-      std::array<std::uint64_t, 2> dst = {0u, 0u};
-      for (std::uint32_t lane = 0; lane < 2u; ++lane) {
-        std::uint64_t lane_fpsr = 0u;
-        const std::uint32_t src_lane = upper ? lane + 2u : lane;
-        const std::uint64_t result = fp32_to_fp64_bits(
-            static_cast<std::uint32_t>(vector_get_elem(qregs_[rn], 32u, src_lane)),
-            current_fpcr_ctl(),
-            lane_fpsr);
-        fpsr_bits |= lane_fpsr;
-        vector_set_elem(dst, 64u, lane, result);
+      if (ftype == 0u) {
+        std::array<std::uint64_t, 2> dst = {0u, 0u};
+        for (std::uint32_t lane = 0; lane < 4u; ++lane) {
+          std::uint64_t lane_fpsr = 0u;
+          const std::uint32_t src_lane = upper ? lane + 4u : lane;
+          const std::uint32_t result = fp16_to_fp_bits<std::uint32_t>(
+              static_cast<std::uint16_t>(vector_get_elem(qregs_[rn], 16u, src_lane)),
+              current_fpcr_ctl(),
+              lane_fpsr);
+          fpsr_bits |= lane_fpsr;
+          vector_set_elem(dst, 32u, lane, result);
+        }
+        sysregs_.fp_or_fpsr(fpsr_bits);
+        qregs_[rd] = dst;
+        return true;
       }
-      sysregs_.fp_or_fpsr(fpsr_bits);
-      qregs_[rd] = dst;
-      return true;
+      return false;
     }
   }
 
@@ -10251,8 +11176,8 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
     return true;
   }
 
-  if ((insn & 0xDF00F400u) == 0x5F00C000u || // SQDMULH (by element, scalar)
-      (insn & 0xDF00F400u) == 0x5F00D000u) { // SQRDMULH (by element, scalar)
+  if ((insn & 0xFF00F400u) == 0x5F00C000u || // SQDMULH (by element, scalar)
+      (insn & 0xFF00F400u) == 0x5F00D000u) { // SQRDMULH (by element, scalar)
     const bool round = (insn & 0x00001000u) != 0u;
     const std::uint32_t size = (insn >> 22) & 0x3u;
     const std::uint32_t l = (insn >> 21) & 1u;
@@ -13479,8 +14404,10 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     }
   }
 
-  // LSE CASP/CASPA/CASPL/CASPAL. Ordering variants are modelled with
-  // identical single-core semantics for now.
+  // LSE CASP/CASPA/CASPL/CASPAL.
+  // In the current SoC model every guest memory access commits synchronously
+  // into a single global order, so acquire/release/ordered variants collapse
+  // to the same program-visible semantics as the base atomic RMW.
   if ((insn & 0x3FA07C00u) == 0x08207C00u) {
     const std::size_t elem_size = (((insn >> 30) & 0x1u) != 0u) ? 8u : 4u;
     const std::uint32_t rs = (insn >> 16) & 0x1Fu;
@@ -13525,8 +14452,8 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     return true;
   }
 
-  // LSE atomic CAS/CASA/CASL/CASAL. Ordering variants are modelled with
-  // identical single-core semantics for now.
+  // LSE atomic CAS/CASA/CASL/CASAL. As above, the current globally ordered
+  // execution model already satisfies the required program-visible ordering.
   if ((insn & 0x3FA07C00u) == 0x08A07C00u) {
     const std::uint32_t size_code = (insn >> 30) & 0x3u;
     const std::size_t size = (size_code == 0u) ? 1u : (size_code == 1u) ? 2u : (size_code == 2u) ? 4u : 8u;
@@ -13560,8 +14487,9 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
     }
   }
 
-  // LSE SWP/LDADD/LDCLR/LDEOR/LDSET. Ordering variants are treated as
-  // no-ops beyond the read-modify-write result on the current single core.
+  // LSE SWP/LDADD/LDCLR/LDEOR/LDSET. Their ordering variants collapse to the
+  // same behaviour here because guest-visible memory effects are already
+  // globally ordered and synchronously committed.
   {
     const std::uint32_t tag = insn & 0x3F20FC00u;
     if (tag == 0x38208000u || tag == 0x38200000u || tag == 0x38201000u ||

@@ -19,14 +19,19 @@
 - 这次审计仅更新文档与 TODO，不包含模拟器行为修改。
 
 本轮确认的剩余高优先级缺口：
-- [ ] `DMB/DSB/ISB` 的实现仍是 decode 后直接成功返回（当前在 `src/cpu.cpp` 中未体现更强的跨核顺序约束），SMP 下是否足够保守仍需进一步闭环验证。
-- [ ] 多个 LSE 指令家族的 acquire/release/ordered 变体仍按“同核 RMW 结果”处理，需继续确认在 SMP 并发下的程序可见顺序语义是否完整。
+- [x] 已重新审查 `DMB/DSB/ISB` 在当前执行模型下的程序可见语义：`SoC::run()` 以单个 `cpu.step()` 为粒度交织各核，`mmu_write_value()/raw_mmu_write()` 同步提交访存效果，因此 guest 可见内存效果本身已经形成单一全序；在该模型下 barrier 继续实现为 no-op 不会放宽程序可见顺序。
+- [x] 已重新审查多个 LSE 指令家族的 acquire/release/ordered 变体：由于当前模型不存在写缓冲、延迟提交或宿主侧乱序可见性，`CAS/CASP/SWP/LDADD/LDCLR/LDEOR/LDSET` 的顺序变体折叠到同一同步 RMW 结果不会放宽 guest 可见语义；`smp_dmb_message_passing`、`smp_lse_casa_publish`、`smp_lse_ldaddal_counter`、`smp_spinlock_ldaxr_stlxr` 与 Linux SMP functional suite 也已继续通过。
 - [ ] `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 目前已覆盖大量关键路径，但仍需按异常类别做“已实现路径逐类对账”，避免剩余角落遗漏。
 - [ ] 差分验证当前以 `qemu-aarch64`（user-mode）为主；系统级路径还需补强与 `qemu-system-aarch64` 和 Linux SMP 压测的组合对账。
 
 本轮复核（2026-04-01 22:34）：
 - [x] 已复核 `TODO.md` 中 Armv8-A 收口相关复选框一致性：未发现“明确已完成但仍未打勾”的文档/计划项。
 - [ ] 仍有多项处于“部分完成”状态（例如事件驱动与 SMP 语义闭环中的阶段性项）；这些条目暂不勾选，避免误报完成度。
+
+本轮复核（2026-04-06 03:13）：
+- [x] 已重新串联 `src/soc.cpp` 的 SMP 主循环与 `src/cpu.cpp` 的访存提交路径，确认当前模型对 guest 可见内存效果提供单一全序；`DMB/DSB/ISB` 的 no-op 实现与 acquire/release LSE 变体折叠在该模型下是保守且自洽的。
+- [x] 已用现有正式回归再次验证上述结论：`tests/arm64/run_all.sh`、`tests/linux/run_qemu_user_diff.sh`、`tests/linux/run_functional_suite.sh`、`tests/linux/run_functional_suite_smp.sh` 均通过。
+- [ ] 仍未完成的高优先级收口点主要收缩为：`ESR_EL1/FAR_EL1/PAR_EL1/ISS` 逐类对账、`MMU/TLB/fault` 细颗粒边界，以及 `qemu-system-aarch64` 层面的系统级差分。
 
 ### 1. 浮点 / AdvSIMD 程序可见语义收尾
 
@@ -44,6 +49,7 @@
 - 降低 glibc、libm、编译器生成代码、数值程序和多媒体代码中“看似能跑、结果却悄悄错”的风险。
 
 当前进展：
+- [x] 已继续收口 `!FEAT_FP16` 与 `CPACR_EL1.FPEN` 交界处的一组真实尾差：`FMUL/FDIV/FMAX/FMINNM/FNMUL`、`FCVTAS` 以及 `FMUL/FDIV/FMAX/FMINNM V*.4H/8H` 这类 half data-processing 编码现在不会再被 `FPEN=0` 误吞成 `EC=0x07` trap；同时修正了 `FMAXNM/FMINNM V*.4H/8H` 被早前 `DUP (element)` 宽掩码误解码的 overlap，并补正式裸机回归同时锁定 direct-undef 与 `FPEN=0` 两条路径。
 - [x] 已收口普通 `SIMD&FP` 整寄存器 `LDR/STR Q` 在 `SCTLR_EL1.A=1` 下的 16-byte 对齐 fault 语义，并与 structured load/store 的 element-size 对齐语义显式分离。
 - [x] 已补裸机单测覆盖 misaligned `LDR/STR Q` 的 `A=0` 正常访问与 `A=1` fault、`WnR`、`FAR_EL1`、`ELR_EL1` 行为。
 - [x] 已收口 `LDP/STP Q,Q` pair transfer 在 `SCTLR_EL1.A=1` 下按“每个 Q 元素 16-byte”而不是内部 8-byte 子访问做对齐检查的语义。
@@ -54,6 +60,7 @@
 - [x] 已收口当前已实现的饱和 AdvSIMD 整数指令 `SQADD/UQADD/SQXTN/UQXTN` 的 `FPSR.QC` 程序可见语义，并把 `FPSR` 读写掩码收回到当前 AArch64-only 模型真正实现的 architected 位，避免 `QC/IDC/IOC..IXC` 之外的保留位被错误读回。
 - [x] 已收口当前 AArch64-only 模型的 `FPCR` direct read/write 掩码：把 `!FEAT_AFP` 下的 `NEP/AH/FIZ`、`!FEAT_FP16` 下的 `FZ16`、`!FEAT_EBF16` 下的 `EBF`，以及当前未实现 trapped FP exception 时本应 `RAZ/WI` 的 `IDE/IXE/UFE/OFE/DZE/IOE` 从 guest 可见状态中移除，并新增裸机回归锁定这组可见位。
 - [x] 已修正 `FCVTN/FCVTXN` 的 narrowing exception flags 尾差：`double -> float` overflow 现在会按程序可见语义置 `FPSR.OFC|IXC`，underflow/tiny inexact 现在会置 `FPSR.UFC|IXC`，并新增裸机回归分别锁定 regular `FCVTN` 与 round-to-odd `FCVTXN` 的 overflow / underflow / exact-subnormal 边界。
+- [x] 已继续收口 `FPCR.FZ` 与 `AH==0` 下“先判断结果是否 tiny、再舍入”的普通 FP helper 语义：`ADD/SUB/MUL/DIV`、`FMULX`、`FMA/FMSUB/FNMADD/FNMSUB` 与 `FSQRT` 现在不会再先经宿主舍入把 borderline tiny 结果抬成最小正规数；在 `FZ=1` 时会按程序可见语义直接返回带符号零并置 `FPSR.UFC`，同时新增 `fp_fz_preround_arith` 裸机回归锁定 single/double 的 `FMUL/FMADD` 中点边界。
 - [x] 已修正 `FRECPE` 对“倒数估计会溢出到 `Inf` 的极小 subnormal”只置 `FPSR.IXC` 的尾差；当前 scalar/vector `single/double` 共享 helper 会按程序可见语义置 `FPSR.OFC|IXC`，并新增裸机回归锁定 smallest-subnormal 的正/负 `single` 与 `double` 边界，同时把既有 `fpsimd_fp_estimate` 中 `tiny` case 的旧错误期望一并收正。
 - [x] 已新增 `fp_fcvt_special_scalar` 正式裸机回归，锁定 scalar `FCVT*` 在 `qNaN/sNaN/±Inf`、`-0.6/-0.5` 近零负数，以及 `FPCR.FZ=1` 下 subnormal-to-int 的程序可见结果与 `FPSR`（`IOC/IXC/IDC`）组合，覆盖 signed/unsigned 与 `W/X` 目的寄存器边界。
 - [x] 已补齐 `LDR (literal, SIMD&FP)` 的 `St/Dt/Qt` 三条程序可见路径，并把这一家族接入 `CPACR_EL1` 的 `EC=0x07` FP trap 识别；新增 `fp_literal_load` 与 `cpacr_fp_literal_trap` 裸机回归，覆盖标量 `S/D` literal load 后高位清零、`Q` literal load 正向执行，以及 EL1/EL0 下 trap 优先于执行的边界。
@@ -130,7 +137,7 @@
 
 任务：
 - [ ] 系统审查 exclusive monitor、`LDXR/STXR/LDAXR/STLXR`、LSE 原子指令在多核下的可见语义。
-- [ ] 复查 `DMB/DSB/ISB` 在当前模拟器模型下的保守实现是否足以满足程序可见顺序要求。
+- [x] 已复查 `DMB/DSB/ISB` 在当前模拟器模型下的保守实现是否足以满足程序可见顺序要求。
 - [ ] 复查 `SEV/WFE/WFI`、IPI/SGI、timer PPI 的跨核唤醒可见语义。
 - [ ] 复查 `TLBI`、`IC IVAU`、自修改代码、远端代码失效、`TTBR/TCR/SCTLR` 切换在多核下的传播行为。
 - [ ] 复查 cache maintenance 在“程序能观察到的内存/执行结果”层面是否成立，而不是只看内部状态。
@@ -140,8 +147,10 @@
 
 当前进展：
 - [x] 已新增 `smp_lse_ldaddal_counter` 裸机单测，覆盖 2 核 `LDADDAL` 原子累加与 `LDAR/STLR + SEV/WFE` 配合下的可见性。
+- [x] 已新增 `smp_dmb_message_passing` 与 `smp_lse_casa_publish` 两条 SMP litmus，用正式强断言回归锁定 `STR/LDR + DMB/DSB` message passing，以及 `CASAL/CASA` 发布-获取路径下的 payload 可见性。
 - [x] 已把 `smp_mpidr_boot`、`smp_sev_wfe`、`smp_ldxr_invalidate`、`smp_spinlock_ldaxr_stlxr`、`smp_tlbi_broadcast`、`smp_wfe_*`、`smp_gic_sgi`、`smp_timer_*`、`smp_dc_zva_invalidate` 这组高价值 SMP 裸机用例升级为正式强断言回归，不再只是“跑一下不检查结果”。
 - [x] 已新增 Linux 用户态 `pthread_sync_stress`，覆盖 `pthread + sched_setaffinity + C11 atomic` 下的双线程计数与 release/acquire 消息传递。
+- [x] 已结合 `src/soc.cpp` 当前“一次只提交一个 `cpu.step()`、访存同步提交到全局内存顺序”的执行模型重新复核 barrier / acquire-release 语义，确认 `DMB/DSB` no-op 与 LSE 顺序变体折叠在当前模型下不会放宽程序可见内存顺序。
 
 ### 4. MMU / 地址翻译 / fault 边界收尾
 
@@ -182,12 +191,22 @@
 - 后续再做性能优化、预解码、事件驱动、JIT 时，不会轻易把程序可见语义重新弄坏。
 
 当前进展：
+- [x] 已修正 `CPACR_EL1` 的 `FP trap` 与 absent-feature 优先级边界：当前 `ID_AA64ISAR1_EL1.JSCVT/BF16=0`、`ID_AA64ISAR0_EL1.AES/DotProd=0`、`ID_AA64ISAR1_EL1.FCMA=0` 等模型下，`FJCVTZS/BFCVTN/BFCVTN2/FCADD/AESE/UDOT` 在 `FPEN` 关闭时不再被误报为 `EC=0x07` 的 FP 访问 trap，而会继续按架构要求落到 `EC=0` 的同步 `UNDEFINED`；并新增 `cpacr_fp_absent_undef` 正式回归把 `EL1/EL0` 下的 `ESR_EL1/FAR_EL1/目的寄存器不变` 一并锁定。
+- [x] 已继续收口 `FEAT_FCMA` absent-feature 与 `CPACR_EL1.FPEN` 的交界边界：`FCMLA (by element)` 先前仍会在 `FPEN` 关闭时被误判成 `EC=0x07` 的 FP trap，现已在 `insn_uses_fp_asimd()` 中把 by-element half/single 两条 `FCMLA` 家族从 trap 集里排除，并扩展 `cpacr_fp_absent_more_undef` 正式回归锁定这两条编码在当前 `ID_AA64ISAR1_EL1.FCMA=0` 模型下保持 `EC=0/IL=1/ISS=0/FAR=0/目的寄存器不变`。
+- [x] 已继续收口 `FEAT_FRINTTS` absent-feature 与 `CPACR_EL1.FPEN` 的交界边界：当前 `ID_AA64ISAR1_EL1.FRINTTS=0` 模型下，`FRINT32Z/FRINT32X/FRINT64Z/FRINT64X` 先前仍会被 `insn_uses_fp_asimd()` 误判成 `EC=0x07` 的 FP trap，现已把 scalar/vector 两组编码从 trap 集里精确排除，并扩展 `cpacr_fp_absent_more_undef` 与 `fpsimd_optional_absent_undef` 正式回归，锁定它们在 `FPEN=0` 与 `FPEN=开启` 两种情况下都保持 `EC=0/IL=1/ISS=0/FAR=0/目的寄存器不变` 的同步 `UNDEFINED` 语义。
+- [x] 已继续扩展 `!FEAT_FP16` 负向回归：`fp16_absent_undef` 现在除原先的 half arithmetic/compare/FMOV/int-convert 外，又额外锁定了 `FSQRT/FRINTA/FRINTI/UCVTF/FCVTZU/FCSEL/FCCMP` 的 half 形式，确保它们在当前模型下保持 `EC=0/IL=1/ISS=0/FAR=0`，且目的寄存器或 `NZCV` 不被修改。
+- [x] 已新增 `fpsimd_optional_absent_undef` 正式裸机回归，把当前模型声明 absent 的多类 optional SIMD&FP 特性在 `FPEN=开启` 时的直接执行语义固定进正式回归，覆盖 `FCMA/FHM/I8MM/DotProd/AES/PMUL/PMULL/SHA1/SHA2/SHA3/SM3/SM4/SHA512` 的代表性指令，显式锁定“直接执行仍为同步 `UNDEFINED`，而不是误执行或半实现状态”。
 - [x] 已新增并修正一组 pair atomic 裸机回归，覆盖 `32-bit pair exclusive` 成功路径、`CASP` / pair-exclusive 对齐 fault，以及写权限 fault 下的“无部分提交 / status 不写回 / syndrome 正确”行为。
 - [x] 已新增 `fp_ah_absent_ignored` 裸机单测，确认在当前 `ID_AA64ISAR1_EL1=0`、`!FEAT_AFP` 模型下，`FPCR.AH` 对 `FRECPE/FRECPS/FRSQRTE/FRSQRTS/FMAX` 的结果与 `FPSR` 都被正确忽略。
 - [x] 已修正一处裸机回归覆盖空洞：`fpsimd_minimal` 现在显式断言当前模型下 `FPCR/FPSR` direct read/write 的掩码语义，`run_all.sh` 也不再只“运行看看”而会真正把这条失败记成回归失败。
 - [x] 已新增 `sysreg_trap_iss_rt_fields`，把 `EC=0x18` system-access trap 的 syndrome 覆盖从 smoke 提升为强断言，显式锁定 `ISS` 的 `Rt/read-write/op fields` 与 `FAR_EL1`。
 - [x] 已把 Linux UMP/SMP 功能回归接入 `mprotect_exec_stress`、`pthread_sync_stress` 与 `run_dmesg_stress_check` 的显式输出断言和无乱码检查。
 - [x] 已新增 host 侧 `tests/linux/run_qemu_user_diff.sh`，把 `fpsimd_selftest`、`fpint_selftest`、`mprotect_exec_stress`、`pthread_sync_stress` 固化为 `qemu-aarch64` 差分验证入口。
+- [x] 已把 `fpsimd_debian_unimpl` 这条历史上用于覆盖 Debian/systemd 实际打到的 `FP/AdvSIMD` 指令族回归正式接入 `tests/arm64/run_all.sh`，避免它继续停留在“只构建不执行”的测试空洞状态。
+- [x] 已把 `tests/arm64/build_tests.sh` 与 `tests/arm64/run_all.sh` 的构建/执行一致性固化为脚本自检：`run_all.sh` 现在会在开头检查所有已构建的 `.bin/.snap` 都被正式回归引用，后续若再出现“只构建不执行”的测试空洞会直接失败。
+- [x] 已修正 `FCVTN/FCVTN2` 对 `BFCVTN/BFCVTN2` 的 decode overlap：当前 `ID_AA64ISAR1_EL1.BF16=0` 模型下，`BFCVTN/BFCVTN2` 不再误落到普通 `FCVTN/FCVTN2` 路径，而会按 absent-feature 语义同步 `UNDEFINED`；并新增 `bf16_absent_undef` 正式裸机回归，覆盖 `BFCVT/BFCVTN/BFCVTN2/BFMLALB/BFDOT/BFMMLA` 这几条 `BF16` 指令族在当前模型下的 `EC=0/IL=1/ISS=0/FAR=0/目的寄存器不变` 边界。
+- [x] 已继续修正 `optional SIMD&FP absent helper` 的两处宽掩码 overlap：`BF16` 过滤现在额外检查 `ftype==2`，不会再把 mandatory `FCVTN/FCVTN2` 误判成 `BFCVTN/BFCVTN2`；`RDM` 过滤的 by-element vector/scalar 掩码也已收紧到真实 `SQRDMLAH/SQRDMLSH` 编码，不会再把 mandatory `SQRDMULH (by element)` 误判成 `!FEAT_RDM` 的同步 `UNDEFINED`。同时已扩展 `fpsimd_decode_overlap_regressions` 并以 `fpsimd_qdmulh_indexed_more / rdm_absent_undef / bf16_absent_undef / fp_fcvtn_flags` 连同 `tests/arm64/run_all.sh`、`tests/linux/run_functional_suite.sh`、`tests/linux/run_functional_suite_smp.sh` 完整回归锁定。
+- [x] 已新增 `fjcvtzs_absent_undef` 正式裸机回归，把当前 `ID_AA64ISAR1_EL1.JSCVT=0`、`!FEAT_JSCVT` 模型下 `FJCVTZS` 的 absent-feature 语义固定进正式回归，显式锁定 `UNDEFINED` 分类、`ESR_EL1.EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`，以及目的寄存器不被修改。
 - [x] 已新增 `ls64_absent_undef` 裸机回归，把当前 `!FEAT_LS64` 模型下 `LD64B/ST64B/ST64BV/ST64BV0` 的 absent-feature 行为固定进正式回归，防止后续 generic load/store 解码调整再次把这组 64-byte single-copy atomic 指令误吞成普通 load/store。
 - [x] 已新增 `lrcpc_absent_undef` 裸机回归，把当前 `!FEAT_LRCPC` 模型下 `LDAPR W/X`、`LDAPRB W`、`LDAPRH W` 的 absent-feature 语义固定进正式回归，避免后续 generic load/store 解码调整再次把它们误吞成已实现指令。
 - [x] 已新增 `lrcpc2_absent_undef` / `lrcpc3_absent_undef` 裸机回归，把当前 `!FEAT_LRCPC2` / `!FEAT_LRCPC3` 模型下 `LDAPUR/STLUR`、`LDIAPP/STILP` 及 `LDAPUR/STLUR (SIMD&FP)` 的 absent-feature 语义固定进正式回归，显式锁定 `EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`，以及“无真实访存 / 无写回 / 寄存器不被修改”的边界。
