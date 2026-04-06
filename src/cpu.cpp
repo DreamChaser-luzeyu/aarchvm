@@ -6495,6 +6495,8 @@ bool Cpu::exec_system(std::uint32_t insn) {
       case sysreg_key(3u, 3u, 9u, 13u, 2u):  // PMXEVCNTR_EL0
       case sysreg_key(3u, 3u, 9u, 13u, 1u):  // PMXEVTYPER_EL0
       case sysreg_key(3u, 3u, 9u, 14u, 0u):  // PMUSERENR_EL0
+      case sysreg_key(3u, 0u, 4u, 3u, 0u):   // ALLINT (FEAT_NMI absent)
+      case sysreg_key(3u, 0u, 4u, 3u, 1u):   // PM (FEAT_EBEP absent)
       case sysreg_key(3u, 0u, 4u, 2u, 4u):   // UAO
       case sysreg_key(3u, 3u, 4u, 2u, 5u):   // DIT
       case sysreg_key(3u, 3u, 4u, 2u, 6u):   // SSBS

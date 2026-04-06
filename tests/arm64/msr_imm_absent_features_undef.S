@@ -16,6 +16,20 @@
     movk \reg, #\imm3, lsl #48
     .endm
 
+    .macro CHECK_SAVED_EL0 fail_label
+    mrs  x24, spsr_el1
+    tbnz x24, #20, \fail_label
+    and  x25, x24, #0xf
+    cbnz x25, \fail_label
+    ubfx x25, x24, #28, #4
+    cmp  x25, #0x9
+    b.ne \fail_label
+    ubfx x25, x24, #6, #4
+    cmp  x25, #0xa
+    b.ne \fail_label
+    tbz  x24, #22, \fail_label
+    .endm
+
     .macro HANDLE_CASE insn_label, after_label, count, imm0, imm1, imm2, imm3
     adr  x23, \insn_label
     cmp  x22, x23
@@ -41,65 +55,68 @@ _start:
     adr  x11, trap_count
     str  xzr, [x11]
 
+    movz x4, #0x0280
+    movk x4, #0x9040, lsl #16      // NZCV=1001, PAN=1, D=1, I=1, EL0t.
+
     adr  x3, el0_msr_uao
     msr  elr_el1, x3
-    msr  spsr_el1, xzr             // EL0t
+    msr  spsr_el1, x4
     eret
 after_uao:
     CHECK_COUNT 1
 
     adr  x3, el0_msr_dit
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_dit:
     CHECK_COUNT 2
 
     adr  x3, el0_msr_ssbs
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_ssbs:
     CHECK_COUNT 3
 
     adr  x3, el0_msr_tco
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_tco:
     CHECK_COUNT 4
 
     adr  x3, el0_msr_allint
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_allint:
     CHECK_COUNT 5
 
     adr  x3, el0_msr_pm
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_pm:
     CHECK_COUNT 6
 
     adr  x3, el0_smstart_sm
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_smstart_sm:
     CHECK_COUNT 7
 
     adr  x3, el0_smstart_za
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_smstart_za:
     CHECK_COUNT 8
 
     adr  x3, el0_smstart_all
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_smstart_all:
     CHECK_COUNT 9
@@ -188,6 +205,7 @@ lower_sync_handler:
     cbnz x24, handler_fail
     mrs  x24, far_el1
     cbnz x24, handler_fail
+    CHECK_SAVED_EL0 handler_fail
 
     mrs  x22, elr_el1
     HANDLE_CASE el0_msr_uao_insn, after_uao, 1, 0x1101, 0x1102, 0x1103, 0x1104

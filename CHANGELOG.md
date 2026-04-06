@@ -1,3 +1,39 @@
+# 修改日志 2026-04-06 21:59
+
+## 本轮修改
+
+- 继续沿 `trap / undef / no-op` 与 optional system-feature absent 边界审计，确认并修掉了一处真实的程序可见语义缺口：
+  - 当前模型声明 `FEAT_NMI/FEAT_EBEP` absent，但 direct `MRS/MSR <Xt>, ALLINT/PM` 在 `EL0` 下先前仍会走 generic `system register access trap` 路径，错误报成 `EC=0x18`，而不是架构要求的同步 `UNDEFINED`。
+- 对应修正：
+  - 在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中把 direct `ALLINT/PM` sysreg access 显式并入“当前 absent-feature sysreg 不存在”的判定，使 `EL1/EL0` 两级都统一落到 `UNDEFINED` 语义，而不是让 `EL0` 因权限判定先被误分类成 trap。
+- 同步补强正式回归：
+  - 新增 [tests/arm64/allint_pm_sysreg_absent.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/allint_pm_sysreg_absent.S)，覆盖 `MRS/MSR <Xt>, ALLINT/PM` 在 `EL1/EL0` 下的 direct absent-feature 语义，显式锁定 `ESR_EL1.EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`、通用寄存器不变，以及 `EL0` 异常保存下来的 `SPSR_EL1`。
+  - 把该回归接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)。
+  - 继续把 [tests/arm64/el0_absent_pstate_features_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_absent_pstate_features_undef.S)、[tests/arm64/msr_imm_absent_features_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/msr_imm_absent_features_undef.S)、[tests/arm64/debug_ctrl_sysregs_minimal.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/debug_ctrl_sysregs_minimal.S) 收紧为同时检查 `IL/ISS/FAR` 与保存下来的 `SPSR_EL1`，避免这几条 `EL0 -> EL1` 异常路径只验证 `EC=0` 而漏掉源 `PSTATE` 保存尾差。
+- 同步更新 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)，记录 `ALLINT/PM` direct sysreg absent 边界已经正式收口进展。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 600s ./tests/arm64/build_tests.sh`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/allint_pm_sysreg_absent.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/el0_absent_pstate_features_undef.bin -load 0x0 -entry 0x0 -steps 600000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/msr_imm_absent_features_undef.bin -load 0x0 -entry 0x0 -steps 900000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/debug_ctrl_sysregs_minimal.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_qemu_user_diff.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮不是靠脚本规避或特判地址修过去的，而是把一个真实的 absent-feature sysreg 分类错误收回到架构要求的 `UNDEFINED` 语义。
+- 当前代码状态下，`ALLINT/PM` direct sysreg access 这条边界已经闭环，但我仍不能在整体上宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”。
+- 目前最值得继续收口的高优先级点仍是：
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 尚未逐异常家族全部对账完毕；
+  - `MMU/TLB/fault` 与 fast-path / predecode 的一致性仍需继续逐类压实；
+  - Linux system 级长期压力与 `qemu-system-aarch64` 差分路径还不够系统化。
+
 # 修改日志 2026-04-06 03:13
 
 ## 本轮修改

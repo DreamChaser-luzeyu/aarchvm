@@ -51,6 +51,8 @@ _start:
     movk x15, #0x0900, lsl #16      // UART
     movz x16, #0x0000
     movk x16, #0x0902, lsl #16      // PERF mailbox
+    movz x4, #0x0280
+    movk x4, #0x9040, lsl #16       // NZCV=1001, PAN=1, D=1, I=1, EL0t.
 
     adr  x10, vectors
     msr  vbar_el1, x10
@@ -151,42 +153,42 @@ after_el1_pmbsr_el3_msr:
 
     adr  x3, el0_pmbidr_mrs_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_pmbidr_mrs:
     CHECK_HANDLED 14
 
     adr  x3, el0_pmblimitr_msr_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_pmblimitr_msr:
     CHECK_HANDLED 15
 
     adr  x3, el0_pmbmar_mrs_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_pmbmar_mrs:
     CHECK_HANDLED 16
 
     adr  x3, el0_pmbptr_msr_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_pmbptr_msr:
     CHECK_HANDLED 17
 
     adr  x3, el0_pmbsr_el1_mrs_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_pmbsr_el1_mrs:
     CHECK_HANDLED 18
 
     adr  x3, el0_pmbsr_el2_msr_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_pmbsr_el2_msr:
     CHECK_HANDLED 19
@@ -286,6 +288,17 @@ sync_handler:
 
 lower_sync_handler:
     mrs  x20, esr_el1
+    mrs  x25, spsr_el1
+    tbnz x25, #20, handler_fail
+    and  x24, x25, #0xf
+    cbnz x24, handler_fail
+    ubfx x24, x25, #28, #4
+    cmp  x24, #0x9
+    b.ne handler_fail
+    ubfx x24, x25, #6, #4
+    cmp  x24, #0xa
+    b.ne handler_fail
+    tbz  x25, #22, handler_fail
     ubfx x22, x20, #26, #6
     cbnz x22, handler_fail
     tbz  x20, #25, handler_fail

@@ -11,9 +11,12 @@ _start:
     adr  x11, trap_count
     str  xzr, [x11]
 
+    movz x4, #0x0280               // D=1, I=1.
+    movk x4, #0x9040, lsl #16      // NZCV=1001, PAN=1, EL0t.
+
     adr  x3, el0_mrs_spsel
     msr  elr_el1, x3
-    msr  spsr_el1, xzr             // EL0t
+    msr  spsr_el1, x4
     eret
 
 after_mrs_spsel:
@@ -25,7 +28,7 @@ after_mrs_spsel:
 
     adr  x3, el0_mrs_pan
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 
 after_mrs_pan:
@@ -37,7 +40,7 @@ after_mrs_pan:
 
     adr  x3, el0_msr_spsel_imm
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 
 after_msr_spsel_imm:
@@ -49,7 +52,7 @@ after_msr_spsel_imm:
 
     adr  x3, el0_msr_pan_imm
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 
 after_msr_pan_imm:
@@ -61,7 +64,7 @@ after_msr_pan_imm:
 
     adr  x3, el0_mrs_sp_el0
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 
 after_mrs_sp_el0:
@@ -73,7 +76,7 @@ after_mrs_sp_el0:
 
     adr  x3, el0_msr_sp_el0
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 
 after_msr_sp_el0:
@@ -85,7 +88,7 @@ after_msr_sp_el0:
 
     adr  x3, el0_mrs_sp_el1
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 
 after_mrs_sp_el1:
@@ -97,7 +100,7 @@ after_mrs_sp_el1:
 
     adr  x3, el0_msr_sp_el1
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 
 after_msr_sp_el1:
@@ -216,8 +219,26 @@ sync_lower:
 
 lower_sync_handler:
     mrs  x20, esr_el1
+    tbz  x20, #25, handler_fail
     ubfx x21, x20, #26, #6
     cbnz x21, handler_fail
+    and  x21, x20, #0x1ffffff
+    cbnz x21, handler_fail
+
+    mrs  x21, far_el1
+    cbnz x21, handler_fail
+
+    mrs  x21, spsr_el1
+    tbnz x21, #20, handler_fail
+    and  x22, x21, #0xf
+    cbnz x22, handler_fail
+    ubfx x22, x21, #28, #4
+    cmp  x22, #0x9
+    b.ne handler_fail
+    ubfx x22, x21, #6, #4
+    cmp  x22, #0xa
+    b.ne handler_fail
+    tbz  x21, #22, handler_fail
 
     mrs  x22, elr_el1
     adr  x23, el0_mrs_spsel_insn

@@ -12,6 +12,9 @@ _start:
     adr  x11, trap_flags
     str  xzr, [x11]
 
+    movz x4, #0x0280
+    movk x4, #0x9040, lsl #16      // NZCV=1001, PAN=1, D=1, I=1, EL0t.
+
     movz x0, #0x1357
     movk x0, #0x2468, lsl #16
     movk x0, #0x369a, lsl #32
@@ -52,7 +55,7 @@ after_el1_rndrrs:
 
     adr  x3, el0_rndr
     msr  elr_el1, x3
-    msr  spsr_el1, xzr             // EL0t
+    msr  spsr_el1, x4
     eret
 
 after_el0_rndr:
@@ -68,7 +71,7 @@ after_el0_rndr:
 
     adr  x3, el0_rndrrs
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 
 after_el0_rndrrs:
@@ -186,6 +189,17 @@ handle_el1_rndrrs:
     eret
 
 handle_el0_rndr:
+    mrs  x24, spsr_el1
+    tbnz x24, #20, failH
+    and  x25, x24, #0xf
+    cbnz x25, failH
+    ubfx x25, x24, #28, #4
+    cmp  x25, #0x9
+    b.ne failH
+    ubfx x25, x24, #6, #4
+    cmp  x25, #0xa
+    b.ne failH
+    tbz  x24, #22, failH
     adr  x11, trap_flags
     movz x12, #4
     str  x12, [x11]
@@ -193,6 +207,17 @@ handle_el0_rndr:
     b    return_to_el1
 
 handle_el0_rndrrs:
+    mrs  x24, spsr_el1
+    tbnz x24, #20, failH
+    and  x25, x24, #0xf
+    cbnz x25, failH
+    ubfx x25, x24, #28, #4
+    cmp  x25, #0x9
+    b.ne failH
+    ubfx x25, x24, #6, #4
+    cmp  x25, #0xa
+    b.ne failH
+    tbz  x24, #22, failH
     adr  x11, trap_flags
     movz x12, #8
     str  x12, [x11]

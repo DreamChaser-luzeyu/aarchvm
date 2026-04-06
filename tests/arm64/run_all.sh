@@ -292,6 +292,7 @@ test "$(./build/aarchvm -bin tests/arm64/out/gcs_system_absent_undef.bin -load 0
 test "$(./build/aarchvm -bin tests/arm64/out/dcps_drps_non_debug_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'D'
 test "$(./build/aarchvm -bin tests/arm64/out/illegal_state_return.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'I'
 test "$(./build/aarchvm -bin tests/arm64/out/special_pstate_regform.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'Y'
+test "$(./build/aarchvm -bin tests/arm64/out/allint_pm_sysreg_absent.bin -load 0x0 -entry 0x0 -steps 800000 | tr -d '\r\n')" = 'I'
 test "$(./build/aarchvm -bin tests/arm64/out/el0_tlbi_cache_undef.bin -load 0x0 -entry 0x0 -steps 800000 | tr -d '\r\n')" = 'K'
 test "$(./build/aarchvm -bin tests/arm64/out/el0_dc_ivac_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'V'
 test "$(./build/aarchvm -bin tests/arm64/out/dc_csw_privilege.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'J'

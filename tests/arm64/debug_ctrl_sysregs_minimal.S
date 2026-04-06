@@ -16,6 +16,20 @@
     b.ne \fail_label
     .endm
 
+    .macro CHECK_SAVED_EL0 fail_label
+    mrs  x24, spsr_el1
+    tbnz x24, #20, \fail_label
+    and  x25, x24, #0xf
+    cbnz x25, \fail_label
+    ubfx x25, x24, #28, #4
+    cmp  x25, #0x9
+    b.ne \fail_label
+    ubfx x25, x24, #6, #4
+    cmp  x25, #0xa
+    b.ne \fail_label
+    tbz  x24, #22, \fail_label
+    .endm
+
 _start:
     movz x1, #0x0000
     movk x1, #0x0900, lsl #16
@@ -25,6 +39,9 @@ _start:
 
     adr  x11, handled
     str  xzr, [x11]
+
+    movz x4, #0x0280
+    movk x4, #0x9040, lsl #16      // NZCV=1001, PAN=1, D=1, I=1, EL0t.
 
     mrs  x2, dbgprcr_el1
     cbnz x2, fail1
@@ -59,28 +76,28 @@ _start:
 
     adr  x3, el0_mrs_mdscr_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_mrs_mdscr:
     CHECK_STATE 1, fail6
 
     adr  x3, el0_mrs_dbgprcr_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_mrs_dbgprcr:
     CHECK_STATE 2, fail7
 
     adr  x3, el0_msr_mdscr_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_msr_mdscr:
     CHECK_STATE 3, fail8
 
     adr  x3, el0_msr_dbgprcr_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_msr_dbgprcr:
     CHECK_STATE 4, fail9
@@ -162,6 +179,12 @@ lower_sync_handler:
     mrs  x20, esr_el1
     ubfx x21, x20, #26, #6
     cbnz x21, handler_fail
+    tbz  x20, #25, handler_fail
+    and  x24, x20, #0x1ffffff
+    cbnz x24, handler_fail
+    mrs  x24, far_el1
+    cbnz x24, handler_fail
+    CHECK_SAVED_EL0 handler_fail
 
     mrs  x22, elr_el1
     adr  x23, el0_mrs_mdscr_insn

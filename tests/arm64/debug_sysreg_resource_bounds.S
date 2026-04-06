@@ -26,6 +26,9 @@ _start:
     adr  x11, handled
     str  xzr, [x11]
 
+    movz x4, #0x0280
+    movk x4, #0x9040, lsl #16      // NZCV=1001, PAN=1, D=1, I=1, EL0t.
+
     // ID_AA64DFR0_EL1 advertises two breakpoint and two watchpoint resources.
     // Index 1 must remain accessible.
     LOAD64 x0, 0x1111, 0x2222, 0x3333, 0x4444
@@ -78,7 +81,7 @@ after_el1_msr_dbgwcr2:
     // must trap as an EL0 system instruction, not become UNDEFINED.
     adr  x3, el0_mrs_dbgbvr1_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr             // EL0t
+    msr  spsr_el1, x4
     eret
 after_el0_mrs_dbgbvr1:
     LOAD64 x2, 0xc101, 0xc102, 0xc103, 0xc104
@@ -90,7 +93,7 @@ after_el0_mrs_dbgbvr1:
     // trapping as if they were present.
     adr  x3, el0_mrs_dbgbvr2_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_mrs_dbgbvr2:
     LOAD64 x2, 0xd101, 0xd102, 0xd103, 0xd104
@@ -100,7 +103,7 @@ after_el0_mrs_dbgbvr2:
 
     adr  x3, el0_msr_dbgwcr2_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_msr_dbgwcr2:
     LOAD64 x2, 0xe101, 0xe102, 0xe103, 0xe104
@@ -238,6 +241,17 @@ handle_el1_msr_dbgwcr2:
 
 lower_sync_handler:
     mrs  x20, esr_el1
+    mrs  x21, spsr_el1
+    tbnz x21, #20, fail_from_el0_handler
+    and  x24, x21, #0xf
+    cbnz x24, fail_from_el0_handler
+    ubfx x24, x21, #28, #4
+    cmp  x24, #0x9
+    b.ne fail_from_el0_handler
+    ubfx x24, x21, #6, #4
+    cmp  x24, #0xa
+    b.ne fail_from_el0_handler
+    tbz  x21, #22, fail_from_el0_handler
     mrs  x22, elr_el1
 
     adr  x23, el0_mrs_dbgbvr1_insn
@@ -260,6 +274,15 @@ handle_el0_mrs_dbgbvr1:
     cmp  x21, x24
     b.ne fail_from_el0_handler
     tbz  x20, #25, fail_from_el0_handler
+    movz x24, #0xffff
+    movk x24, #0x01ff, lsl #16
+    and  x25, x20, x24
+    movz x24, #0x0003
+    movk x24, #0x0028, lsl #16
+    cmp  x25, x24
+    b.ne fail_from_el0_handler
+    mrs  x24, far_el1
+    cbnz x24, fail_from_el0_handler
     LOAD64 x25, 0xc101, 0xc102, 0xc103, 0xc104
     cmp  x0, x25
     b.ne fail_from_el0_handler

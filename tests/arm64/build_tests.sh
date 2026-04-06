@@ -222,6 +222,7 @@ build_asm_prog gcs_system_absent_undef
 build_asm_prog dcps_drps_non_debug_undef
 build_asm_prog illegal_state_return
 build_asm_prog special_pstate_regform
+build_asm_prog allint_pm_sysreg_absent
 build_asm_prog sysreg_trap_iss_rt_fields
 build_asm_prog el0_tlbi_cache_undef
 build_asm_prog el0_dc_ivac_undef

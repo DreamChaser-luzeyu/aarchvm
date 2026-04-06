@@ -10,6 +10,9 @@ _start:
     adr  x11, trap_flags
     str  xzr, [x11]
 
+    movz x4, #0x0280
+    movk x4, #0x9040, lsl #16      // NZCV=1001, PAN=1, D=1, I=1, EL0t.
+
     // EL1: TPIDR2_EL0 is absent without FEAT_SME.
     movz x0, #0x7788
     movk x0, #0x5566, lsl #16
@@ -139,7 +142,7 @@ after_el1_amuserenr_msr:
     // EL0: absent-feature sysregs must also be UNDEFINED, not EC=0x18 traps.
     adr  x3, el0_tpidr2_mrs
     msr  elr_el1, x3
-    msr  spsr_el1, xzr             // EL0t
+    msr  spsr_el1, x4
     eret
 
 after_el0_tpidr2_mrs:
@@ -155,7 +158,7 @@ after_el0_tpidr2_mrs:
 
     adr  x3, el0_gcspr_mrs
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 
 after_el0_gcspr_mrs:
@@ -171,7 +174,7 @@ after_el0_gcspr_mrs:
 
     adr  x3, el0_pmuserenr_mrs
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 
 after_el0_pmuserenr_mrs:
@@ -187,7 +190,7 @@ after_el0_pmuserenr_mrs:
 
     adr  x3, el0_amuserenr_mrs
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 
 after_el0_amuserenr_mrs:
@@ -319,7 +322,12 @@ sync_lower:
 
 sync_handler:
     mrs  x20, esr_el1
-    lsr  x21, x20, #26
+    tbz  x20, #25, handler_fail
+    ubfx x21, x20, #26, #6
+    cbnz x21, handler_fail
+    and  x21, x20, #0x1ffffff
+    cbnz x21, handler_fail
+    mrs  x21, far_el1
     cbnz x21, handler_fail
 
     mrs  x22, elr_el1
@@ -351,8 +359,25 @@ sync_handler:
 
 lower_sync_handler:
     mrs  x20, esr_el1
-    lsr  x21, x20, #26
+    tbz  x20, #25, handler_fail
+    ubfx x21, x20, #26, #6
     cbnz x21, handler_fail
+    and  x21, x20, #0x1ffffff
+    cbnz x21, handler_fail
+    mrs  x21, far_el1
+    cbnz x21, handler_fail
+
+    mrs  x21, spsr_el1
+    tbnz x21, #20, handler_fail
+    and  x22, x21, #0xf
+    cbnz x22, handler_fail
+    ubfx x22, x21, #28, #4
+    cmp  x22, #0x9
+    b.ne handler_fail
+    ubfx x22, x21, #6, #4
+    cmp  x22, #0xa
+    b.ne handler_fail
+    tbz  x21, #22, handler_fail
 
     mrs  x22, elr_el1
     adr  x23, el0_tpidr2_mrs_insn

@@ -83,6 +83,7 @@
 
 当前进展：
 - [x] 已收口一组“应为 `UNDEFINED` 却被误分类成 EL0 system access trap”的 system-encoding / sysreg 边界，包括若干 absent feature 指令族。
+- [x] 已收口 direct `MRS/MSR <Xt>, ALLINT/PM` 在 `!FEAT_NMI/!FEAT_EBEP` 下的 absent-feature 语义，修正此前 `EL0` 访问被误分类成 `EC=0x18` system-access trap 的问题；当前 `EL1/EL0` 两级都稳定表现为同步 `UNDEFINED`，并新增 `allint_pm_sysreg_absent` 正式裸机回归锁定 `MRS/MSR`、`ESR_EL1.IL/ISS/FAR_EL1`、寄存器不变以及 `EL0` 保存下来的 `SPSR_EL1`。
 - [x] 已把 `CPACR_EL1` 的 guest 可见位收回到当前模型真正声明支持的 `FPEN[21:20]`，避免把 `TTA/SMEN/ZEN/E0POE/TAM/TCPAC` 等 absent-feature 位错误读回为 1，并新增裸机回归锁定 direct `MRS/MSR` 可见值。
 - [x] 已把 `VBAR_EL1` 的 `RES0` 低位语义收口到 bits `[10:0]==0`，并新增裸机回归同时锁定 direct read-back 与真实 `SVC` 异常向量落点，避免 misaligned `VBAR` 在 guest 侧继续可见。
 - [x] 已收口 `EL0 WFE/WFI` 在 `SCTLR_EL1.nTWE/nTWI=0` 下的 trap 优先级，修正此前“先消费 event register / 先观察 pending IRQ、后决定 trap”的错误顺序，并补裸机回归覆盖 `event-register-set` 与 `pending-IRQ` 这两个此前未锁住的边界。

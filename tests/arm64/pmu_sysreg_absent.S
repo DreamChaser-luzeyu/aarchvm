@@ -56,6 +56,9 @@ _start:
     adr  x21, handled
     str  xzr, [x21]
 
+    movz x4, #0x0280
+    movk x4, #0x9040, lsl #16      // NZCV=1001, PAN=1, D=1, I=1, EL0t.
+
     LOAD_EXPECT x0, 0x1101, 0x1102, 0x1103, 0x1104
 el1_pmcr_mrs_insn:
     .inst 0xD53B9C00                  // mrs x0, pmcr_el0
@@ -72,112 +75,112 @@ after_el1_pmcr_msr:
 
     adr  x3, el0_pmccfiltr_mrs_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_pmccfiltr_mrs:
     CHECK_HANDLED 3
 
     adr  x3, el0_pmccntr_mrs_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_pmccntr_mrs:
     CHECK_HANDLED 4
 
     adr  x3, el0_pmceid0_mrs_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_pmceid0_mrs:
     CHECK_HANDLED 5
 
     adr  x3, el0_pmceid1_mrs_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_pmceid1_mrs:
     CHECK_HANDLED 6
 
     adr  x3, el0_pmcntenclr_mrs_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_pmcntenclr_mrs:
     CHECK_HANDLED 7
 
     adr  x3, el0_pmcntenset_msr_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_pmcntenset_msr:
     CHECK_HANDLED 8
 
     adr  x3, el0_pmcr_mrs_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_pmcr_mrs:
     CHECK_HANDLED 9
 
     adr  x3, el0_pmintenclr_mrs_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_pmintenclr_mrs:
     CHECK_HANDLED 10
 
     adr  x3, el0_pmintenset_msr_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_pmintenset_msr:
     CHECK_HANDLED 11
 
     adr  x3, el0_pmmir_mrs_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_pmmir_mrs:
     CHECK_HANDLED 12
 
     adr  x3, el0_pmovsclr_msr_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_pmovsclr_msr:
     CHECK_HANDLED 13
 
     adr  x3, el0_pmovsset_mrs_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_pmovsset_mrs:
     CHECK_HANDLED 14
 
     adr  x3, el0_pmselr_msr_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_pmselr_msr:
     CHECK_HANDLED 15
 
     adr  x3, el0_pmswinc_msr_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_pmswinc_msr:
     CHECK_HANDLED 16
 
     adr  x3, el0_pmxevcntr_mrs_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_pmxevcntr_mrs:
     CHECK_HANDLED 17
 
     adr  x3, el0_pmxevtyper_msr_entry
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 after_el0_pmxevtyper_msr:
     CHECK_HANDLED 18
@@ -328,6 +331,17 @@ lower_sync_handler:
     cbnz x23, handler_fail
     mrs  x23, far_el1
     cbnz x23, handler_fail
+    mrs  x23, spsr_el1
+    tbnz x23, #20, handler_fail
+    and  x24, x23, #0xf
+    cbnz x24, handler_fail
+    ubfx x24, x23, #28, #4
+    cmp  x24, #0x9
+    b.ne handler_fail
+    ubfx x24, x23, #6, #4
+    cmp  x24, #0xa
+    b.ne handler_fail
+    tbz  x23, #22, handler_fail
 
     mrs  x26, elr_el1
     HANDLE_EL0_CASE el0_pmccfiltr_mrs_insn, after_el0_pmccfiltr_mrs, 3, 0x2101, 0x2102, 0x2103, 0x2104

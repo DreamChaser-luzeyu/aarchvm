@@ -1,5 +1,20 @@
     .text
     .global _start
+
+    .macro CHECK_SAVED_EL0 fail_label
+    mrs  x24, spsr_el1
+    tbnz x24, #20, \fail_label
+    and  x25, x24, #0xf
+    cbnz x25, \fail_label
+    ubfx x25, x24, #28, #4
+    cmp  x25, #0x9
+    b.ne \fail_label
+    ubfx x25, x24, #6, #4
+    cmp  x25, #0xa
+    b.ne \fail_label
+    tbz  x24, #22, \fail_label
+    .endm
+
 _start:
     movz x1, #0x0000
     movk x1, #0x0900, lsl #16      // UART
@@ -10,9 +25,12 @@ _start:
     adr  x11, trap_count
     str  xzr, [x11]
 
+    movz x4, #0x0280
+    movk x4, #0x9040, lsl #16      // NZCV=1001, PAN=1, D=1, I=1, EL0t.
+
     adr  x3, el0_mrs_uao
     msr  elr_el1, x3
-    msr  spsr_el1, xzr             // EL0t
+    msr  spsr_el1, x4
     eret
 
 after_uao:
@@ -24,7 +42,7 @@ after_uao:
 
     adr  x3, el0_mrs_dit
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 
 after_dit:
@@ -36,7 +54,7 @@ after_dit:
 
     adr  x3, el0_mrs_ssbs
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 
 after_ssbs:
@@ -48,7 +66,7 @@ after_ssbs:
 
     adr  x3, el0_mrs_tco
     msr  elr_el1, x3
-    msr  spsr_el1, xzr
+    msr  spsr_el1, x4
     eret
 
 after_tco:
@@ -129,6 +147,12 @@ lower_sync_handler:
     mrs  x20, esr_el1
     ubfx x21, x20, #26, #6
     cbnz x21, handler_fail
+    tbz  x20, #25, handler_fail
+    and  x24, x20, #0x1ffffff
+    cbnz x24, handler_fail
+    mrs  x24, far_el1
+    cbnz x24, handler_fail
+    CHECK_SAVED_EL0 handler_fail
 
     mrs  x22, elr_el1
     adr  x23, el0_mrs_uao_insn
