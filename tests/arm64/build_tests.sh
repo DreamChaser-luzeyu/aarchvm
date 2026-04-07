@@ -249,6 +249,8 @@ build_asm_prog mmu_tlb_cache
 build_asm_prog mmu_ttbr1_early
 build_asm_prog mmu_tlb_vae1_scope
 build_asm_prog mmu_tlbi_vae1_operand_encoding
+build_asm_prog mmu_tlbi_vaae1_all_asids
+build_asm_prog mmu_tlbi_vale1_asid_scope
 build_asm_prog mmu_ttbr_switch
 build_asm_prog mmu_unmap_data_abort
 build_asm_prog mmu_cache_maint_fault

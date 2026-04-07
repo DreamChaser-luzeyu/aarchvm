@@ -169,6 +169,8 @@ run_expect instr_legacy_each.bin 3000000 E
 run_expect mmu_tlb_cache.bin 5000000 Q
 run_expect mmu_ttbr1_early.bin 3000000 K
 run_expect mmu_tlb_vae1_scope.bin 4000000 1
+run_expect mmu_tlbi_vaae1_all_asids.bin 4000000 Y
+run_expect mmu_tlbi_vale1_asid_scope.bin 4000000 N
 run_expect mmu_ttbr_switch.bin 4000000 2
 run_expect mmu_unmap_data_abort.bin 4000000 3
 test "$(./build/aarchvm -bin tests/arm64/out/mmu_cache_maint_fault.bin -load 0x0 -entry 0x0 -steps 4000000 | tr -d '\r\n')" = 'M'
@@ -571,6 +573,8 @@ run_expect_slow sync_exception_regs.bin 2000000 X
 run_expect_slow mmu_cache_maint_fault.bin 4000000 M
 run_expect_slow mmu_dc_ivac_pan_ignore.bin 4000000 V
 run_expect_slow mmu_at_tlb_observe.bin 4000000 6
+run_expect_slow mmu_tlbi_vaae1_all_asids.bin 4000000 Y
+run_expect_slow mmu_tlbi_vale1_asid_scope.bin 4000000 N
 run_expect_slow mmu_af_fault.bin 4000000 0
 run_expect_slow mmu_tbi0_tagged_addrs.bin 4000000 T
 run_expect_slow mmu_perm_ro_write_abort.bin 4000000 8

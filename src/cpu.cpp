@@ -6693,7 +6693,12 @@ bool Cpu::exec_system(std::uint32_t insn) {
     }
     const std::uint32_t rt = insn & 0x1Fu;
     const std::uint64_t operand = reg(rt);
-    const bool all_asids = (insn & 0x80u) != 0;
+    // For the VAE1/VALE1/VAAE1/VAALE1 family, bit[6] selects the AA
+    // "all ASIDs" variants, while bit[7] selects the LE "last level" forms.
+    // This model caches only final leaf translations, so LE shares the same
+    // invalidation scope as the non-LE form, but AA must still be decoded
+    // correctly.
+    const bool all_asids = (insn & 0x40u) != 0;
     const std::uint64_t va_page = tlbi_operand_va_page(operand);
     if (all_asids) {
       ++perf_counters_.tlb_flush_va;

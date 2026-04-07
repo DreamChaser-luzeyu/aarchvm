@@ -1,3 +1,44 @@
+# 修改日志 2026-04-07 12:36
+
+## 本轮修改
+
+- 继续沿 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 与 `MMU/TLB/fault` 两条线做 Armv8-A 程序可见语义收口，这轮修掉的是 `TLBI VAE1/VALE1/VAAE1/VAALE1` 族里一个真实的 guest 可见失效范围错误。
+- 在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中修正了 `AA` / `LE` 变体的位判定：
+  - `bit[6]` 才是 `AA`，决定是否对 all ASIDs 生效；
+  - `bit[7]` 是 `LE`，在当前“只缓存最终 leaf translation”的模型里不改变失效范围，但此前被误用成 `all ASIDs` 判定位。
+- 修正前的错误后果是：
+  - `VAAE1` 会被错误当成按 ASID 失效；
+  - `VALE1` 会被错误当成全 ASID 失效。
+- 新增正式裸机回归：
+  - [tests/arm64/mmu_tlbi_vaae1_all_asids.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_tlbi_vaae1_all_asids.S)
+  - [tests/arm64/mmu_tlbi_vale1_asid_scope.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_tlbi_vale1_asid_scope.S)
+- 这两条回归分别锁定：
+  - `TLBI VAAE1` 必须无视 operand 中的 ASID 字段并刷新同一 VA 的所有 ASID 项；
+  - `TLBI VALE1` 在当前 leaf-only TLB 模型里仍必须保持按 ASID 失效，不能错误扩大到所有 ASID。
+- 已把新回归接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)，并纳入 `-decode slow` 一致性路径。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 600s ./tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/mmu_tlbi_vaae1_all_asids.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -decode slow -bin tests/arm64/out/mmu_tlbi_vaae1_all_asids.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/mmu_tlbi_vale1_asid_scope.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -decode slow -bin tests/arm64/out/mmu_tlbi_vale1_asid_scope.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_qemu_user_diff.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮修掉的是一个真实的 TLB 维护语义 bug，不是测试脚本或工作负载偶然触发的假象；它会直接影响多 ASID 场景下的失效范围。
+- 修复后，新回归 fast/slow、裸机总回归，以及 Linux UMP/SMP 回归都保持通过。
+- 截至这一轮，我仍然不能自信宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”；剩余高优先级缺口仍主要集中在：
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 对所有已实现异常家族的最终逐类对账；
+  - `MMU/TLB/fault` 与 fast-path / predecode 其他边界的一致性继续压实；
+  - 更系统化的 `qemu-system-aarch64` / Linux system-level 长时差分与压力验证。
+
 # 修改日志 2026-04-07 03:23
 
 ## 本轮修改

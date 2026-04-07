@@ -177,6 +177,7 @@
 - [x] 已补 `LDXP/LDAXP/STXP/STLXP` 32-bit pair 成功路径与 pair 对齐/fault 边界的裸机回归，并修正 `CASP` misaligned fault 的 `WnR` 断言为“atomic read 会先触发同一 fault 时 `WnR=0`”的架构语义。
 - [x] 已补 pair-exclusive / `CASP` 在“对齐合法、地址翻译合法、但写权限 fault”场景下的裸机回归，确认 `STXP/CASP` fault 时内存不更新、`STXP` status 不写回，且 `FAR_EL1/DFSC/WnR` 保持正确。
 - [x] 已收口 `TCR_EL1.TBI0/TBI1` 的最小程序可见语义：当前翻译、取指与 `PC` 规范化路径都会按 bit[55] 选择 `TBI0/TBI1`，在 `!FEAT_PAuth` 模型下对 instruction/data 一致忽略 top byte，并新增 `mmu_tbi0_tagged_addrs` 正式裸机回归锁定 tagged data access、`AT S1E1R` 与 tagged `BLR` 后 `ADR` 看到的 canonical `PC`。
+- [x] 已修正 `TLBI VAE1/VALE1/VAAE1/VAALE1` 族的 `AA` / `LE` 语义位判定错误：此前代码把 bit[7] 误当成 `all ASIDs`，导致 `VAAE1` 被错误当成按 ASID 失效、`VALE1` 被错误当成全 ASID 失效；现已按 bit[6] 识别 `AA` 变体，并新增 `mmu_tlbi_vaae1_all_asids` 与 `mmu_tlbi_vale1_asid_scope` 两条正式裸机回归锁定 all-ASIDs 与 ASID-scoped 语义。
 - [x] 已新增 Linux 用户态 `mprotect_exec_stress`，覆盖 `RW -> NONE -> RX` 权限切换、动态代码生成执行、`__builtin___clear_cache` 以及 `fork/execve` 路径。
 
 ### 5. 正确性验证基础设施补强
