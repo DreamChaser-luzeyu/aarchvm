@@ -114,6 +114,18 @@ run_expect() {
   test "$(printf '%s' "$stdout" | tr -d '\r\n')" = "$expected"
 }
 
+run_expect_slow() {
+  local bin="$1"
+  local steps="$2"
+  local expected="$3"
+  local stdout=""
+  local stderr=""
+  capture_cmd stdout stderr ./build/aarchvm -decode slow -bin "tests/arm64/out/${bin}" -load 0x0 -entry 0x0 -steps "$steps"
+  test "$CAPTURE_STATUS" -eq 0
+  check_simulator_stderr "$stderr"
+  test "$(printf '%s' "$stdout" | tr -d '\r\n')" = "$expected"
+}
+
 run_expect_smp() {
   local bin="$1"
   local steps="$2"
@@ -167,9 +179,12 @@ run_expect mmu_at_el0_permissions.bin 4000000 A
 run_expect mmu_ttbr_asid_mask.bin 4000000 7
 run_expect ttbr_el1_visible_bits.bin 200000 T
 run_expect tcr_el1_visible_bits.bin 200000 R
+run_expect mmu_tbi0_tagged_addrs.bin 4000000 T
 run_expect mmu_perm_ro_write_abort.bin 4000000 8
+run_expect mmu_dbm_hafdbs_absent.bin 4000000 D
 run_expect mmu_dc_cva_el0_perm_fault.bin 4000000 C
 run_expect mmu_dc_ivac_perm_fault.bin 4000000 I
+run_expect mmu_dc_ivac_pan_ignore.bin 4000000 V
 run_expect mmu_dc_zva_fault.bin 4000000 Z
 run_expect mmu_dc_zva_el0_perm_fault.bin 4000000 Z
 run_expect mmu_ic_ivau_el0_perm_fault.bin 4000000 I
@@ -188,7 +203,13 @@ run_expect mmu_table_pxn_inherit.bin 4000000 Y
 run_expect mmu_tcr_ips_mair_decode.bin 4000000 Z
 run_expect mmu_af_fault.bin 4000000 0
 run_expect mmu_at_par_formats.bin 4000000 P
+run_expect mmu_at_par_fault_kinds.bin 4000000 G
+run_expect mmu_at_walk_ext_abort.bin 4000000 A
 run_expect mmu_at_pan_ignore.bin 400000 N
+run_expect mmu_ext_abort_data.bin 4000000 E
+run_expect mmu_ext_abort_fetch.bin 4000000 Q
+run_expect mmu_walk_ext_abort_data.bin 4000000 W
+run_expect mmu_walk_ext_abort_fetch.bin 4000000 X
 run_expect at_s1e0_el0_undef.bin 600000 U
 run_expect at_pan2_absent_undef.bin 600000 N
 run_expect sync_exception_regs.bin 2000000 X
@@ -199,6 +220,7 @@ run_expect gic_sysreg_id_consistency.bin 300000 J
 run_expect gic_sysreg_manual_ack.bin 400000 M
 run_expect debug_sysreg_resource_bounds.bin 800000 K
 run_expect debug_break_watch_basic.bin 1200000 Q
+run_expect debug_cache_maint_watchpoints.bin 1200000 W
 run_expect debug_halted_sysregs_undef.bin 800000 D
 run_expect debug_dcc_minimal.bin 800000 C
 run_expect debug_dcc_sysregs_minimal.bin 800000 Y
@@ -544,3 +566,21 @@ LOGIC_SLOW=tests/arm64/out/predecode_logic_slow.log
 ./build/aarchvm -decode slow -bin tests/arm64/out/predecode_logic_min.bin -load 0x0 -entry 0x0 -steps 400000 > "$LOGIC_SLOW"
 test "$(tr -d '\r\n' < "$LOGIC_FAST")" = 'P'
 test "$(tr -d '\r\n' < "$LOGIC_SLOW")" = 'P'
+
+run_expect_slow sync_exception_regs.bin 2000000 X
+run_expect_slow mmu_cache_maint_fault.bin 4000000 M
+run_expect_slow mmu_dc_ivac_pan_ignore.bin 4000000 V
+run_expect_slow mmu_at_tlb_observe.bin 4000000 6
+run_expect_slow mmu_af_fault.bin 4000000 0
+run_expect_slow mmu_tbi0_tagged_addrs.bin 4000000 T
+run_expect_slow mmu_perm_ro_write_abort.bin 4000000 8
+run_expect_slow mmu_dbm_hafdbs_absent.bin 4000000 D
+run_expect_slow mmu_el0_ap_fault.bin 4000000 U
+run_expect_slow mmu_el0_uxn_fetch_abort.bin 4000000 u
+run_expect_slow mmu_cross_page_fault_far_store.bin 4000000 W
+run_expect_slow mmu_xn_fetch_abort.bin 4000000 9
+run_expect_slow mmu_at_par_formats.bin 4000000 P
+run_expect_slow mmu_at_par_fault_kinds.bin 4000000 G
+run_expect_slow mmu_ext_abort_data.bin 4000000 E
+run_expect_slow mmu_ext_abort_fetch.bin 4000000 Q
+run_expect_slow debug_cache_maint_watchpoints.bin 1200000 W

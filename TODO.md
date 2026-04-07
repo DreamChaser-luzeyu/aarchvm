@@ -118,6 +118,8 @@
   - direct `MRS/MSR SP_EL1` 在当前仅实现 `EL0/EL1` 的模型里不再被错误宽放行；
   - 已补裸机回归覆盖这些边界，并把旧的 `SP` alignment 测试从架构上不成立的 `MSR SP_EL1, Xt` 初始化改回 `mov sp, ...`。
 - [x] 已修正“同一条 load/store 指令在 helper 已经取同步异常后仍继续发起后续访存或再次 `data_abort()`”的问题，避免双重异常和错误的异常覆盖。
+- [x] 已补 `DC IVAC/DC ZVA` 的 self-hosted watchpoint 语义：当前 `DC IVAC` 会按 store-like watchpoint 产生 `CM=1/WnR=1`，`DC ZVA` 会按 store-like watchpoint 产生 `CM=0/WnR=1`，并确保 `DC ZVA` 在 watchpoint 命中前不会提交 zero write；已新增 `debug_cache_maint_watchpoints` 正式裸机回归并接入 fast/slow 完整回归。
+- [x] 已补 `DBM` + `HAFDBS` 缺口：当前模型公开 `ID_AA64MMFR1_EL1.HAFDBS=0` 时，不再错误地把 `DBM=1` 的 stage-1 只读页当成可写；已新增 `mmu_dbm_hafdbs_absent` 回归，同时锁定 `AT S1E1W -> PAR_EL1` 与后续写访问 `ESR_EL1/FAR_EL1/ELR_EL1` 的权限 fault 行为。
 - [x] 已收口 `FEAT_PAuth absent` 下 hint-space 与 integer / direct `PAuth` encoding 的语义边界，确保前者为 `NOP`、后者为 `UNDEFINED`，并修正 direct integer encodings 被 generic integer decode 误吞的问题。
 - [x] 已收口 `PACM` 在 `!FEAT_PAuth_LR` 下的语义，确保它作为 hint-space 指令表现为 `NOP` 而不是 `UNDEFINED`，并补裸机单测覆盖 EL1 / EL0 两种执行路径。
 - [x] 已收口 `LDRAA/LDRAB` 在 `!FEAT_PAuth` 下的语义，确保它们不再被 generic X load/store post/pre-index decode 误吞，而是稳定表现为 `UNDEFINED`，并补裸机单测覆盖 offset/pre-index 与“无访存、无写回”边界。
@@ -174,6 +176,7 @@
 - [x] 已修正 single-structure lane/replicate `AdvSIMD` load/store 在多字节元素跨页 fault 时的 `FAR_EL1` 报告，并补裸机单测覆盖 lane load、replicate load 与 post-index lane store 的 faulting byte 和 fault 时不写回。
 - [x] 已补 `LDXP/LDAXP/STXP/STLXP` 32-bit pair 成功路径与 pair 对齐/fault 边界的裸机回归，并修正 `CASP` misaligned fault 的 `WnR` 断言为“atomic read 会先触发同一 fault 时 `WnR=0`”的架构语义。
 - [x] 已补 pair-exclusive / `CASP` 在“对齐合法、地址翻译合法、但写权限 fault”场景下的裸机回归，确认 `STXP/CASP` fault 时内存不更新、`STXP` status 不写回，且 `FAR_EL1/DFSC/WnR` 保持正确。
+- [x] 已收口 `TCR_EL1.TBI0/TBI1` 的最小程序可见语义：当前翻译、取指与 `PC` 规范化路径都会按 bit[55] 选择 `TBI0/TBI1`，在 `!FEAT_PAuth` 模型下对 instruction/data 一致忽略 top byte，并新增 `mmu_tbi0_tagged_addrs` 正式裸机回归锁定 tagged data access、`AT S1E1R` 与 tagged `BLR` 后 `ADR` 看到的 canonical `PC`。
 - [x] 已新增 Linux 用户态 `mprotect_exec_stress`，覆盖 `RW -> NONE -> RX` 权限切换、动态代码生成执行、`__builtin___clear_cache` 以及 `fork/execve` 路径。
 
 ### 5. 正确性验证基础设施补强

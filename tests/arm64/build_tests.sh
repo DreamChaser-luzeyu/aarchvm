@@ -174,6 +174,7 @@ build_asm_prog fpsimd_sp_alignment_fault
 build_asm_prog id_aa64_feature_regs
 build_asm_prog sp_special_sysreg_access
 build_asm_prog debug_break_watch_basic
+build_asm_prog debug_cache_maint_watchpoints
 build_asm_prog debug_halted_sysregs_undef
 build_asm_prog debug_dcc_minimal
 build_asm_prog debug_dcc_sysregs_minimal
@@ -257,6 +258,7 @@ build_asm_prog mmu_at_tlb_observe
 build_asm_prog mmu_at_el0_permissions
 build_asm_prog mmu_ttbr_asid_mask
 build_asm_prog ttbr_el1_visible_bits
+build_asm_prog mmu_tbi0_tagged_addrs
 build_asm_prog mmu_tlb_asid_scope
 build_asm_prog mmu_tlbi_asid_zero_highbits
 build_asm_prog mmu_aside1_global_preserve
@@ -264,8 +266,10 @@ build_asm_prog mmu_pan_user_access
 build_asm_prog mmu_ldtr_sttr_pan
 build_asm_prog mmu_el0_ap_fault
 build_asm_prog mmu_perm_ro_write_abort
+build_asm_prog mmu_dbm_hafdbs_absent
 build_asm_prog mmu_dc_cva_el0_perm_fault
 build_asm_prog mmu_dc_ivac_perm_fault
+build_asm_prog mmu_dc_ivac_pan_ignore
 build_asm_prog mmu_dc_zva_fault
 build_asm_prog mmu_dc_zva_el0_perm_fault
 build_asm_prog mmu_ic_ivau_el0_perm_fault
@@ -285,7 +289,13 @@ build_asm_prog mmu_table_pxn_inherit
 build_asm_prog mmu_tcr_ips_mair_decode
 build_asm_prog mmu_af_fault
 build_asm_prog mmu_at_par_formats
+build_asm_prog mmu_at_par_fault_kinds
+build_asm_prog mmu_at_walk_ext_abort
 build_asm_prog mmu_at_pan_ignore
+build_asm_prog mmu_ext_abort_data
+build_asm_prog mmu_ext_abort_fetch
+build_asm_prog mmu_walk_ext_abort_data
+build_asm_prog mmu_walk_ext_abort_fetch
 build_asm_prog sync_exception_regs
 build_asm_prog exception_daif_entry
 build_asm_prog eret_clears_exclusive

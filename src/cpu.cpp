@@ -353,6 +353,7 @@ constexpr std::uint32_t kDebugCtrlPrivilegeEl0 = 0x2u;
 constexpr std::uint32_t kDebugCtrlTypeExecute = 0x0u;
 constexpr std::uint32_t kDebugCtrlTypeLoad = 0x1u;
 constexpr std::uint32_t kDebugCtrlTypeStore = 0x2u;
+constexpr std::size_t kDataCacheLineBytes = 64u;
 constexpr std::uint64_t kMdscrEl1Tdcc = 1ull << 12u;
 constexpr std::uint64_t kMdscrEl1Tda = 1ull << 21u;
 constexpr std::uint64_t kMdscrEl1Txfull = 1ull << 29u;
@@ -3036,7 +3037,7 @@ void Cpu::on_code_write(std::uint64_t va, std::uint64_t pa, std::size_t size) {
   if (!predecode_enabled_) {
     return;
   }
-  invalidate_decode_va(va, size);
+  invalidate_decode_va(normalize_stage1_address(va, false), size);
   invalidate_decode_pa(pa, size);
 }
 
@@ -3044,12 +3045,34 @@ void Cpu::data_abort(std::uint64_t va, bool cache_maintenance_or_translation) {
   if (exception_taken_this_step_) {
     return;
   }
-  const std::uint32_t iss =
-      last_translation_fault_.has_value() ? data_abort_iss(*last_translation_fault_, cache_maintenance_or_translation)
-                                          : 0u;
+  const std::uint32_t iss = last_data_abort_iss_override_.has_value()
+                                ? *last_data_abort_iss_override_
+                                : (last_translation_fault_.has_value()
+                                       ? data_abort_iss(*last_translation_fault_, cache_maintenance_or_translation)
+                                       : 0u);
   const std::uint64_t far = last_data_fault_va_.value_or(va);
   enter_sync_exception(pc_ - 4, sysregs_.in_el0() ? 0x24u : 0x25u, iss, true, far);
+  last_data_abort_iss_override_.reset();
   last_data_fault_va_.reset();
+}
+
+bool Cpu::effective_tbi(std::uint64_t va, bool is_instruction) const {
+  (void)is_instruction;
+  const std::uint64_t tcr = sysregs_.tcr_el1();
+  const bool upper_range = ((va >> 55) & 0x1u) != 0u;
+  const std::uint32_t tbi_bit = upper_range ? 38u : 37u;
+  // The current model declares FEAT_PAuth absent, so TBID0/TBID1 are RES0 and
+  // TBI applies equally to instruction and data addresses.
+  return ((tcr >> tbi_bit) & 0x1u) != 0u;
+}
+
+std::uint64_t Cpu::normalize_stage1_address(std::uint64_t va, bool is_instruction) const {
+  if (!effective_tbi(va, is_instruction)) {
+    return va;
+  }
+  constexpr std::uint64_t kTopByteMask = 0xFFull << 56;
+  const std::uint64_t masked = va & ~kTopByteMask;
+  return ((va >> 55) & 0x1u) != 0u ? (masked | kTopByteMask) : masked;
 }
 
 bool Cpu::alignment_check_enabled() const {
@@ -3069,6 +3092,7 @@ bool Cpu::maybe_take_sp_alignment_fault(std::uint32_t base_reg) {
     return false;
   }
   last_translation_fault_.reset();
+  last_data_abort_iss_override_.reset();
   last_data_fault_va_.reset();
   enter_sync_exception(pc_ - 4u, 0x26u, 0u, false, 0u);
   return true;
@@ -3082,6 +3106,7 @@ bool Cpu::maybe_take_data_alignment_fault(std::uint64_t addr,
     return false;
   }
   last_translation_fault_.reset();
+  last_data_abort_iss_override_.reset();
   last_data_fault_va_.reset();
   const std::uint32_t iss = 0x21u | (access_is_write(access) ? (1u << 6) : 0u);
   enter_sync_exception(pc_ - 4u, sysregs_.in_el0() ? 0x24u : 0x25u, iss, true, addr);
@@ -3131,19 +3156,22 @@ bool Cpu::translate_data_address_fast(std::uint64_t va, bool write, std::uint64_
 bool Cpu::translate_data_address_fast(std::uint64_t va, AccessType access, std::uint64_t* out_pa) {
   ++perf_counters_.translate_calls;
   last_translation_fault_.reset();
+  last_data_abort_iss_override_.reset();
   last_data_fault_va_.reset();
+
+  const std::uint64_t effective_va = normalize_stage1_address(va, false);
 
   if (!sysregs_.mmu_enabled()) {
     if (out_pa != nullptr) {
-      *out_pa = va;
+      *out_pa = effective_va;
     }
     return true;
   }
 
-  const bool va_upper = (va >> 63) != 0;
+  const bool va_upper = (effective_va >> 63) != 0;
   const std::uint16_t asid = current_translation_asid(va_upper);
-  const std::uint64_t page = (va >> 12) & tlb_page_mask();
-  const std::uint64_t off = va & 0xFFFull;
+  const std::uint64_t page = (effective_va >> 12) & tlb_page_mask();
+  const std::uint64_t off = effective_va & 0xFFFull;
   const TlbEntry* hit = nullptr;
   if (tlb_last_data_.valid && tlb_last_data_.va_page == page && tlb_entry_matches_asid(tlb_last_data_, asid)) {
     hit = &tlb_last_data_;
@@ -3185,7 +3213,7 @@ bool Cpu::translate_data_address_fast(std::uint64_t va, AccessType access, std::
   ++perf_counters_.tlb_misses;
   TranslationResult result{};
   TranslationFault fault{};
-  if (!walk_page_tables(va, access, &result, &fault)) {
+  if (!walk_page_tables(effective_va, access, &result, &fault)) {
     last_translation_fault_ = fault;
     return false;
   }
@@ -3211,6 +3239,7 @@ bool Cpu::mmu_read_value(std::uint64_t va,
                          std::uint64_t* out,
                          AccessType access,
                          bool check_watchpoints) {
+  last_data_abort_iss_override_.reset();
   last_data_fault_va_.reset();
   if (size == 0u || size > sizeof(std::uint64_t)) {
     return false;
@@ -3232,6 +3261,9 @@ bool Cpu::mmu_read_value(std::uint64_t va,
     }
     std::uint64_t value = 0;
     if (!bus_.read(pa, size, value)) {
+      if (check_watchpoints) {
+        note_external_data_abort(access_is_write(access), false, va);
+      }
       last_data_fault_va_ = va;
       return false;
     }
@@ -3255,6 +3287,9 @@ bool Cpu::mmu_read_value(std::uint64_t va,
   for (std::size_t i = 0; i < size; ++i) {
     std::uint64_t byte = 0;
     if (!bus_.read(pas[i], 1u, byte)) {
+      if (check_watchpoints) {
+        note_external_data_abort(access_is_write(access), false, va + i);
+      }
       last_data_fault_va_ = va + i;
       return false;
     }
@@ -3278,6 +3313,7 @@ bool Cpu::mmu_write_value(std::uint64_t va,
                           std::size_t size,
                           AccessType access,
                           bool check_watchpoints) {
+  last_data_abort_iss_override_.reset();
   last_data_fault_va_.reset();
   static const std::optional<std::uint64_t> trace_write_va = []() -> std::optional<std::uint64_t> {
     const char* env = std::getenv("AARCHVM_TRACE_WRITE_VA");
@@ -3356,6 +3392,7 @@ bool Cpu::mmu_write_value(std::uint64_t va,
       ok = bus_.write(pa, value, size);
     }
     if (!ok) {
+      note_external_data_abort(access_is_write(access), false, va);
       last_data_fault_va_ = va;
       return false;
     }
@@ -3388,6 +3425,7 @@ bool Cpu::mmu_write_value(std::uint64_t va,
   for (std::size_t i = 0; i < size; ++i) {
     const std::uint64_t byte = (value >> (i * 8u)) & 0xFFu;
     if (!bus_.write(pas[i], byte, 1u)) {
+      note_external_data_abort(access_is_write(access), false, va + i);
       last_data_fault_va_ = va + i;
       return false;
     }
@@ -3398,6 +3436,26 @@ bool Cpu::mmu_write_value(std::uint64_t va,
   }
   clear_exclusive_monitor();
   return true;
+}
+
+std::uint32_t Cpu::external_abort_iss(bool write, bool cache_maintenance_or_translation) const {
+  std::uint32_t iss = sync_external_abort_fsc();
+  if (write) {
+    iss |= 1u << 6;
+  }
+  if (cache_maintenance_or_translation) {
+    iss |= 1u << 8;
+    iss |= 1u << 6;
+  }
+  return iss;
+}
+
+void Cpu::note_external_data_abort(bool write,
+                                   bool cache_maintenance_or_translation,
+                                   std::uint64_t fault_va) {
+  last_translation_fault_.reset();
+  last_data_abort_iss_override_ = external_abort_iss(write, cache_maintenance_or_translation);
+  last_data_fault_va_ = fault_va;
 }
 
 void Cpu::clear_exclusive_monitor() {
@@ -4489,6 +4547,7 @@ void Cpu::reset(std::uint64_t pc) {
   invalidate_decode_all();
   invalidate_ram_page_caches();
   last_translation_fault_.reset();
+  last_data_abort_iss_override_.reset();
   last_data_fault_va_.reset();
   pc_ = pc;
   steps_ = 0;
@@ -4733,7 +4792,8 @@ bool Cpu::maybe_take_breakpoint_exception(std::uint64_t fault_pc) {
 
 bool Cpu::maybe_take_watchpoint_exception(std::uint64_t va,
                                           std::size_t size,
-                                          AccessType access) {
+                                          AccessType access,
+                                          bool cache_maintenance) {
   if (access == AccessType::Fetch || size == 0u || !sysregs_.breakpoint_watchpoint_enabled_current()) {
     return false;
   }
@@ -4764,7 +4824,8 @@ bool Cpu::maybe_take_watchpoint_exception(std::uint64_t va,
       }
       enter_sync_exception(pc_ - 4u,
                            sysregs_.in_el0() ? 0x34u : 0x35u,
-                           kDebugExceptionIfsc | (write ? (1u << 6) : 0u),
+                           kDebugExceptionIfsc | (write ? (1u << 6) : 0u) |
+                               (cache_maintenance ? (1u << 8) : 0u),
                            true,
                            byte_va);
       return true;
@@ -4832,6 +4893,7 @@ bool Cpu::step() {
   }
   exception_taken_this_step_ = false;
   stepped_instruction_in_flight_ = false;
+  pc_ = normalize_stage1_address(pc_, true);
 
   if (waiting_for_interrupt_) {
     if (gic_.has_pending(cpu_index_)) {
@@ -4915,7 +4977,7 @@ bool Cpu::step() {
 
   std::uint64_t fetch = 0;
   if (!bus_.read(fetch_result.pa, 4, fetch)) {
-    enter_sync_exception(pc_, sysregs_.in_el0() ? 0x20u : 0x21u, 0u, true, pc_);
+    enter_sync_exception(pc_, sysregs_.in_el0() ? 0x20u : 0x21u, sync_external_abort_fsc(), true, pc_);
     stepped_instruction_in_flight_ = false;
     return true;
   }
@@ -4930,6 +4992,7 @@ bool Cpu::step() {
   ++steps_;
   const auto finish_instruction = [&](bool result) {
     stepped_instruction_in_flight_ = false;
+    pc_ = normalize_stage1_address(pc_, true);
     if (stepped_instruction && !exception_taken_this_step_ && !halted_) {
       complete_software_step_after_instruction(pc_, insn);
     }
@@ -5232,7 +5295,8 @@ bool Cpu::try_take_irq() {
   }
   sysregs_.exception_enter_irq(pc_, saved_pstate);
   load_current_sp_from_bank();
-  pc_ = sysregs_.vbar_el1() + (from_lower_el ? 0x480u : (from_spx ? 0x280u : 0x80u));
+  pc_ = normalize_stage1_address(sysregs_.vbar_el1() + (from_lower_el ? 0x480u : (from_spx ? 0x280u : 0x80u)),
+                                 true);
   return true;
 }
 
@@ -5317,7 +5381,8 @@ void Cpu::enter_sync_exception(std::uint64_t fault_pc,
   }
   sysregs_.exception_enter_sync(return_pc, saved_pstate, ec, iss, far_valid, far);
   load_current_sp_from_bank();
-  pc_ = sysregs_.vbar_el1() + (from_lower_el ? 0x400u : (from_spx ? 0x200u : 0x0u));
+  pc_ = normalize_stage1_address(sysregs_.vbar_el1() + (from_lower_el ? 0x400u : (from_spx ? 0x200u : 0x0u)),
+                                 true);
 }
 
 bool Cpu::translate_address(std::uint64_t va,
@@ -5328,10 +5393,13 @@ bool Cpu::translate_address(std::uint64_t va,
                             bool apply_pan) {
   ++perf_counters_.translate_calls;
   last_translation_fault_.reset();
+  last_data_abort_iss_override_.reset();
+
+  const std::uint64_t effective_va = normalize_stage1_address(va, access == AccessType::Fetch);
 
   if (!sysregs_.mmu_enabled()) {
-    const bool ram_backed = bus_.ram_ptr(va, 1u) != nullptr;
-    out_result->pa = va;
+    const bool ram_backed = bus_.ram_ptr(effective_va, 1u) != nullptr;
+    out_result->pa = effective_va;
     out_result->asid = current_translation_asid(false);
     out_result->level = 3;
       out_result->attr_index = 0;
@@ -5348,10 +5416,10 @@ bool Cpu::translate_address(std::uint64_t va,
     return true;
   }
 
-  const bool va_upper = (va >> 63) != 0;
+  const bool va_upper = (effective_va >> 63) != 0;
   const std::uint16_t asid = current_translation_asid(va_upper);
-  const std::uint64_t page = (va >> 12) & tlb_page_mask();
-  const std::uint64_t off = va & 0xFFFull;
+  const std::uint64_t page = (effective_va >> 12) & tlb_page_mask();
+  const std::uint64_t off = effective_va & 0xFFFull;
 
   if (use_tlb) {
     const TlbEntry* hit = nullptr;
@@ -5392,7 +5460,7 @@ bool Cpu::translate_address(std::uint64_t va,
   }
 
   TranslationFault fault{};
-  if (!walk_page_tables(va, access, out_result, &fault, true, apply_pan)) {
+  if (!walk_page_tables(effective_va, access, out_result, &fault, true, apply_pan)) {
     last_translation_fault_ = fault;
     return false;
   }
@@ -5410,10 +5478,13 @@ bool Cpu::translate_cache_maintenance_address(std::uint64_t va,
                                               bool use_tlb) {
   ++perf_counters_.translate_calls;
   last_translation_fault_.reset();
+  last_data_abort_iss_override_.reset();
+
+  const std::uint64_t effective_va = normalize_stage1_address(va, false);
 
   if (!sysregs_.mmu_enabled()) {
-    const bool ram_backed = bus_.ram_ptr(va, 1u) != nullptr;
-    out_result->pa = va;
+    const bool ram_backed = bus_.ram_ptr(effective_va, 1u) != nullptr;
+    out_result->pa = effective_va;
     out_result->asid = current_translation_asid(false);
     out_result->level = 3;
       out_result->attr_index = 0;
@@ -5430,10 +5501,10 @@ bool Cpu::translate_cache_maintenance_address(std::uint64_t va,
     return true;
   }
 
-  const bool va_upper = (va >> 63) != 0;
+  const bool va_upper = (effective_va >> 63) != 0;
   const std::uint16_t asid = current_translation_asid(va_upper);
-  const std::uint64_t page = (va >> 12) & tlb_page_mask();
-  const std::uint64_t off = va & 0xFFFull;
+  const std::uint64_t page = (effective_va >> 12) & tlb_page_mask();
+  const std::uint64_t off = effective_va & 0xFFFull;
 
   if (use_tlb) {
     const TlbEntry* hit = nullptr;
@@ -5477,7 +5548,7 @@ bool Cpu::translate_cache_maintenance_address(std::uint64_t va,
   }
 
   TranslationFault fault{};
-  if (!walk_page_tables(va, AccessType::Read, out_result, &fault, false)) {
+  if (!walk_page_tables(effective_va, AccessType::Read, out_result, &fault, false)) {
     last_translation_fault_ = fault;
     return false;
   }
@@ -5504,6 +5575,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
                            bool check_permissions,
                            bool apply_pan) {
   ++perf_counters_.page_walks;
+  const std::uint64_t effective_va = normalize_stage1_address(va, access == AccessType::Fetch);
   const bool write = access_is_write(access);
   const bool trace_va = trace_va_.has_value() && *trace_va_ == va && !trace_va_hit_;
   const auto trace_va_log = [&](const std::string& msg) {
@@ -5512,7 +5584,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
     }
   };
   const std::uint64_t tcr = sysregs_.tcr_el1();
-  const bool va_upper = (va >> 63) != 0;
+  const bool va_upper = (effective_va >> 63) != 0;
   const WalkAttributes walk_attrs = decode_walk_attributes(va_upper);
 
   const std::uint32_t txsz = va_upper
@@ -5553,7 +5625,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
   }
 
   const std::uint64_t low_limit = (va_bits == 64u) ? ~0ull : ((1ull << va_bits) - 1ull);
-  if (!va_upper && va > low_limit) {
+  if (!va_upper && effective_va > low_limit) {
     if (fault != nullptr) {
       *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize, .level = 0, .write = write};
     }
@@ -5561,7 +5633,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
   }
   if (va_upper && va_bits < 64u) {
     const std::uint64_t upper_tag_mask = ~low_limit;
-    if ((va & upper_tag_mask) != upper_tag_mask) {
+    if ((effective_va & upper_tag_mask) != upper_tag_mask) {
       if (fault != nullptr) {
         *fault = TranslationFault{.kind = TranslationFault::Kind::AddressSize, .level = 0, .write = write};
       }
@@ -5584,6 +5656,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
     trace_va_hit_ = true;
     std::ostringstream oss;
     oss << "TRACE-VA: va=0x" << std::hex << va
+        << " effective_va=0x" << effective_va
         << " access=" << static_cast<unsigned>(access)
         << " txsz=0x" << txsz
         << " va_bits=0x" << va_bits
@@ -5602,10 +5675,10 @@ bool Cpu::walk_page_tables(std::uint64_t va,
   }
 
   const std::uint64_t idx[4] = {
-      (va >> 39) & 0x1FFu,
-      (va >> 30) & 0x1FFu,
-      (va >> 21) & 0x1FFu,
-      (va >> 12) & 0x1FFu,
+      (effective_va >> 39) & 0x1FFu,
+      (effective_va >> 30) & 0x1FFu,
+      (effective_va >> 21) & 0x1FFu,
+      (effective_va >> 12) & 0x1FFu,
   };
 
   TableAttrs inherited{};
@@ -5629,7 +5702,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
     }
     if (!desc_ok) {
       if (fault != nullptr) {
-        *fault = TranslationFault{.kind = TranslationFault::Kind::Translation,
+        *fault = TranslationFault{.kind = TranslationFault::Kind::ExternalAbortOnWalk,
                                   .level = static_cast<std::uint8_t>(level),
                                   .write = write};
       }
@@ -5677,13 +5750,14 @@ bool Cpu::walk_page_tables(std::uint64_t va,
         return false;
       }
 
-      out_result->pa = page_base | (va & 0xFFFull);
+      out_result->pa = page_base | (effective_va & 0xFFFull);
       out_result->asid = current_translation_asid(va_upper);
       out_result->level = static_cast<std::uint8_t>(level);
       out_result->attr_index = attr_index;
       out_result->mair_attr = mair_attr;
       out_result->global_entry = global_entry;
-      out_result->writable = !(inherited.write_protect || (leaf_ro && !dbm));
+      const bool dbm_writeable = leaf_ro && dbm && dirty_state_hw_update_enabled();
+      out_result->writable = !(inherited.write_protect || (leaf_ro && !dbm_writeable));
       out_result->user_accessible = user_accessible;
       out_result->pxn = pxn || inherited.pxn;
       out_result->uxn = uxn || inherited.uxn;
@@ -5755,13 +5829,14 @@ bool Cpu::walk_page_tables(std::uint64_t va,
       return false;
     }
 
-    out_result->pa = pa_base | (va & block_mask);
+    out_result->pa = pa_base | (effective_va & block_mask);
     out_result->asid = current_translation_asid(va_upper);
     out_result->level = static_cast<std::uint8_t>(level);
     out_result->attr_index = attr_index;
     out_result->mair_attr = mair_attr;
     out_result->global_entry = global_entry;
-    out_result->writable = !(inherited.write_protect || (leaf_ro && !dbm));
+    const bool dbm_writeable = leaf_ro && dbm && dirty_state_hw_update_enabled();
+    out_result->writable = !(inherited.write_protect || (leaf_ro && !dbm_writeable));
     out_result->user_accessible = user_accessible;
     out_result->pxn = pxn || inherited.pxn;
     out_result->uxn = uxn || inherited.uxn;
@@ -5811,6 +5886,9 @@ std::uint32_t Cpu::fault_status_code(const TranslationFault& fault) const {
     break;
   case TranslationFault::Kind::Permission:
     fsc = 0xCu + level;
+    break;
+  case TranslationFault::Kind::ExternalAbortOnWalk:
+    fsc = 0x14u + level;
     break;
   }
   return fsc | (fault.write ? (1u << 6) : 0u);
@@ -5874,6 +5952,10 @@ bool Cpu::pa_within_ips(std::uint64_t pa, std::uint8_t ips_bits) const {
     return true;
   }
   return (pa >> ips_bits) == 0;
+}
+
+bool Cpu::dirty_state_hw_update_enabled() const {
+  return ((sysregs_.tcr_el1() >> 40) & 0x1u) != 0u;
 }
 
 void Cpu::tlb_flush_all() {
@@ -6248,9 +6330,12 @@ bool Cpu::exec_system(std::uint32_t insn) {
     return value;
   };
 
-  const auto update_par_from_translation = [&](bool ok, const TranslationResult& result) {
+  const auto update_par_from_translation = [&](std::uint64_t va, bool ok, const TranslationResult& result) {
     if (ok) {
       sysregs_.set_par_el1(par_success_value(result));
+    } else if (last_translation_fault_.has_value() &&
+               last_translation_fault_->kind == TranslationFault::Kind::ExternalAbortOnWalk) {
+      data_abort(va, true);
     } else if (last_translation_fault_.has_value()) {
       set_par_el1_for_fault(*last_translation_fault_);
     } else {
@@ -6683,9 +6768,16 @@ bool Cpu::exec_system(std::uint32_t insn) {
       return undefined_current_instruction();
     }
     const std::uint32_t rt = insn & 0x1Fu;
+    const std::uint64_t line_base = reg(rt) & ~(static_cast<std::uint64_t>(kDataCacheLineBytes) - 1u);
     TranslationResult result{};
-    if (!translate_address(reg(rt), AccessType::Write, &result, true)) {
+    // FEAT_PAN does not affect data cache maintenance instructions other than
+    // DC ZVA/GVA-family operations, but DC IVAC still requires write
+    // permission to the translated VA.
+    if (!translate_address(reg(rt), AccessType::Write, &result, true, true, false)) {
       data_abort(reg(rt), true);
+      return true;
+    }
+    if (maybe_take_watchpoint_exception(line_base, kDataCacheLineBytes, AccessType::Write, true)) {
       return true;
     }
     return true;
@@ -6733,10 +6825,11 @@ bool Cpu::exec_system(std::uint32_t insn) {
       return trap_current_system_instruction(insn);
     }
     const std::uint32_t rt = insn & 0x1Fu;
-    const std::uint64_t base = reg(rt) & ~0x3Full;
-    for (std::uint64_t off = 0; off < 64u; off += 8u) {
+    const std::uint64_t base = reg(rt) & ~(static_cast<std::uint64_t>(kDataCacheLineBytes) - 1u);
+    std::array<TranslationResult, kDataCacheLineBytes / 8u> results{};
+    for (std::uint64_t off = 0; off < kDataCacheLineBytes; off += 8u) {
       const std::uint64_t va = base + off;
-      TranslationResult result{};
+      TranslationResult& result = results[off / 8u];
       if (!translate_address(va, AccessType::Write, &result, true)) {
         data_abort(va);
         return true;
@@ -6747,9 +6840,15 @@ bool Cpu::exec_system(std::uint32_t insn) {
         enter_sync_exception(pc_ - 4, sysregs_.in_el0() ? 0x24u : 0x25u, iss, true, va);
         return true;
       }
+    }
+    if (maybe_take_watchpoint_exception(base, kDataCacheLineBytes, AccessType::Write)) {
+      return true;
+    }
+    for (std::uint64_t off = 0; off < kDataCacheLineBytes; off += 8u) {
+      const std::uint64_t va = base + off;
+      const TranslationResult& result = results[off / 8u];
       if (!bus_.write(result.pa, 0, 8)) {
-        const std::uint32_t iss = last_translation_fault_.has_value() ? data_abort_iss(*last_translation_fault_, false)
-                                                                      : 0u;
+        const std::uint32_t iss = external_abort_iss(true, false);
         enter_sync_exception(pc_ - 4, sysregs_.in_el0() ? 0x24u : 0x25u, iss, true, va);
         return true;
       }
@@ -6807,7 +6906,8 @@ bool Cpu::exec_system(std::uint32_t insn) {
     const std::uint32_t rt = insn & 0x1Fu;
     TranslationResult result{};
     // FEAT_PAN2 is absent in this model, so plain AT S1E1R ignores PSTATE.PAN.
-    update_par_from_translation(translate_address(reg(rt), AccessType::Read, &result, false, false, false), result);
+    const std::uint64_t va = reg(rt);
+    update_par_from_translation(va, translate_address(va, AccessType::Read, &result, false, false, false), result);
     return true;
   }
 
@@ -6819,7 +6919,8 @@ bool Cpu::exec_system(std::uint32_t insn) {
     const std::uint32_t rt = insn & 0x1Fu;
     TranslationResult result{};
     // FEAT_PAN2 is absent in this model, so plain AT S1E1W ignores PSTATE.PAN.
-    update_par_from_translation(translate_address(reg(rt), AccessType::Write, &result, false, false, false), result);
+    const std::uint64_t va = reg(rt);
+    update_par_from_translation(va, translate_address(va, AccessType::Write, &result, false, false, false), result);
     return true;
   }
 
@@ -6830,7 +6931,8 @@ bool Cpu::exec_system(std::uint32_t insn) {
     }
     const std::uint32_t rt = insn & 0x1Fu;
     TranslationResult result{};
-    update_par_from_translation(translate_address(reg(rt), AccessType::UnprivilegedRead, &result, false, false), result);
+    const std::uint64_t va = reg(rt);
+    update_par_from_translation(va, translate_address(va, AccessType::UnprivilegedRead, &result, false, false), result);
     return true;
   }
 
@@ -6841,7 +6943,8 @@ bool Cpu::exec_system(std::uint32_t insn) {
     }
     const std::uint32_t rt = insn & 0x1Fu;
     TranslationResult result{};
-    update_par_from_translation(translate_address(reg(rt), AccessType::UnprivilegedWrite, &result, false, false), result);
+    const std::uint64_t va = reg(rt);
+    update_par_from_translation(va, translate_address(va, AccessType::UnprivilegedWrite, &result, false, false), result);
     return true;
   }
   // MSR (immediate) to PSTATE fields.
@@ -13189,6 +13292,7 @@ bool Cpu::exec_load_store(std::uint32_t insn) {
                                       ? ((first >> (i * 8u)) & 0xFFu)
                                       : ((second >> ((i - elem_size) * 8u)) & 0xFFu);
       if (!bus_.write(pas[i], value, 1u)) {
+        note_external_data_abort(true, false, addr + i);
         last_data_fault_va_ = addr + i;
         return false;
       }
@@ -15850,7 +15954,7 @@ bool Cpu::load_state(std::istream& in, std::uint32_t version) {
   constexpr std::size_t kLegacyExceptionStackCapacity = 8;
   const auto read_translation_fault = [&](TranslationFault& fault) {
     std::uint8_t kind = 0;
-    if (!snapshot_io::read(in, kind) || kind > static_cast<std::uint8_t>(TranslationFault::Kind::Permission) ||
+    if (!snapshot_io::read(in, kind) || kind > static_cast<std::uint8_t>(TranslationFault::Kind::ExternalAbortOnWalk) ||
         !snapshot_io::read(in, fault.level) || !snapshot_io::read_bool(in, fault.write)) {
       return false;
     }
@@ -16058,6 +16162,7 @@ bool Cpu::load_state(std::istream& in, std::uint32_t version) {
   } else {
     last_translation_fault_.reset();
   }
+  last_data_abort_iss_override_.reset();
   last_data_fault_va_.reset();
   if (!snapshot_io::read(in, pc_) || !snapshot_io::read(in, steps_) || !snapshot_io::read_bool(in, halted_)) {
     return false;

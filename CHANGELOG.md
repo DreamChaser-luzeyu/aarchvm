@@ -1,3 +1,139 @@
+# 修改日志 2026-04-07 03:23
+
+## 本轮修改
+
+- 继续沿 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 与 `MMU/TLB/fault` 两条线做 Armv8-A 程序可见语义收口，这轮补上的是 `TCR_EL1.TBI0/TBI1` 的真实 guest 可见缺口。
+- 在 [include/aarchvm/cpu.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/cpu.hpp) 与 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中新增 `effective_tbi()` / `normalize_stage1_address()`，把 stage-1 effective VA 的 top-byte-ignore 规范化收进统一 helper。
+- 修正后的行为要点：
+  - data / fetch / cache-maintenance 翻译路径都会先按 bit[55] 选择 `TBI0/TBI1`；
+  - 当前模型 `!FEAT_PAuth`，因此 `TBID0/TBID1` 为 `RES0`，`TBI` 对 instruction/data 一致生效；
+  - `PC` 在 step、异常向量进入以及普通指令完成后都会走相同 canonicalization，避免“翻译能过，但 guest 继续看到带脏 top-byte 的 `PC`”。
+- 同时把 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中 `on_code_write(...)` 的 VA-side decode invalidation 也改为走规范化后的 stage-1 地址，进一步压实 tagged write 与 predecode 的一致性。
+- 新增正式裸机回归 [tests/arm64/mmu_tbi0_tagged_addrs.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_tbi0_tagged_addrs.S)，一次性锁定：
+  - tagged data `LDR/STR` 必须成功访问低地址页；
+  - `AT S1E1R` 对 tagged VA 必须成功并正确写 `PAR_EL1`；
+  - tagged `BLR` 必须能正常取指，且后续 `ADR` 观察到的 `PC` 高字节已经 canonicalized。
+- 已把新回归接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)，并纳入 `-decode slow` 一致性路径。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 600s ./tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/mmu_tbi0_tagged_addrs.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -decode slow -bin tests/arm64/out/mmu_tbi0_tagged_addrs.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_qemu_user_diff.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮修掉的是一个真实的程序可见错误：此前模型一方面允许软件写 `TCR_EL1.TBI0/TBI1`，另一方面翻译与取指路径却完全没实现 top-byte-ignore，导致 tagged address 语义与寄存器声明不一致。
+- 修复后，裸机 fast/slow decode、一整套裸机总回归，以及 Linux UMP/SMP 回归都保持通过。
+- 截至这一轮，我仍然不能自信宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”；剩余主要高优先级缺口仍集中在：
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 对所有已实现异常家族的逐类最终对账；
+  - `MMU/TLB/fault` 与 fast-path / predecode 在更多边界上的一致性继续压实；
+  - 更系统化的 `qemu-system-aarch64` / Linux system-level 长时差分与压力验证。
+
+# 修改日志 2026-04-07 03:05
+
+## 本轮修改
+
+- 继续沿 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 与 `MMU/TLB/fault` 两条线做 Armv8-A 程序可见语义收口，这轮修掉的是 stage-1 页表 `DBM` 与 `HAFDBS` 的真实权限缺口。
+- 在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中收紧了页表 walk 的 `DBM` 语义：只有在 dirty-state hardware update 实际启用时，`DBM=1` 才能放宽写权限；当前模型公开 `ID_AA64MMFR1_EL1.HAFDBS=0`，因此 `DBM` 不再错误覆盖只读权限。
+- 在 [include/aarchvm/cpu.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/cpu.hpp) 中新增 `dirty_state_hw_update_enabled()` 辅助判定，避免 `walk_page_tables(...)` 直接把 `DBM` 当成“无条件可写”。
+- 新增正式裸机回归 [tests/arm64/mmu_dbm_hafdbs_absent.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_dbm_hafdbs_absent.S)，一次性锁定：
+  - `ID_AA64MMFR1_EL1.HAFDBS=0` 前提下，`DBM=1 + AP[2]=1` 的页仍必须保持只读
+  - `AT S1E1W` 必须在 `PAR_EL1` 中报告 permission fault
+  - 随后的实际写访问必须进入 `EC=0x25`，并保持正确的 `ISS/FAR/ELR`
+- 已把新回归接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)，并纳入 `-decode slow` 一致性路径。
+
+# 修改日志 2026-04-07 02:16
+
+## 本轮修改
+
+- 继续沿 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 与 `MMU/fault` 交界处做 Armv8-A 程序可见语义收口，这轮补上的是一组此前真正缺失的 cache-maintenance watchpoint 行为，而不是 workload 特判。
+- 在 [include/aarchvm/cpu.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/cpu.hpp) 与 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中扩展了 `maybe_take_watchpoint_exception(...)`，允许按指令语义设置 `ESR_EL1.ISS.CM`。
+- 已把 `DC IVAC` 接入 self-hosted watchpoint 路径，并按手册把它作为 store-like watchpoint 处理：
+  - 命中时进入 `EC=0x35/0x34`
+  - `WnR=1`
+  - `CM=1`
+- 已把 `DC ZVA` 接入 self-hosted watchpoint 路径，并保持其 program-visible 语义为“store-like 但 `CM=0`”：
+  - 在真正写 64-byte zero block 之前先完成整块翻译与 memory-type 检查
+  - 然后再做 watchpoint 检查
+  - 命中时不提交任何 zero write
+- 这次顺手把 `DC ZVA` 的内部顺序也收得更严，避免“只翻译首个 8-byte chunk 就先触发 watchpoint”而错误压过后续可能出现的 translation fault。
+- 新增正式裸机回归 [tests/arm64/debug_cache_maint_watchpoints.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/debug_cache_maint_watchpoints.S)，一次性锁定：
+  - `DC IVAC` watchpoint 的 `EC/FAR/ISS(CM=1,WnR=1)`
+  - `DC ZVA` watchpoint 的 `EC/FAR/ISS(CM=0,WnR=1)`
+  - `DC ZVA` watchpoint 命中前不得提交写入
+- 已把新回归接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)，并纳入 `-decode slow` 一致性路径。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 600s ./tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/debug_cache_maint_watchpoints.bin -load 0x0 -entry 0x0 -steps 1200000`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -decode slow -bin tests/arm64/out/debug_cache_maint_watchpoints.bin -load 0x0 -entry 0x0 -steps 1200000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_qemu_user_diff.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮修掉的是一组真实缺口：此前 `DC IVAC/DC ZVA` 并不会生成手册要求的 watchpoint exception，因此 guest 可见的 `debug/watchpoint` 行为并不完整。
+- 修复后，fast/slow decode 与 Linux UMP/SMP 回归都保持通过。
+- 截至这一轮，我仍然不能自信宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”。
+- 当前剩余的高优先级缺口仍集中在：
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 尚未对所有已实现异常家族逐类对账完；
+  - `MMU/TLB/fault` 与 fast-path / predecode 的一致性还要继续压实；
+  - system 级长期压力与 `qemu-system-aarch64` 差分还不够系统化。
+
+# 修改日志 2026-04-06 22:43
+
+## 本轮修改
+
+- 继续沿 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 与 `MMU/TLB/fault` 一致性两条线做收口，但这轮先补强正式回归，而没有凭猜测直接改模拟器行为。
+- 新增 [tests/arm64/mmu_at_par_fault_kinds.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_at_par_fault_kinds.S)，把当前模型已经实现的 `AT -> PAR_EL1` 四类 fault format 一次性锁进正式裸机回归：
+  - `Address size fault`
+  - `Translation fault`
+  - `Access flag fault`
+  - `Permission fault`
+- 该回归显式检查 `PAR_EL1` 的程序可见 fault format，包括：
+  - `F`
+  - `RES1 bit11`
+  - `FST`
+  - `S/PTW` 清零
+  - fault format 下高位保持为 0
+- 把新回归接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)。
+- 同时在 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh) 中新增一组 `-decode slow` 正式一致性检查，覆盖：
+  - `sync_exception_regs`
+  - `mmu_cache_maint_fault`
+  - `mmu_at_tlb_observe`
+  - `mmu_cross_page_fault_far_store`
+  - `mmu_xn_fetch_abort`
+- 这轮的目的，是把 `PAR_EL1` fault 家族和 fast/slow decode 一致性锁得更严，为后续继续审 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 与 `MMU/TLB/fault` 留下更硬的回归护栏。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 600s ./tests/arm64/build_tests.sh`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/mmu_at_par_fault_kinds.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_qemu_user_diff.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮没有发现新的模拟器行为 bug，因此没有为了“看起来可疑”而盲改热路径。
+- 但 `PAR_EL1` fault format 与 fast/slow decode 的覆盖面比上一轮更完整了，`ESR_EL1/FAR_EL1/PAR_EL1/ISS` 与 `MMU/TLB/fault` 这两条收口线因此又向前压实了一步。
+- 截至这一轮，我仍然不能宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”；剩余主要缺口仍是：
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 尚未对所有已实现异常家族完成逐类对账；
+  - `qemu-system-aarch64` 层面的 system 级差分入口仍未系统化；
+  - Linux system 级长期压力回归还需要进一步制度化。
+
 # 修改日志 2026-04-06 21:59
 
 ## 本轮修改
@@ -8003,3 +8139,79 @@
 
 - 这一轮的目标不是改模拟器热路径，而是把此前尚未被正式锁住的 `SMP barrier / LSE aq-rel` 程序可见语义补进回归。
 - 即便这两条 litmus 与全回归都通过，我仍不能据此宣称“Armv8-A 最小集合已经完整收口”；它只意味着 `TODO.md` 里 `SMP` 这条主线又少了一块明显空洞。
+
+# 修改日志 2026-04-07 01:08
+
+## 本轮修改
+
+- 继续沿 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 与 `MMU/cache-maintenance/PAN` 交叉边界做审计，修正了 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中 `DC IVAC` 错误地受 `PSTATE.PAN` 影响的问题。当前实现改为仍然检查写权限，但在 `FEAT_PAN2` 缺失的模型下不再让 `PAN` 影响 `DC IVAC`。
+- 新增 [tests/arm64/mmu_dc_ivac_pan_ignore.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_dc_ivac_pan_ignore.S)，并接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)，把这条 `PAN` 语义固定进正式回归。
+- 新增 [tests/arm64/mmu_at_par_fault_kinds.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_at_par_fault_kinds.S)，补齐 `AT` 失败时 `PAR_EL1.FST` 的 fault-kind 覆盖，并接入正式回归。
+- 继续审计“翻译成功后物理访问失败”的 fault 语义，修正了此前把这类情况压成 `ISS=0` 的问题。现在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 会把：
+  - 普通数据读写的最终物理访问失败，报告为同步 `External Abort`，并正确区分 `WnR`；
+  - 指令取指后的最终物理访问失败，报告为同步 `Instruction Abort`，其 `IFSC` 为 `External Abort, not on translation table walk`；
+  - `DC ZVA` 这类翻译成功后的最终物理写失败，也统一落到同步 `External Abort`。
+- 为此新增 [tests/arm64/mmu_ext_abort_data.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_ext_abort_data.S) 与 [tests/arm64/mmu_ext_abort_fetch.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_ext_abort_fetch.S)，覆盖数据读/写与取指两类“翻译成功后总线失败”的程序可见行为，并接入正式回归的 fast/slow 两条执行路径。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 600s ./tests/arm64/build_tests.sh`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/mmu_ext_abort_data.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -decode slow -bin tests/arm64/out/mmu_ext_abort_data.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/mmu_ext_abort_fetch.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -decode slow -bin tests/arm64/out/mmu_ext_abort_fetch.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_qemu_user_diff.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这一轮确认并修复了两处真实的程序可见语义缺口：
+  - `DC IVAC` 不应被 `PSTATE.PAN` 错误拦截；
+  - “页表翻译成功，但最终物理总线访问失败”不应再被报告成空 `ISS` 的 abort，而应落成同步 `External Abort`。
+- 经过 `arm64` 全量、`qemu-user` 差分、Linux 单核功能套件与 Linux SMP 功能套件验证，这两类修复当前没有引入可见回归。
+- 即便如此，我仍不能在本轮宣称“Armv8-A 要求的最小集合已经完整收口”。当前剩余的重点仍然是：
+  - 继续逐异常家族对账 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 的剩余边界；
+  - 继续压实 `MMU/TLB/fault` 与 fast-path / predecode 的长期一致性；
+  - 把 system 级长期压力与 `qemu-system-aarch64` 差分做得更系统化。
+
+# 修改日志 2026-04-07 01:39
+
+## 本轮修改
+
+- 继续沿 `MMU/TLB/fault` 主线审计 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp)，修正了“页表 walk 期间读取 translation-table descriptor 的物理访问失败”此前被错误压成普通 `Translation fault` 的问题。现在 `walk_page_tables()` 会把这类情况明确标成 `ExternalAbortOnWalk`。
+- 同步补齐 `fault_status_code()` 映射，使这类 fault 的 `IFSC/DFSC` 变为 `0x14 + level`，也就是 `Synchronous External abort on translation table walk, level 0..3` 的编码，而不再错误落到 `0x04 + level` 的 translation-fault 编码。
+- 修正 `AT S1E1R/W` 与 `AT S1E0R/W` 在遇到 table-walk external abort 时的行为。当前实现不再错误写入 `PAR_EL1`，而是直接走同步 `Data Abort`，并通过现有 `data_abort(..., true)` 路径带出正确的 `CM=1`、`WnR=1` 与 `FAR_EL1=输入 VA`。
+- 为此扩展了 [include/aarchvm/cpu.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/cpu.hpp) 中 `TranslationFault::Kind` 的 fault 种类，并修正了快照恢复时对该 fault kind 上界的校验，避免新 fault kind 被快照加载逻辑拒绝。
+- 新增三条正式回归：
+  - [tests/arm64/mmu_walk_ext_abort_data.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_walk_ext_abort_data.S)：覆盖 load/store 因 table-walk descriptor 读取失败触发的 `Data Abort`，并检查 `DFSC=0x16`、`WnR` 与 `FAR_EL1`；
+  - [tests/arm64/mmu_walk_ext_abort_fetch.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_walk_ext_abort_fetch.S)：覆盖取指因 table-walk descriptor 读取失败触发的 `Instruction Abort`，并检查 `IFSC=0x16` 与 `ELR_EL1/FAR_EL1`；
+  - [tests/arm64/mmu_at_walk_ext_abort.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_at_walk_ext_abort.S)：覆盖 `AT` 在 table-walk external abort 时必须同步异常且保持 `PAR_EL1` 不变的语义。
+- 已把这些用例接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 600s ./tests/arm64/build_tests.sh`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/mmu_walk_ext_abort_data.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -decode slow -bin tests/arm64/out/mmu_walk_ext_abort_data.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/mmu_walk_ext_abort_fetch.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -decode slow -bin tests/arm64/out/mmu_walk_ext_abort_fetch.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/mmu_at_walk_ext_abort.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -decode slow -bin tests/arm64/out/mmu_at_walk_ext_abort.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_qemu_user_diff.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+
+## 当前结论
+
+- 这轮又确认并修掉了一处真实的程序可见 MMU fault 语义缺口：translation-table walk descriptor 读取失败不应再伪装成普通 translation fault，而应带出 `External abort on translation table walk`。
+- `AT` 的相关行为现在也和手册一致了：遇到这类 walk external abort 时，不写 `PAR_EL1`，而是直接取同步异常。
+- 经过 `arm64` 全量、`qemu-user` 差分、Linux UMP/SMP 功能回归验证，这次修复当前没有引入系统级回归。
+- 但截至本轮，我仍不能自信地说“模拟器已经完整实现 Armv8-A 要求的最小集合”。剩余重点仍包括：
+  - 继续逐类对账其余已实现异常来源的 `ESR_EL1/FAR_EL1/PAR_EL1/ISS`；
+  - 继续审 `MMU/TLB/fault` 与 fast-path / predecode 的一致性边界；
+  - 继续把长期 system 压力与更系统的 `qemu-system-aarch64` 差分补齐。

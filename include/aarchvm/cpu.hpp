@@ -114,6 +114,7 @@ private:
       AddressSize,
       AccessFlag,
       Permission,
+      ExternalAbortOnWalk,
     };
 
     Kind kind = Kind::Translation;
@@ -268,11 +269,20 @@ private:
   [[nodiscard]] std::uint32_t fault_status_code(const TranslationFault& fault) const;
   [[nodiscard]] std::uint32_t data_abort_iss(const TranslationFault& fault,
                                              bool cache_maintenance_or_translation) const;
+  [[nodiscard]] static constexpr std::uint32_t sync_external_abort_fsc() { return 0x10u; }
+  [[nodiscard]] std::uint32_t external_abort_iss(bool write,
+                                                 bool cache_maintenance_or_translation) const;
+  void note_external_data_abort(bool write,
+                                bool cache_maintenance_or_translation,
+                                std::uint64_t fault_va);
   void set_par_el1_for_fault(const TranslationFault& fault);
   [[nodiscard]] WalkAttributes decode_walk_attributes(bool va_upper) const;
   [[nodiscard]] MemoryType decode_memory_type(std::uint8_t mair_attr) const;
   [[nodiscard]] std::uint8_t decode_ips_bits() const;
   [[nodiscard]] bool pa_within_ips(std::uint64_t pa, std::uint8_t ips_bits) const;
+  [[nodiscard]] bool dirty_state_hw_update_enabled() const;
+  [[nodiscard]] bool effective_tbi(std::uint64_t va, bool is_instruction) const;
+  [[nodiscard]] std::uint64_t normalize_stage1_address(std::uint64_t va, bool is_instruction) const;
   void tlb_flush_all();
   void tlb_flush_va(std::uint64_t operand);
   void tlb_flush_asid(std::uint16_t asid);
@@ -394,7 +404,8 @@ private:
   [[nodiscard]] bool maybe_take_breakpoint_exception(std::uint64_t fault_pc);
   [[nodiscard]] bool maybe_take_watchpoint_exception(std::uint64_t va,
                                                      std::size_t size,
-                                                     AccessType access);
+                                                     AccessType access,
+                                                     bool cache_maintenance = false);
   [[nodiscard]] bool debug_privilege_matches(std::uint64_t ctrl) const;
   [[nodiscard]] bool maybe_take_software_step_before_instruction();
   void complete_software_step_after_instruction(std::uint64_t next_pc, std::uint32_t insn);
@@ -525,6 +536,7 @@ private:
   TlbEntry tlb_last_data_{};
   PerfCounters perf_counters_{};
   std::optional<TranslationFault> last_translation_fault_;
+  std::optional<std::uint32_t> last_data_abort_iss_override_;
   std::optional<std::uint64_t> last_data_fault_va_;
   std::uint64_t pc_ = 0;
   std::uint64_t steps_ = 0;
