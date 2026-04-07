@@ -152,6 +152,7 @@
 - [x] 已新增 `smp_lse_ldaddal_counter` 裸机单测，覆盖 2 核 `LDADDAL` 原子累加与 `LDAR/STLR + SEV/WFE` 配合下的可见性。
 - [x] 已新增 `smp_dmb_message_passing` 与 `smp_lse_casa_publish` 两条 SMP litmus，用正式强断言回归锁定 `STR/LDR + DMB/DSB` message passing，以及 `CASAL/CASA` 发布-获取路径下的 payload 可见性。
 - [x] 已把 `smp_mpidr_boot`、`smp_sev_wfe`、`smp_ldxr_invalidate`、`smp_spinlock_ldaxr_stlxr`、`smp_tlbi_broadcast`、`smp_wfe_*`、`smp_gic_sgi`、`smp_timer_*`、`smp_dc_zva_invalidate` 这组高价值 SMP 裸机用例升级为正式强断言回归，不再只是“跑一下不检查结果”。
+- [x] 已新增 `smp_ic_ivau_remote` 正式裸机回归，锁定 2 核下代码页更新后的 `DC CVAU + IC IVAU + DSB/ISB` 最小程序可见闭环；同时把 `IC IVAU` 在当前模型中保守扩展为跨核 decode 失效传播，避免显式 I-cache maintenance 后仍残留远端 stale decoded code。
 - [x] 已新增 Linux 用户态 `pthread_sync_stress`，覆盖 `pthread + sched_setaffinity + C11 atomic` 下的双线程计数与 release/acquire 消息传递。
 - [x] 已结合 `src/soc.cpp` 当前“一次只提交一个 `cpu.step()`、访存同步提交到全局内存顺序”的执行模型重新复核 barrier / acquire-release 语义，确认 `DMB/DSB` no-op 与 LSE 顺序变体折叠在当前模型下不会放宽程序可见内存顺序。
 
@@ -176,8 +177,10 @@
 - [x] 已修正 single-structure lane/replicate `AdvSIMD` load/store 在多字节元素跨页 fault 时的 `FAR_EL1` 报告，并补裸机单测覆盖 lane load、replicate load 与 post-index lane store 的 faulting byte 和 fault 时不写回。
 - [x] 已补 `LDXP/LDAXP/STXP/STLXP` 32-bit pair 成功路径与 pair 对齐/fault 边界的裸机回归，并修正 `CASP` misaligned fault 的 `WnR` 断言为“atomic read 会先触发同一 fault 时 `WnR=0`”的架构语义。
 - [x] 已补 pair-exclusive / `CASP` 在“对齐合法、地址翻译合法、但写权限 fault”场景下的裸机回归，确认 `STXP/CASP` fault 时内存不更新、`STXP` status 不写回，且 `FAR_EL1/DFSC/WnR` 保持正确。
-- [x] 已收口 `TCR_EL1.TBI0/TBI1` 的最小程序可见语义：当前翻译、取指与 `PC` 规范化路径都会按 bit[55] 选择 `TBI0/TBI1`，在 `!FEAT_PAuth` 模型下对 instruction/data 一致忽略 top byte，并新增 `mmu_tbi0_tagged_addrs` 正式裸机回归锁定 tagged data access、`AT S1E1R` 与 tagged `BLR` 后 `ADR` 看到的 canonical `PC`。
+- [x] 已收口 `TCR_EL1.TBI0/TBI1` 的最小程序可见语义：当前翻译、取指与 `PC` 规范化路径都会按 bit[55] 选择 `TBI0/TBI1`，在 `!FEAT_PAuth` 模型下对 instruction/data 一致忽略 top byte，并已用两条正式裸机回归分别锁定 `TTBR0/TBI0` 与 `TTBR1/TBI1` 的 tagged data access、`AT S1E1R`、`TLBI VAE1` 与 tagged `BLR` 后 `ADR` 看到的 canonical `PC` 行为。
 - [x] 已修正 `TLBI VAE1/VALE1/VAAE1/VAALE1` 族的 `AA` / `LE` 语义位判定错误：此前代码把 bit[7] 误当成 `all ASIDs`，导致 `VAAE1` 被错误当成按 ASID 失效、`VALE1` 被错误当成全 ASID 失效；现已按 bit[6] 识别 `AA` 变体，并新增 `mmu_tlbi_vaae1_all_asids` 与 `mmu_tlbi_vale1_asid_scope` 两条正式裸机回归锁定 all-ASIDs 与 ASID-scoped 语义。
+- [x] 已新增 `mmu_tcr_a1_ttbr1_asid_scope` 正式裸机回归，把 `TCR_EL1.A1=1` 时“TLB/translation ASID 必须来自 `TTBR1_EL1` 而不是 `TTBR0_EL1`”这条程序可见边界锁进 fast/slow 完整回归：仅切换 `TTBR0_EL1` 不应改变已缓存的低 VA 翻译，而切换 `TTBR1_EL1` 的 ASID 后必须触发新的 ASID 命中域并重新选中对应映射。
+- [x] 已新增 `mmu_tcr_a1_aside1_scope` 正式裸机回归，把 `TCR_EL1.A1=1` 与 `TLBI ASIDE1` 的联动语义锁进 fast/slow 完整回归：低 VA 翻译虽然走 `TTBR0_EL1` 的页表，但当 `A1=1` 时，`ASIDE1` 仍必须按 `TTBR1_EL1` 的 ASID 作用在这组 TLB 项上，只刷新目标 ASID，不误伤其它低 VA ASID 域。
 - [x] 已新增 Linux 用户态 `mprotect_exec_stress`，覆盖 `RW -> NONE -> RX` 权限切换、动态代码生成执行、`__builtin___clear_cache` 以及 `fork/execve` 路径。
 
 ### 5. 正确性验证基础设施补强

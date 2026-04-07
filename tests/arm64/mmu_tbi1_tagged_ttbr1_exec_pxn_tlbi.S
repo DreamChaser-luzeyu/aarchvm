@@ -1,0 +1,156 @@
+    .text
+    .global _start
+_start:
+    movz x1, #0
+    movk x1, #0x0900, lsl #16      // UART
+
+    adr  x18, vectors
+    msr  vbar_el1, x18
+
+    adr  x17, handled
+    str  xzr, [x17]
+
+    movz x9, #3
+    movz x15, #0x0c03              // L3 attrs: valid + page + AF + nG
+    movz x16, #0x0401              // L1 block attrs for low identity map
+
+    // TTBR0: low 1GiB identity block for boot code/data.
+    movz x20, #0x1000              // L0 low
+    movz x21, #0x2000              // L1 low
+    orr  x2, x21, x9
+    str  x2, [x20]
+    str  x16, [x21]
+
+    // TTBR1 hierarchy for a tagged upper executable alias.
+    movz x22, #0x5000              // L0 high
+    movz x23, #0x6000              // L1 high
+    movz x24, #0x7000              // L2 high code
+    movz x25, #0x8000              // L3 high code
+
+    orr  x2, x23, x9
+    str  x2, [x22]
+    orr  x2, x24, x9
+    str  x2, [x23]
+    orr  x2, x25, x9
+    str  x2, [x24]
+
+    // High alias initially points at PA 0x500000 as executable.
+    movz x3, #0x0050, lsl #16
+    orr  x27, x3, x15
+    str  x27, [x25]
+
+    // Same PA, but now block EL1 fetch with PXN=1.
+    movz x26, #0x20, lsl #48       // bit 53
+    orr  x28, x27, x26
+
+    // Code page A at PA 0x500000: movz x0, #'A'; ret
+    movz x10, #0x0050, lsl #16
+    movz x11, #0x0820
+    movk x11, #0xD280, lsl #16
+    str  w11, [x10]
+    movz x12, #0x03c0
+    movk x12, #0xD65F, lsl #16
+    str  w12, [x10, #4]
+
+    msr  ttbr0_el1, x20
+    msr  ttbr1_el1, x22
+    movz x2, #16
+    movk x2, #0x8010, lsl #16      // TG1=4KB (10b), T1SZ=16
+    movk x2, #0x40, lsl #32        // TBI1=1
+    msr  tcr_el1, x2
+    movz x2, #0
+    msr  mair_el1, x2
+    movz x2, #1
+    msr  sctlr_el1, x2
+    isb
+
+    // Tagged upper executable VA: top byte ignored, TTBR1 selected by bit[55].
+    movz x19, #0
+    movk x19, #0xabff, lsl #48
+    movz x29, #0
+    movk x29, #0xffff, lsl #48     // Canonical VA after TBI strips the tag.
+
+    // Fill fetch-side TLB with executable permissions and print 'A'.
+    blr  x19
+    str  x0, [x1]
+
+    // Flip the leaf to PXN but keep the stale fetch-side cached permission.
+    str  x28, [x25]
+    blr  x19
+    str  x0, [x1]
+
+    // After TLBI the next fetch must fault with an instruction permission abort.
+    ubfx x14, x19, #12, #44
+    tlbi vae1, x14
+    dsb  sy
+    isb
+
+    adr  x17, handled
+    str  xzr, [x17]
+    blr  x19
+    b    fail
+
+after_fault:
+    adr  x17, handled
+    ldr  x18, [x17]
+    cmp  x18, #1
+    b.ne fail
+
+    movz x0, #'C'
+    str  x0, [x1]
+
+    movz x2, #0
+    msr  sctlr_el1, x2
+    isb
+    movz x0, #'\n'
+    str  x0, [x1]
+    brk  #0
+
+fail:
+    movz x2, #0
+    msr  sctlr_el1, x2
+    isb
+    movz x0, #'F'
+    str  x0, [x1]
+    brk  #0
+
+    .balign 2048
+vectors:
+    .space 0x200
+sync_spx:
+    mrs  x2, esr_el1
+    ubfx x3, x2, #26, #6
+    cmp  x3, #0x21                // Instruction abort, same EL
+    b.ne fail_from_handler
+    and  x3, x2, #0x3f
+    cmp  x3, #0x0f                // Permission fault, level 3
+    b.ne fail_from_handler
+
+    mrs  x4, far_el1
+    cmp  x4, x29
+    b.ne fail_from_handler
+
+    mrs  x5, elr_el1
+    cmp  x5, x29
+    b.ne fail_from_handler
+
+    adr  x6, handled
+    movz x7, #1
+    str  x7, [x6]
+    adr  x8, after_fault
+    movz x9, #0x5
+    msr  spsr_el1, x9
+    msr  elr_el1, x8
+    eret
+
+fail_from_handler:
+    adr  x8, fail
+    movz x9, #0x5
+    msr  spsr_el1, x9
+    msr  elr_el1, x8
+    eret
+
+    .data
+    .balign 8
+handled:
+    .quad 0

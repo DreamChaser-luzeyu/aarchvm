@@ -182,6 +182,11 @@ run_expect mmu_ttbr_asid_mask.bin 4000000 7
 run_expect ttbr_el1_visible_bits.bin 200000 T
 run_expect tcr_el1_visible_bits.bin 200000 R
 run_expect mmu_tbi0_tagged_addrs.bin 4000000 T
+run_expect mmu_tcr_a1_aside1_scope.bin 4000000 J
+run_expect mmu_tcr_a1_ttbr1_asid_scope.bin 4000000 I
+run_expect mmu_tbi1_tagged_ttbr1_at_tlbi.bin 5000000 J
+run_expect mmu_tbi1_tagged_ttbr1_exec_tlbi.bin 5000000 AAB
+run_expect mmu_tbi1_tagged_ttbr1_exec_pxn_tlbi.bin 5000000 AAC
 run_expect mmu_perm_ro_write_abort.bin 4000000 8
 run_expect mmu_dbm_hafdbs_absent.bin 4000000 D
 run_expect mmu_dc_cva_el0_perm_fault.bin 4000000 C
@@ -526,6 +531,7 @@ run_expect_smp smp_lse_ldaddal_counter.bin 600000 J
 run_expect_smp smp_dmb_message_passing.bin 300000 B
 run_expect_smp smp_lse_casa_publish.bin 300000 C
 run_expect_smp smp_tlbi_broadcast.bin 1200000 M
+run_expect_smp smp_ic_ivau_remote.bin 1200000 K
 run_expect_smp smp_wfe_monitor_event.bin 300000 M
 run_expect_smp smp_wfe_store_no_event.bin 300000 N
 test "$(./build/aarchvm -smp 2 -smp-mode psci -bin tests/arm64/out/psci_cpu_on_min.bin -load 0x0 -entry 0x0 -steps 400000 | tr -d '\r\n')" = 'P'
@@ -577,6 +583,11 @@ run_expect_slow mmu_tlbi_vaae1_all_asids.bin 4000000 Y
 run_expect_slow mmu_tlbi_vale1_asid_scope.bin 4000000 N
 run_expect_slow mmu_af_fault.bin 4000000 0
 run_expect_slow mmu_tbi0_tagged_addrs.bin 4000000 T
+run_expect_slow mmu_tcr_a1_aside1_scope.bin 4000000 J
+run_expect_slow mmu_tcr_a1_ttbr1_asid_scope.bin 4000000 I
+run_expect_slow mmu_tbi1_tagged_ttbr1_at_tlbi.bin 5000000 J
+run_expect_slow mmu_tbi1_tagged_ttbr1_exec_tlbi.bin 5000000 AAB
+run_expect_slow mmu_tbi1_tagged_ttbr1_exec_pxn_tlbi.bin 5000000 AAC
 run_expect_slow mmu_perm_ro_write_abort.bin 4000000 8
 run_expect_slow mmu_dbm_hafdbs_absent.bin 4000000 D
 run_expect_slow mmu_el0_ap_fault.bin 4000000 U

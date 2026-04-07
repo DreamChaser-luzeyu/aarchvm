@@ -6764,6 +6764,9 @@ bool Cpu::exec_system(std::uint32_t insn) {
       return true;
     }
     invalidate_decode_va(reg(rt), 1u);
+    if (callbacks_.ic_ivau_broadcast) {
+      callbacks_.ic_ivau_broadcast(*this);
+    }
     return true;
   }
 

@@ -1,3 +1,42 @@
+# 修改日志 2026-04-07 22:19
+
+## 本轮修改
+
+- 继续沿 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 与 `MMU/TLB/fault` 一致性两条线做 Armv8-A 程序可见语义收口，这轮补的是 `SMP + self-modifying code + IC IVAU` 的 formal lock，并顺手收紧当前模型里 `IC IVAU` 的跨核可见性。
+- 在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中，把 `IC IVAU, Xt` 从“仅失效本核按 VA 的 predecode 页”收紧为：
+  - 本核继续按目标 VA 页失效 decode cache；
+  - 同时通过既有 SoC 回调保守地通知其他 CPU 失效 decode cache，避免显式 I-cache maintenance 后仍残留远端 stale decoded code。
+- 这不是为了追求微架构精确，而是为了保证当前高性能模型下的程序可见结果更保守、更稳健：
+  - decode cache 是本项目的“指令缓存近似物”；
+  - 对其他 CPU 做更强的失效不会放宽 guest 可见语义，只会避免 SMP 下的旧代码残留。
+- 新增正式裸机回归 [tests/arm64/smp_ic_ivau_remote.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/smp_ic_ivau_remote.S)，锁定 2 核下如下最小闭环：
+  - 核 1 先执行旧代码页并观察返回 `'A'`；
+  - 核 0 在共享可执行页上热补丁为返回 `'B'`；
+  - 核 0 执行 `DC CVAU + DSB ISH + IC IVAU + DSB ISH + ISB`；
+  - 核 1 随后再次取指必须稳定观察到新代码并返回 `'B'`。
+- 已把新回归接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)，并纳入 SMP 正式回归。
+- 同步更新了 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)，记录这条 `IC IVAU` 相关的 SMP 进展已经被正式回归锁定。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 600s ./tests/arm64/build_tests.sh`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/smp_ic_ivau_remote.bin -load 0x0 -entry 0x0 -steps 1200000 -smp 2`
+- `timeout 120s env AARCHVM_BRK_MODE=halt ./build/aarchvm -decode slow -bin tests/arm64/out/smp_ic_ivau_remote.bin -load 0x0 -entry 0x0 -steps 1200000 -smp 2`
+- `timeout 1800s ./tests/arm64/run_all.sh > out/arm64_run_all_20260407.log 2>&1`
+- `timeout 5400s ./tests/linux/run_qemu_user_diff.sh > out/run_qemu_user_diff_20260407.log 2>&1`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh > out/linux_functional_suite_20260407.log 2>&1`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh > out/linux_functional_suite_smp_20260407.log 2>&1`
+
+## 当前结论
+
+- 这轮没有靠 workload 特判去掩盖问题，而是把当前模型中“显式 I-cache maintenance 应该让其他 CPU 不再看到旧代码”这一程序可见语义正式锁进回归。
+- 新增的 `smp_ic_ivau_remote` fast/slow 单跑通过，裸机完整回归、`qemu-user` 差分、Linux UMP 功能回归与 Linux SMP 功能回归也都保持通过。
+- 截至这一轮，我仍然不能自信宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”；剩余高优先级缺口仍主要集中在：
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 对所有已实现异常家族的最终逐类对账；
+  - `MMU/TLB/fault` 与 fast-path / predecode 其他边界的一致性继续压实；
+  - 更系统化的 `qemu-system-aarch64` / Linux system-level 长时差分与压力验证。
+
 # 修改日志 2026-04-07 12:36
 
 ## 本轮修改
