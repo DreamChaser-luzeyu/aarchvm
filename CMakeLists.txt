@@ -35,8 +35,25 @@ target_link_directories(aarchvm PRIVATE ${SDL2_LIBRARY_DIRS})
 target_link_libraries(aarchvm PRIVATE ${SDL2_LIBRARIES})
 target_compile_options(aarchvm PRIVATE ${SDL2_CFLAGS_OTHER})
 
+add_executable(aarchvm_unit_cpu_cache_consistency
+  tests/unit_cpu_cache_consistency.cpp
+  src/bus.cpp
+  src/perf_mailbox.cpp
+  src/ram.cpp
+  src/uart_pl011.cpp
+  src/virtio_blk_mmio.cpp
+  src/gicv3.cpp
+  src/generic_timer.cpp
+  src/system_registers.cpp
+  src/cpu.cpp
+)
+
+target_include_directories(aarchvm_unit_cpu_cache_consistency PRIVATE include)
+
 if (MSVC)
   target_compile_options(aarchvm PRIVATE /W4 /permissive-)
+  target_compile_options(aarchvm_unit_cpu_cache_consistency PRIVATE /W4 /permissive-)
 else()
   target_compile_options(aarchvm PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  target_compile_options(aarchvm_unit_cpu_cache_consistency PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()

@@ -182,6 +182,10 @@
 - [x] 已新增 `mmu_tcr_a1_ttbr1_asid_scope` 正式裸机回归，把 `TCR_EL1.A1=1` 时“TLB/translation ASID 必须来自 `TTBR1_EL1` 而不是 `TTBR0_EL1`”这条程序可见边界锁进 fast/slow 完整回归：仅切换 `TTBR0_EL1` 不应改变已缓存的低 VA 翻译，而切换 `TTBR1_EL1` 的 ASID 后必须触发新的 ASID 命中域并重新选中对应映射。
 - [x] 已新增 `mmu_tcr_a1_aside1_scope` 正式裸机回归，把 `TCR_EL1.A1=1` 与 `TLBI ASIDE1` 的联动语义锁进 fast/slow 完整回归：低 VA 翻译虽然走 `TTBR0_EL1` 的页表，但当 `A1=1` 时，`ASIDE1` 仍必须按 `TTBR1_EL1` 的 ASID 作用在这组 TLB 项上，只刷新目标 ASID，不误伤其它低 VA ASID 域。
 - [x] 已新增 Linux 用户态 `mprotect_exec_stress`，覆盖 `RW -> NONE -> RX` 权限切换、动态代码生成执行、`__builtin___clear_cache` 以及 `fork/execve` 路径。
+- [x] 已补 `snapshot restore / TLBI tagged upper / IC IVAU tagged upper` 这组三类 predecode 一致性护栏：当前 `load_state()` 会显式清空 predecode cache，`TLBI VAE1*` 的 decode invalidation 会按 bit[55] 重建 canonical stage-1 VA 页，`IC IVAU` 的 decode invalidation 也统一走 `normalize_stage1_address()`；同时新增主机侧单测 `aarchvm_unit_cpu_cache_consistency` 与裸机回归 `mmu_tbi0_tagged_fault_far`，分别锁定内部 cache 失效一致性与 tagged translation fault 的 `FAR_EL1` 语义。
+- [x] 已收口 `SCTLR_EL1.WXN` 对 stage-1 取指权限的程序可见语义：当前 `EL1` fetch 会把 `PXN || (WXN && privileged-writeable)` 作为 execute deny 条件，`EL0` fetch 会把 `UXN || (WXN && EL0-writeable)` 作为 execute deny 条件，并新增 `mmu_wxn_fetch_abort` 与 `mmu_el0_wxn_fetch_abort` 正式裸机回归，同时覆盖 fast/slow decode 路径。
+- [x] 已修正 predecode cache 的 `PA` 侧失效索引错误：decode page 是按 `VA page` direct-mapped 入槽，旧实现却按 `PA page` 直接索引槽位，导致 `hash(VA)!=hash(PA)` 时 `on_code_write()` 的 `PA` 失效会漏掉真正缓存的 decoded page；现已改为按 `pa_page` 扫描全表失效，并新增白盒单测 `pa_invalidation_clears_decode_page_with_different_cache_index` 与正式裸机回归 `predecode_pa_alias_codegen` 锁定 alias self-modifying code 的程序可见行为。
+- [x] 已把 `mmu_at_walk_ext_abort`、`mmu_walk_ext_abort_data`、`mmu_walk_ext_abort_fetch` 这组三条“页表 walk 上 synchronous External abort”正式纳入 `-decode slow` 一致性回归，避免此类 `ESR_EL1/FAR_EL1/CM/WnR/PAR_EL1 保持值` 边界只在 fast-path 下被验证。
 
 ### 5. 正确性验证基础设施补强
 
@@ -210,6 +214,7 @@
 - [x] 已新增 `sysreg_trap_iss_rt_fields`，把 `EC=0x18` system-access trap 的 syndrome 覆盖从 smoke 提升为强断言，显式锁定 `ISS` 的 `Rt/read-write/op fields` 与 `FAR_EL1`。
 - [x] 已把 Linux UMP/SMP 功能回归接入 `mprotect_exec_stress`、`pthread_sync_stress` 与 `run_dmesg_stress_check` 的显式输出断言和无乱码检查。
 - [x] 已新增 host 侧 `tests/linux/run_qemu_user_diff.sh`，把 `fpsimd_selftest`、`fpint_selftest`、`mprotect_exec_stress`、`pthread_sync_stress` 固化为 `qemu-aarch64` 差分验证入口。
+- [x] 已新增主机侧白盒单测目标 `aarchvm_unit_cpu_cache_consistency`，直接覆盖 snapshot restore 后 predecode cache 清理，以及 tagged upper `TLBI VAE1` / `IC IVAU` 对 canonical decode page 的失效行为，并把它接入 `tests/arm64/run_all.sh` 作为正式回归前置检查。
 - [x] 已把 `fpsimd_debian_unimpl` 这条历史上用于覆盖 Debian/systemd 实际打到的 `FP/AdvSIMD` 指令族回归正式接入 `tests/arm64/run_all.sh`，避免它继续停留在“只构建不执行”的测试空洞状态。
 - [x] 已把 `tests/arm64/build_tests.sh` 与 `tests/arm64/run_all.sh` 的构建/执行一致性固化为脚本自检：`run_all.sh` 现在会在开头检查所有已构建的 `.bin/.snap` 都被正式回归引用，后续若再出现“只构建不执行”的测试空洞会直接失败。
 - [x] 已修正 `FCVTN/FCVTN2` 对 `BFCVTN/BFCVTN2` 的 decode overlap：当前 `ID_AA64ISAR1_EL1.BF16=0` 模型下，`BFCVTN/BFCVTN2` 不再误落到普通 `FCVTN/FCVTN2` 路径，而会按 absent-feature 语义同步 `UNDEFINED`；并新增 `bf16_absent_undef` 正式裸机回归，覆盖 `BFCVT/BFCVTN/BFCVTN2/BFMLALB/BFDOT/BFMMLA` 这几条 `BF16` 指令族在当前模型下的 `EC=0/IL=1/ISS=0/FAR=0/目的寄存器不变` 边界。

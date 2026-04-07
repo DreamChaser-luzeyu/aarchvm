@@ -2998,11 +2998,12 @@ void Cpu::invalidate_decode_va_page(std::uint64_t va_page) {
 }
 
 void Cpu::invalidate_decode_pa_page(std::uint64_t pa_page) {
-  DecodePage& page = decode_pages_[static_cast<std::size_t>((pa_page >> 12) & (kDecodeCachePages - 1u))];
-  if (page.valid && page.pa_page == pa_page) {
-    page.valid = false;
-    if (&page == decode_last_page_) {
-      decode_last_page_ = nullptr;
+  for (auto& page : decode_pages_) {
+    if (page.valid && page.pa_page == pa_page) {
+      page.valid = false;
+      if (&page == decode_last_page_) {
+        decode_last_page_ = nullptr;
+      }
     }
   }
 }
@@ -4583,7 +4584,7 @@ void Cpu::notify_tlbi_vae1(std::uint64_t operand, bool all_asids) {
   } else {
     tlb_flush_va(operand);
   }
-  invalidate_decode_va_page(tlbi_operand_va_base(operand));
+  invalidate_decode_va_page(canonicalize_tlbi_operand_va_base(operand));
 }
 
 void Cpu::notify_tlbi_aside1(std::uint16_t asid) {
@@ -6706,7 +6707,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
     } else {
       tlb_flush_va(operand);
     }
-    invalidate_decode_va_page(tlbi_operand_va_base(operand));
+    invalidate_decode_va_page(canonicalize_tlbi_operand_va_base(operand));
     if (callbacks_.tlbi_vae1_broadcast) {
       callbacks_.tlbi_vae1_broadcast(*this, operand, all_asids);
     }
@@ -6763,7 +6764,7 @@ bool Cpu::exec_system(std::uint32_t insn) {
       data_abort(reg(rt), true);
       return true;
     }
-    invalidate_decode_va(reg(rt), 1u);
+    invalidate_decode_va(normalize_stage1_address(reg(rt), false), 1u);
     if (callbacks_.ic_ivau_broadcast) {
       callbacks_.ic_ivau_broadcast(*this);
     }
@@ -16148,6 +16149,7 @@ bool Cpu::load_state(std::istream& in, std::uint32_t version) {
     return false;
   }
   tlb_flush_all();
+  invalidate_decode_all();
   invalidate_ram_page_caches();
   for (std::uint64_t i = 0; i < tlb_size; ++i) {
     std::uint64_t va_page = 0;

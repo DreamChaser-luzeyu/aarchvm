@@ -261,6 +261,7 @@ build_asm_prog mmu_at_el0_permissions
 build_asm_prog mmu_ttbr_asid_mask
 build_asm_prog ttbr_el1_visible_bits
 build_asm_prog mmu_tbi0_tagged_addrs
+build_asm_prog mmu_tbi0_tagged_fault_far
 build_asm_prog mmu_tcr_a1_aside1_scope
 build_asm_prog mmu_tcr_a1_ttbr1_asid_scope
 build_asm_prog mmu_tbi1_tagged_ttbr1_at_tlbi
@@ -281,7 +282,9 @@ build_asm_prog mmu_dc_zva_fault
 build_asm_prog mmu_dc_zva_el0_perm_fault
 build_asm_prog mmu_ic_ivau_el0_perm_fault
 build_asm_prog mmu_el0_uxn_fetch_abort
+build_asm_prog mmu_el0_wxn_fetch_abort
 build_asm_prog mmu_xn_fetch_abort
+build_asm_prog mmu_wxn_fetch_abort
 build_asm_prog mmu_cross_page_load
 build_asm_prog mmu_cross_page_store
 build_asm_prog mmu_cross_page_fault_far_load
@@ -342,6 +345,7 @@ build_asm_prog addsub_shift_more
 build_asm_prog uart_irq_rx_spaced
 build_asm_prog uart_tx_match_reply
 build_asm_prog predecode_dyn_codegen
+build_asm_prog predecode_pa_alias_codegen
 build_asm_prog predecode_va_exec_switch
 build_asm_prog predecode_load_store_min
 build_asm_prog predecode_logic_min

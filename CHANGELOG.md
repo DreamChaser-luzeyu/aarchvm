@@ -1,3 +1,98 @@
+# 修改日志 2026-04-08 00:38
+
+## 本轮修改
+
+- 继续沿 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 与 `MMU/TLB/fault` 两条线做 Armv8-A 程序可见语义收口，这轮补的是一组真实的 `WXN` 取指权限与 predecode `PA` 失效一致性缺口。
+- 在 [include/aarchvm/cpu.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/cpu.hpp) 中修正了 `SCTLR_EL1.WXN` 的取指权限检查：
+  - `EL1` 取指现在按 `PXN || (WXN && privileged-writeable)` 判定禁止执行；
+  - `EL0` 取指现在按 `UXN || (WXN && EL0-writeable)` 判定禁止执行。
+- 新增正式裸机回归：
+  - [tests/arm64/mmu_wxn_fetch_abort.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_wxn_fetch_abort.S)
+  - [tests/arm64/mmu_el0_wxn_fetch_abort.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_el0_wxn_fetch_abort.S)
+- 上述两条回归都已接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)，并在 fast/slow decode 两条路径上锁定 `WXN` fetch abort 的 `EC/WnR/FAR/ELR` 程序可见语义。
+- 同时补齐了一处回归覆盖空洞：把 `mmu_at_walk_ext_abort`、`mmu_walk_ext_abort_data`、`mmu_walk_ext_abort_fetch` 三条“页表 walk 上 synchronous External abort”正式接入 `tests/arm64/run_all.sh` 的 `-decode slow` 一致性路径，避免这组 `ESR_EL1/FAR_EL1/CM/WnR/PAR_EL1` 边界只在 fast-path 下被验证。
+- 在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中修正了 predecode cache 的 `PA` 侧失效逻辑：
+  - decode page 实际按 `VA page` direct-mapped 入槽；
+  - 旧实现却按 `PA page` 直接索引槽位，导致 `hash(VA)!=hash(PA)` 时 `on_code_write()` 的 `invalidate_decode_pa_page()` 会漏掉真正缓存的 decoded page；
+  - 现在改为扫描全部 `decode_pages_`，按 `page.pa_page == pa_page` 失效。
+- 为这条 predecode 一致性缺口新增了两层回归护栏：
+  - 白盒单测 [tests/unit_cpu_cache_consistency.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/unit_cpu_cache_consistency.cpp) 中新增 `pa_invalidation_clears_decode_page_with_different_cache_index`
+  - 正式裸机回归 [tests/arm64/predecode_pa_alias_codegen.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/predecode_pa_alias_codegen.S)，锁定“执行别名先命中 predecode，经写别名修改同一 `PA` 并执行 `DC CVAU + IC IVAU` 后，再次经执行别名取指必须看到新代码”的 guest 可见行为
+- 同步更新了 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)，把这轮已确认收口的 `WXN` 与 predecode `PA` 失效一致性进展补回当前计划状态。
+
+## 本轮测试
+
+- `timeout 1800s cmake --build build -j`
+- `timeout 30s ./build/aarchvm_unit_cpu_cache_consistency`
+- `timeout 600s ./tests/arm64/build_tests.sh`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/mmu_wxn_fetch_abort.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -decode slow -bin tests/arm64/out/mmu_wxn_fetch_abort.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/mmu_el0_wxn_fetch_abort.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -decode slow -bin tests/arm64/out/mmu_el0_wxn_fetch_abort.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/predecode_pa_alias_codegen.bin -load 0x0 -entry 0x0 -steps 500000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -decode slow -bin tests/arm64/out/predecode_pa_alias_codegen.bin -load 0x0 -entry 0x0 -steps 500000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -decode slow -bin tests/arm64/out/mmu_at_walk_ext_abort.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -decode slow -bin tests/arm64/out/mmu_walk_ext_abort_data.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -decode slow -bin tests/arm64/out/mmu_walk_ext_abort_fetch.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 1800s ./tests/linux/run_functional_suite.sh`
+- `timeout 2400s ./tests/linux/run_functional_suite_smp.sh`
+- `timeout 2400s ./tests/linux/run_block_mount_smoke.sh`
+- `timeout 2400s ./tests/linux/run_qemu_user_diff.sh`
+
+## 当前结论
+
+- 这轮修掉的是两处真实的程序可见 bug，不是 workload 特判：
+  - `WXN=1` 时 writable page 的 fetch 权限此前没有按架构规则被正确收紧；
+  - predecode cache 在 `PA` 侧失效时此前会因错误索引而漏失效，导致别名自修改代码场景存在陈旧 decoded page 残留的可能。
+- 新增的白盒单测、focused fast/slow 用例、裸机完整回归、Linux UMP/SMP 功能回归、块设备挂载 smoke 与 `qemu-user` 差分都保持通过。
+- 截至这一轮，我仍然不能自信宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”；剩余高优先级缺口仍主要集中在：
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 对所有已实现异常家族的最终逐类对账；
+  - `MMU/TLB/fault` 与 fast-path / predecode 其他细颗粒边界的一致性继续压实；
+  - 更系统化的 Linux system-level 长时压力与 `qemu-system-aarch64` 差分验证。
+
+# 修改日志 2026-04-07 23:55
+
+## 本轮修改
+
+- 继续沿 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 与 `MMU/TLB/fault` 两条线做 Armv8-A 程序可见语义收口，这轮补的是一组 `snapshot / TLBI / IC IVAU / tagged fault` 一致性缺口。
+- 在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中做了三处真实行为修正：
+  - `load_state()` 恢复 CPU 快照时，在重建 TLB 前先显式 `invalidate_decode_all()`，避免恢复后的 predecode cache 持有快照前地址空间的陈旧页。
+  - `TLBI VAE1*` 的 decode invalidation 现在不再直接使用 operand 重建出的裸 `VA<<12`，而是先按 bit[55] canonicalize 成 stage-1 上下半区地址，避免 tagged upper VA 失效时漏掉 canonical decode page。
+  - `IC IVAU, Xt` 的 decode invalidation 现在统一走 `normalize_stage1_address(reg(rt), false)`，避免 `TBI0/TBI1` 打开时按带 tag 的原始 VA 去失效而漏掉实际 canonical page。
+- 在 [include/aarchvm/cpu.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/cpu.hpp) 中新增 `canonicalize_tlbi_operand_va_base()` helper，把这条 `TLBI operand -> canonical stage-1 VA page` 规则收口为单点逻辑，减少后续再出 fast/slow 或本核/广播路径不一致的机会。
+- 新增主机侧白盒单测 [tests/unit_cpu_cache_consistency.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/unit_cpu_cache_consistency.cpp)，并在 [CMakeLists.txt](/media/luzeyu/Storage2/FOSS_src/aarchvm/CMakeLists.txt) 中加入 `aarchvm_unit_cpu_cache_consistency` 目标，覆盖：
+  - `snapshot_load_clears_decode_cache`
+  - `tlbi_tagged_upper_invalidates_canonical_decode_page`
+  - `ic_ivau_tagged_upper_invalidates_canonical_decode_page`
+- 新增正式裸机回归 [tests/arm64/mmu_tbi0_tagged_fault_far.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_tbi0_tagged_fault_far.S)，并接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)，锁定 `TBI0=1` 下 tagged lower-range translation fault 的 `FAR_EL1` 必须保留 tag。
+- 同步更新了 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)，把这轮已经锁定的 `snapshot / TLBI / IC IVAU / predecode` 一致性进展补回当前计划状态。
+
+## 本轮测试
+
+- `timeout 1800s cmake --build build -j`
+- `timeout 30s ./build/aarchvm_unit_cpu_cache_consistency`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/mmu_tbi0_tagged_fault_far.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -decode slow -bin tests/arm64/out/mmu_tbi0_tagged_fault_far.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 1800s ./tests/linux/run_functional_suite.sh`
+- `timeout 2400s ./tests/linux/run_functional_suite_smp.sh`
+- `timeout 2400s ./tests/linux/run_block_mount_smoke.sh`
+- `timeout 2400s ./tests/linux/run_qemu_user_diff.sh`
+
+## 当前结论
+
+- 这轮修掉的是实际会影响 guest 可见行为的一致性问题，不是 workload 特判：
+  - snapshot restore 后不应继续命中旧 predecode 页；
+  - tagged upper `TLBI` / `IC IVAU` 不应漏掉 canonical page；
+  - `TBI0=1` 下 tagged data fault 的 `FAR_EL1` 也不应被去 tag。
+- 新增的主机侧单测、裸机 fast/slow 回归、`tests/arm64/run_all.sh`、Linux UMP/SMP 功能回归、块设备挂载回归与 `qemu-user` 差分都保持通过。
+- 另做了一次更重的 Debian systemd system-level 启动观察：guest 已稳定走到 `multi-user.target` 和登录提示符，但现有 [tests/linux/run_debian_systemd_boot.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/linux/run_debian_systemd_boot.sh) 的 `-stop-on-uart AARCHVM-DEBIAN-SYSTEMD-READY` 未命中，这更像脚本/ready-marker 路径问题，本轮未把它计入“通过”的正式回归。
+- 截至这一轮，我仍然不能自信宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”；剩余高优先级缺口仍主要集中在：
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 对所有已实现异常家族的最终逐类对账；
+  - `MMU/TLB/fault` 与 fast-path / predecode 剩余边界的一致性继续压实；
+  - 更系统化的 `qemu-system-aarch64` / Linux system-level 长时差分与压力验证。
+
 # 修改日志 2026-04-07 22:19
 
 ## 本轮修改

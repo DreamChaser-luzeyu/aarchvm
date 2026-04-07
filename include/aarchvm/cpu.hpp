@@ -259,7 +259,10 @@ private:
       return permission_fault(true);
     }
     if (access == AccessType::Fetch) {
-      const bool execute_blocked = use_el0_permissions ? result.uxn : result.pxn;
+      const bool wxn = (sysregs_.sctlr_el1() & (1ull << 19)) != 0u;
+      const bool execute_blocked = use_el0_permissions
+          ? (result.uxn || (wxn && result.user_accessible && result.writable))
+          : (result.pxn || (wxn && result.writable));
       if (execute_blocked) {
         return permission_fault(false);
       }
@@ -298,6 +301,10 @@ private:
   [[nodiscard]] std::uint16_t ttbr_asid(std::uint64_t ttbr) const;
   [[nodiscard]] std::uint16_t current_translation_asid(bool va_upper) const;
   [[nodiscard]] std::uint16_t tlbi_operand_asid(std::uint64_t operand) const;
+  [[nodiscard]] static constexpr std::uint64_t canonicalize_tlbi_operand_va_base(std::uint64_t operand) {
+    const std::uint64_t base = tlbi_operand_va_base(operand);
+    return (base & (1ull << 55)) != 0u ? (base | (0xFFull << 56)) : base;
+  }
   [[nodiscard]] static constexpr bool tlb_entry_matches_asid(const TlbEntry& entry, std::uint16_t asid) {
     return entry.global_entry || entry.asid == asid;
   }

@@ -8,6 +8,8 @@ set -x
 
 cmake --build build -j
 
+./build/aarchvm_unit_cpu_cache_consistency
+
 tests/arm64/build_tests.sh
 
 verify_build_run_parity() {
@@ -182,6 +184,7 @@ run_expect mmu_ttbr_asid_mask.bin 4000000 7
 run_expect ttbr_el1_visible_bits.bin 200000 T
 run_expect tcr_el1_visible_bits.bin 200000 R
 run_expect mmu_tbi0_tagged_addrs.bin 4000000 T
+run_expect mmu_tbi0_tagged_fault_far.bin 4000000 K
 run_expect mmu_tcr_a1_aside1_scope.bin 4000000 J
 run_expect mmu_tcr_a1_ttbr1_asid_scope.bin 4000000 I
 run_expect mmu_tbi1_tagged_ttbr1_at_tlbi.bin 5000000 J
@@ -196,6 +199,7 @@ run_expect mmu_dc_zva_fault.bin 4000000 Z
 run_expect mmu_dc_zva_el0_perm_fault.bin 4000000 Z
 run_expect mmu_ic_ivau_el0_perm_fault.bin 4000000 I
 run_expect mmu_xn_fetch_abort.bin 4000000 9
+run_expect mmu_wxn_fetch_abort.bin 4000000 W
 run_expect mmu_cross_page_load.bin 4000000 L
 run_expect mmu_cross_page_store.bin 4000000 C
 run_expect mmu_cross_page_fault_far_load.bin 4000000 R
@@ -472,6 +476,7 @@ run_expect fpsimd_sp_alignment_fault.bin 500000 Z
 run_expect id_aa64_feature_regs.bin 200000 I
 run_expect mmu_el0_ap_fault.bin 4000000 U
 run_expect mmu_el0_uxn_fetch_abort.bin 4000000 u
+run_expect mmu_el0_wxn_fetch_abort.bin 4000000 w
 run_expect mmu_pan_user_access.bin 4000000 N
 run_expect mmu_ldtr_sttr_pan.bin 4000000 U
 run_expect mmu_tlb_asid_scope.bin 4000000 A
@@ -518,6 +523,7 @@ grep -q '^P$' "$PERF_LOG"
 grep -q 'PERF-RESULT case_id=4660 arg0=86 arg1=120 ' "$PERF_LOG"
 
 run_expect predecode_dyn_codegen.bin 400000 AB
+run_expect predecode_pa_alias_codegen.bin 500000 AB
 run_expect predecode_va_exec_switch.bin 5000000 ABA
 run_expect predecode_load_store_min.bin 400000 L
 run_expect predecode_logic_min.bin 400000 P
@@ -554,6 +560,13 @@ PRE_SLOW=tests/arm64/out/predecode_slow.log
 test "$(tr -d '\r\n' < "$PRE_FAST")" = 'AB'
 test "$(tr -d '\r\n' < "$PRE_SLOW")" = 'AB'
 
+PRE_PA_FAST=tests/arm64/out/predecode_pa_alias_fast.log
+PRE_PA_SLOW=tests/arm64/out/predecode_pa_alias_slow.log
+./build/aarchvm -bin tests/arm64/out/predecode_pa_alias_codegen.bin -load 0x0 -entry 0x0 -steps 500000 > "$PRE_PA_FAST"
+./build/aarchvm -decode slow -bin tests/arm64/out/predecode_pa_alias_codegen.bin -load 0x0 -entry 0x0 -steps 500000 > "$PRE_PA_SLOW"
+test "$(tr -d '\r\n' < "$PRE_PA_FAST")" = 'AB'
+test "$(tr -d '\r\n' < "$PRE_PA_SLOW")" = 'AB'
+
 VA_FAST=tests/arm64/out/predecode_va_fast.log
 VA_SLOW=tests/arm64/out/predecode_va_slow.log
 ./build/aarchvm -bin tests/arm64/out/predecode_va_exec_switch.bin -load 0x0 -entry 0x0 -steps 5000000 > "$VA_FAST"
@@ -583,6 +596,7 @@ run_expect_slow mmu_tlbi_vaae1_all_asids.bin 4000000 Y
 run_expect_slow mmu_tlbi_vale1_asid_scope.bin 4000000 N
 run_expect_slow mmu_af_fault.bin 4000000 0
 run_expect_slow mmu_tbi0_tagged_addrs.bin 4000000 T
+run_expect_slow mmu_tbi0_tagged_fault_far.bin 4000000 K
 run_expect_slow mmu_tcr_a1_aside1_scope.bin 4000000 J
 run_expect_slow mmu_tcr_a1_ttbr1_asid_scope.bin 4000000 I
 run_expect_slow mmu_tbi1_tagged_ttbr1_at_tlbi.bin 5000000 J
@@ -592,10 +606,15 @@ run_expect_slow mmu_perm_ro_write_abort.bin 4000000 8
 run_expect_slow mmu_dbm_hafdbs_absent.bin 4000000 D
 run_expect_slow mmu_el0_ap_fault.bin 4000000 U
 run_expect_slow mmu_el0_uxn_fetch_abort.bin 4000000 u
+run_expect_slow mmu_el0_wxn_fetch_abort.bin 4000000 w
 run_expect_slow mmu_cross_page_fault_far_store.bin 4000000 W
 run_expect_slow mmu_xn_fetch_abort.bin 4000000 9
+run_expect_slow mmu_wxn_fetch_abort.bin 4000000 W
 run_expect_slow mmu_at_par_formats.bin 4000000 P
 run_expect_slow mmu_at_par_fault_kinds.bin 4000000 G
+run_expect_slow mmu_at_walk_ext_abort.bin 4000000 A
 run_expect_slow mmu_ext_abort_data.bin 4000000 E
 run_expect_slow mmu_ext_abort_fetch.bin 4000000 Q
+run_expect_slow mmu_walk_ext_abort_data.bin 4000000 W
+run_expect_slow mmu_walk_ext_abort_fetch.bin 4000000 X
 run_expect_slow debug_cache_maint_watchpoints.bin 1200000 W
