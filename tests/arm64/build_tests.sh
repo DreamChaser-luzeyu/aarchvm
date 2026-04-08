@@ -309,6 +309,7 @@ build_asm_prog mmu_tcr_ips_mair_decode
 build_asm_prog mmu_af_fault
 build_asm_prog mmu_at_par_formats
 build_asm_prog mmu_at_par_fault_kinds
+build_asm_prog mmu_at_par_write_fault_kinds
 build_asm_prog mmu_at_walk_ext_abort
 build_asm_prog mmu_at_pan_ignore
 build_asm_prog mmu_ext_abort_data

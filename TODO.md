@@ -94,6 +94,7 @@
 - [x] 已把 `el0_eret_undef` 从“只看 EL0 执行 `ERET` 会不会进 `EC=0`”收紧到同时验证 `ESR_EL1.IL=1`、`ISS=0`、`FAR_EL1=0`，以及保存到 `SPSR_EL1` 里的 EL0 源 `NZCV/DAIF/PAN/M/IL`，补齐 `ERET` 家族另一条关键 trap 边界。
 - [x] 已把 `sync_exception_regs`、`svc_sysreg_minimal`、`software_step_basic` 补成正式强断言回归，分别锁定 same-EL instruction abort、`SVC`、software-step/`BRK` 路径上的 `ESR_EL1/ELR_EL1/FAR_EL1`、live `DAIF`、以及 `SPSR_EL1` 保存的 `NZCV/DAIF/PAN/SS/IL/M`。
 - [x] 已新增 `mmu_at_par_formats` 裸机回归，把 `AT -> PAR_EL1` 的关键程序可见格式固定进正式回归：成功态锁定 `bit11=RES1`、Device 与 Normal Non-cacheable 的 `SH=0b10`，fault 态锁定 `F`、`RES1 bit11`、`S/PTW=0` 与 `FST` 编码。
+- [x] 已继续补齐 `AT -> PAR_EL1` 的 write-side fault 覆盖：新增 `mmu_at_par_write_fault_kinds`，把 `AT S1E1W/S1E0W` 下的 translation fault、access-flag fault 与 permission fault 统一锁进正式回归，显式校验 `PAR_EL1` fault 低 7 位 `F | (FST << 1)` 编码、`RES1 bit11`、`S/PTW=0` 与高位清零边界。
 - [x] 已把 `el0_cache_ops_privilege` 与 `el0_tlbi_cache_undef` 从“只看会不会进异常”收紧到显式锁定 `EL0 cache/TLBI/AT` 这组边界里 `UNDEFINED` 与 `system-access trap` 的分类、`IL=1`、`ISS=0` 与 `FAR_EL1=0`，避免 `TLBI from EL0` 之类路径被错误宽放行或误报成 `EC=0x18`。
 - [x] 已补 base cache maintenance by set/way 家族里此前漏掉的 `DC CSW, Xt` 解码，并新增 `dc_csw_privilege` 裸机回归锁定其程序可见边界：`EL1` 下正常执行、`EL0` 下保持 `UNDEFINED`，且异常时显式检查 `ESR_EL1.IL=1`、`ISS=0`、`FAR_EL1=0` 与保存到 `SPSR_EL1` 的源 `NZCV/DAIF/PAN/M`。
 - [x] 已把 `brk_exception`、`hlt_undef`、`el0_hvc_smc_undef`、`el1_hvc_smc_undef` 这组 exception-generating 指令回归继续收紧，统一验证 `IL/ISS/FAR` 与 `SPSR_EL1` 中保存的源 `NZCV/DAIF/PAN/M`，把 `BRK/HLT/HVC/SMC` 从 smoke 提升为正式异常语义回归。

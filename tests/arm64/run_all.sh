@@ -221,6 +221,7 @@ run_expect mmu_tcr_ips_mair_decode.bin 4000000 Z
 run_expect mmu_af_fault.bin 4000000 0
 run_expect mmu_at_par_formats.bin 4000000 P
 run_expect mmu_at_par_fault_kinds.bin 4000000 G
+run_expect mmu_at_par_write_fault_kinds.bin 4000000 J
 run_expect mmu_off_at_par_direct_data.bin 4000000 H
 run_expect mmu_at_walk_ext_abort.bin 4000000 A
 run_expect mmu_at_pan_ignore.bin 400000 N
@@ -627,6 +628,7 @@ run_expect_slow mmu_xn_fetch_abort.bin 4000000 9
 run_expect_slow mmu_wxn_fetch_abort.bin 4000000 W
 run_expect_slow mmu_at_par_formats.bin 4000000 P
 run_expect_slow mmu_at_par_fault_kinds.bin 4000000 G
+run_expect_slow mmu_at_par_write_fault_kinds.bin 4000000 J
 run_expect_slow mmu_off_at_par_direct_data.bin 4000000 H
 run_expect_slow mmu_at_walk_ext_abort.bin 4000000 A
 run_expect_slow mmu_ext_abort_data.bin 4000000 E

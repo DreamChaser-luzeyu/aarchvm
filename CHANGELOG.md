@@ -8693,3 +8693,33 @@
 - 即便如此，我仍不会在本轮宣称“Armv8-A 最小集合已经完整收口”。当前剩余重点仍然是：
   - 继续逐异常家族最终对账 `ESR_EL1/FAR_EL1/PAR_EL1/ISS`；
   - 继续压实 `MMU/TLB/fault` 与 fast-path / predecode 的剩余细颗粒一致性边界。
+
+# 修改日志 2026-04-08 19:10
+
+## 本轮修改
+
+- 继续沿 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 与 `AT` 翻译结果边界做审计后，没有新增模拟器逻辑修改，但补齐了一条之前仍缺的正式覆盖：当前 [tests/arm64/mmu_at_par_fault_kinds.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_at_par_fault_kinds.S) 已覆盖 read-side 的 translation / access-flag / permission fault，不过 write-side 的 `AT S1E1W/S1E0W` 尚未把 translation fault 与 access-flag fault 单独锁进回归。
+- 为此新增 [tests/arm64/mmu_at_par_write_fault_kinds.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_at_par_write_fault_kinds.S)，并接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh) 的 fast/slow 两条路径。该回归显式锁定：
+  - `AT S1E1W` 对 unmapped VA 的 translation fault；
+  - `AT S1E1W` 对 `AF=0` 页的 access-flag fault；
+  - `AT S1E1W` 对 EL1 只读页的 permission fault；
+  - `AT S1E0W` 对 EL0 只读页的 permission fault；
+  - 上述 fault 在 `PAR_EL1` 中的低 7 位编码都满足 `F | (FST << 1)`，并继续检查 `RES1 bit11`、`S/PTW=0` 与高位清零边界。
+- 这轮审计过程中还专门用临时探针重新核了一次 `PAR_EL1` fault 位布局，确认现有 read-side 样例里看见的 `0x17/0x1f` 并不是编码错误，而是 `FST` 位于 `[6:1]`、`bit0=F` 的正常结果。也因此，这一轮最终没有动模拟器实现本身，只把 write-side 的正式护栏补齐了。
+
+## 本轮测试
+
+- `timeout 600s cmake --build build -j`
+- `timeout 180s ./tests/arm64/build_tests.sh`
+- `timeout 30s ./build/aarchvm -bin tests/arm64/out/mmu_at_par_write_fault_kinds.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 30s ./build/aarchvm -decode slow -bin tests/arm64/out/mmu_at_par_write_fault_kinds.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 1800s ./tests/arm64/run_all.sh > out/arm64-run-all-20260408-atparw.log 2>&1`
+- `timeout 1800s ./tests/linux/run_functional_suite.sh > out/linux-functional-ump-20260408-atparw.log 2>&1`
+- `timeout 1800s ./tests/linux/run_functional_suite_smp.sh > out/linux-functional-smp-20260408-atparw.log 2>&1`
+- `timeout 1800s ./tests/linux/run_block_mount_smoke.sh > out/linux-block-mount-20260408-atparw.log 2>&1`
+
+## 当前结论
+
+- 这一轮没有新增模拟器执行语义修改，但把 `AT -> PAR_EL1` write-side fault 编码这块正式纳入了 fast/slow 双路径回归。
+- 新增回归和完整 `arm64`/Linux UMP/Linux SMP/block smoke 回归当前都通过，说明这次补测没有引入新的程序可见回归。
+- 截至本轮，我仍不会宣称“Armv8-A 最小集合已经完整收口”；不过 `AT/PAR_EL1` 这一小块的 read/write fault 家族现在比之前扎实了一步，后续可以继续把精力收回到 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 的其余异常家族和 `MMU/TLB/fault` 与 fast-path / predecode 的剩余一致性边界。
