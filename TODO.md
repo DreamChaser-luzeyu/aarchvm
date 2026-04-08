@@ -1599,9 +1599,14 @@
 
 目标：
 - 让模拟器可以按配置加载一个外设扩展 `.so`，并把该外设放入独立子进程运行，以获得地址空间隔离。
-- 主模拟器继续作为 guest 物理地址空间、guest 时间、中断控制器与快照格式的权威拥有者。
-- 外设扩展通过稳定的 C ABI SDK 与主模拟器通信，尽量避免 SDK 因内部重构而频繁变化。
+- 主模拟器继续作为 guest 物理地址空间、bus 映射表、guest 时间与中断控制器的权威拥有者。
+- 外设扩展通过稳定的 C ABI SDK 与主模拟器通信，SDK 放在仓库内 `sdk/` 目录，作为独立 CMake 项目维护，尽量避免 SDK 因内部重构而频繁变化。
+- 插件产物以独立 `.so` 形式构建，由子进程通过 `dlopen()` 动态加载；主项目不通过 `-l` 在链接期把插件拉进 `aarchvm`。
+- 当前方案明确不要求外设扩展支持 snapshot；只要启用了这类外设，`-snapshot-save/-snapshot-load` 应显式拒绝并给出清晰错误，而不是保留半套语义。
 - 第一阶段优先保证正确性、可扩展性与隔离性；性能优化留给后续阶段，不为了早期性能破坏 API 稳定性。
+
+当前进展：
+- [x] 已按 `sdk/` 独立 CMake + `fork()+dlopen()` 子进程插件模型补充设计与测试拆分；当前仍未开始实现外设扩展机制本身。
 
 ### 0. 设计约束
 
@@ -1610,19 +1615,54 @@
 
 任务：
 - [ ] 明确外设扩展的基本边界：
-  - 主模拟器拥有 guest RAM、bus 映射表、GIC/IRQ 路由、guest 时间、快照总控；
+  - 主模拟器拥有 guest RAM、bus 映射表、GIC/IRQ 路由、guest 时间与设备调度总控；
   - 外设插件不直接持有主模拟器进程内的任何裸指针；
   - 插件只能通过 IPC 请求访问 guest 物理地址空间、发起中断、申请未来 deadline。
+- [ ] 明确与当前代码结构的接缝：
+  - 当前 `Device` 抽象只有 `read/write`，第一版不把 deadline、reset、IRQ、故障状态一口气做成“所有设备都必须实现”的统一虚接口；
+  - 第一版通过 `ExternalDeviceProxy + SoC::external_devices_` 单独管理外部设备的 deadline、IRQ 电平、健康状态与配置，避免无谓改动现有内建设备。
 - [ ] 明确第一阶段不追求的事情：
   - 不把插件 MMIO 纳入当前 `BusFastPath`；
   - 不给插件暴露主模拟器内部 C++ 类型；
-  - 不允许插件依赖主模拟器内部头文件直接访问 `Bus`/`SoC`/`Device` 私有实现。
+  - 不允许插件依赖主模拟器内部头文件直接访问 `Bus`/`SoC`/`Device` 私有实现；
+  - 不要求自动生成 Linux DTB 节点或一开始就支持 Linux 枚举；
+  - 不支持 snapshot；
+  - 不允许插件自建按 wall clock 运行的宿主线程式设备时钟。
 - [ ] 明确故障模型：
   - 插件子进程崩溃、死循环、非法内存访问，不应直接破坏主模拟器地址空间；
   - 主模拟器检测到插件失联后，应把该设备标记为故障设备，并给出明确日志；
-  - 后续是否把故障映射为 guest 外设超时、总线错误或直接终止模拟器，需要作为策略项单独定义。
+  - 后续是否把故障映射为 guest 外设超时、总线错误或直接终止模拟器，需要作为策略项单独定义；
+  - 启用插件时如请求 `-snapshot-save/-snapshot-load`，应在宿主入口处尽早失败，而不是让快照路径默默忽略插件。
 
-### 1. 进程模型与生命周期
+### 1. `sdk/` 目录与构建边界
+
+目标：
+- 先把 SDK 作为独立产物边界定清楚，保证插件确实是“独立 `.so` + `dlopen()`”而不是伪插件。
+
+任务：
+- [ ] 明确 `sdk/` 是仓库内独立 CMake 项目：
+  - 形如 `cmake -S sdk -B out/sdk-build` 可单独配置与构建；
+  - 不要求主项目根 `CMakeLists.txt` 把 `sdk/` 直接 `add_subdirectory()` 进默认构建；
+  - 主项目可后续提供脚本或 CI 任务去调用 `sdk/` 构建，但两者链接边界保持解耦。
+- [ ] 明确推荐目录结构：
+  - `sdk/CMakeLists.txt`
+  - `sdk/include/aarchvm-plugin-sdk/*.h`
+  - `sdk/cmake/AarchvmPlugin.cmake`
+  - `sdk/examples/register_bank/`
+  - `sdk/examples/timer_doorbell/`
+  - `sdk/examples/dma_copy/`
+  - `sdk/tests/abi_smoke/`
+  - `sdk/README.md`
+- [ ] 明确插件产物形态：
+  - 示例与第三方插件都应以 `add_library(<name> MODULE ...)` 方式生成 `.so`；
+  - 插件只包含 SDK 头文件，最多链接 `sdk/` 自己提供的小型 helper library；
+  - 插件不能在构建期依赖主项目里的 `aarchvm` 可执行文件或内部 C++ 对象。
+- [ ] 明确宿主与 SDK 的边界：
+  - 主项目负责运行时加载、IPC、MMIO 代理、GIC 路由、guest 时间与 DMA 仲裁；
+  - `sdk/` 只负责 ABI 头文件、CMake 模板、示例插件和最小测试工具；
+  - “示例插件能成功生成 `.so`”应成为后续测试闭环的一部分。
+
+### 2. 进程模型与生命周期
 
 目标：
 - 用 `fork()` 创建外设子进程，并把插件逻辑限制在子进程内执行。
@@ -1630,25 +1670,26 @@
 任务：
 - [ ] 设计外设配置入口，例如：
   - `-plugin /path/to/device.so,mmio=0x...,size=0x...,irq=...[,arg=...]`
-  - 或配置文件中声明插件路径、实例名、地址窗口、IRQ 路由与自定义参数。
+  - 或配置文件中声明插件路径、实例名、地址窗口、IRQ 路由与自定义参数；
+  - 允许重复传入多个 `-plugin`，每个实例对应独立子进程。
 - [ ] 设计“父进程不直接执行插件业务逻辑”的启动流程：
   - 父进程解析命令行与配置；
-  - 父进程创建 `socketpair(AF_UNIX, SOCK_SEQPACKET)`；
+  - 父进程创建 `socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC)`；
   - 父进程 `fork()`；
-  - 子进程中 `dlopen()` 插件并完成初始化；
+  - 子进程关闭不需要的 fd，并以 `RTLD_NOW | RTLD_LOCAL` 执行 `dlopen()`；
+  - 子进程 `dlsym()` 获取 `aarchvm_plugin_get_api_v1()` 并完成初始化；
   - 子进程把插件 manifest/能力集通过 IPC 发送给父进程；
   - 父进程校验 ABI 版本、MMIO 窗口、IRQ 声明后，再把一个 proxy device 映射到 bus。
 - [ ] 明确为什么不在父进程里直接 `dlopen()+调用插件`：
   - 这样能避免插件初始化代码、全局构造、越界写等问题污染主进程；
-  - 真正的设备业务逻辑只在子进程执行，更符合隔离目标。
+  - 真正的设备业务逻辑只在子进程执行，更符合隔离目标；
+  - 也能明确做到“插件 `.so` 是运行时可选项，而不是 `aarchvm` 的链接期依赖”。
 - [ ] 为插件实例定义完整生命周期：
   - `spawn`
   - `handshake`
   - `reset`
   - `running`
   - `quiesce`
-  - `snapshot-save`
-  - `snapshot-load`
   - `shutdown`
   - `crashed/timeout`
 
@@ -1658,7 +1699,7 @@
   - 实现路径更短；
   - 但后续可以把 `exec()` 隔离与 seccomp 作为加强版安全选项加入。
 
-### 2. IPC 传输层与基础协议
+### 3. IPC 传输层与基础协议
 
 目标：
 - 用一套稳定、可扩展、可调试的协议承载 MMIO、DMA、IRQ、时间同步与快照操作。
@@ -1669,12 +1710,16 @@
   - 便于调试；
   - 不需要自己处理流分帧。
 - [ ] 设计统一消息头：
-  - 协议版本
+  - magic
+  - ABI major/minor
   - 消息类型
   - 请求序号
   - flags
+  - instance id
+  - `guest_now`
   - payload 长度
   - 可选状态码
+  - 采用固定宽度整数与约定字节序，避免把宿主原生结构体直接跨进程裸发。
 - [ ] 定义最小消息类型集合：
   - `HELLO`
   - `MMIO_READ_REQ/RESP`
@@ -1686,8 +1731,6 @@
   - `ADVANCE_TO`
   - `SET_DEADLINE`
   - `RESET`
-  - `SAVE_STATE`
-  - `LOAD_STATE`
   - `SHUTDOWN`
   - `LOG`
   - `ERROR`
@@ -1695,7 +1738,11 @@
 - [ ] 为每类 IPC 明确同步/异步语义：
   - MMIO 访问默认同步请求-应答；
   - IRQ 通知允许异步单向消息；
-  - 时间推进与状态保存可同步化，保证可重放与快照一致性。
+  - 时间推进与 reset 可同步化，保证主模拟器始终掌控 guest 时间。
+- [ ] 明确等待与超时实现：
+  - 父进程对同步请求使用 `poll/ppoll` 等待响应；
+  - 每类请求定义独立超时预算；
+  - 超时后进入统一的故障处理分支，而不是让 `Bus::read/write` 永久阻塞。
 
 设计判断：
 - [ ] 第一阶段优先做“协议正确、可观测、易调试”的同步 IPC；
@@ -1705,20 +1752,30 @@
   - `memfd` + doorbell
   - 零拷贝 DMA window
 
-### 3. MMIO 代理机制
+### 4. 宿主侧接入与 MMIO 代理机制
 
 目标：
 - 让主模拟器像访问内建设备一样访问插件暴露的 MMIO 地址范围，但实际请求转发到子进程。
 
 任务：
+- [ ] 明确推荐新增的宿主侧模块：
+  - `plugin_config.*`：解析 `-plugin` 配置与参数；
+  - `plugin_protocol.*`：消息头、序列化/反序列化、状态码；
+  - `plugin_child_runtime.*`：子进程装载器与事件循环；
+  - `external_device_proxy.*`：父进程里的 `Device` 代理对象。
 - [ ] 在父进程侧设计 `ExternalDeviceProxy`：
-  - 继承当前统一的 `Device` 抽象；
+  - 继承当前统一的 `Device` 抽象，仅承担 MMIO `read/write` 入口；
   - 被 `Bus::map()` 当作普通设备挂载；
-  - `read/write` 内部转为 IPC 消息。
+  - 内部持有 socket、子进程 pid、健康状态、逻辑 IRQ 状态缓存、下一个 deadline 缓存与 manifest 元数据。
 - [ ] 定义插件 manifest 中的 MMIO 描述：
   - 支持一个或多个窗口；
   - 每个窗口含 `base/size/name/flags`；
   - flags 可声明是否支持未对齐访问、是否有 side-effect、是否适合后续 fast path。
+- [ ] 明确与当前 `Bus/SoC` 的接缝：
+  - 对多窗口插件，可把同一个 `ExternalDeviceProxy` 重复传给 `Bus::map()`，不强行重做 `Bus` 映射模型；
+  - `main.cpp` 负责解析 `-plugin` 并把配置交给 `SoC`；
+  - `SoC` 在现有内建设备之外维护 `external_devices_`，并在 `sync_devices()` 中处理外部 IRQ 电平同步，在 `next_device_event()` 中并入插件 deadline；
+  - 当前硬编码 `BusFastPath` 保持不变，插件 MMIO 统一走慢路径。
 - [ ] 明确 MMIO 语义：
   - 父进程发起读写时带上访问宽度、偏移、访存属性、当前 guest 时间；
   - 子进程必须返回确定结果，不能直接阻塞整个模拟器无限等待。
@@ -1730,7 +1787,7 @@
 - [ ] 第一版插件 MMIO 一律走 bus 慢路径，不试图并入当前硬编码 `BusFastPath`。
 - [ ] 等协议与行为稳定后，再单独设计“插件设备的 fast-path/offload 能力声明”，避免把热路径和 ABI 一起绑死。
 
-### 4. 插件对 guest 物理地址空间的访问 API
+### 5. 插件对 guest 物理地址空间的访问 API
 
 目标：
 - 让插件能发起 DMA/总线主设备访问，但仍由主模拟器掌控最终的物理内存与设备可见性。
@@ -1743,7 +1800,11 @@
   - `dma_memset(pa, value, size)` 可选
 - [ ] 明确 DMA 的语义入口：
   - 默认经由父进程统一的物理地址访问通路；
-  - 由父进程决定是只访问 RAM，还是允许设备对其他 MMIO 作为 bus master 发起访问。
+  - 第一版只允许访问 RAM，不开放“插件作为 bus master 去访问其他 MMIO 设备”；
+  - 对未映射区域、设备 MMIO 或权限不允许的访问，父进程返回明确错误码。
+- [ ] 明确一致性要求：
+  - 插件 `dma_write` 必须复用主模拟器当前“外部设备写 RAM”通知链路；
+  - 尤其要复用现在 `block/virtio` 已用到的 CPU decode / exclusive monitor 失效逻辑，不能让插件 DMA 绕过一致性路径。
 - [ ] 为后续性能扩展预留能力位：
   - 只读 RAM window 映射
   - 分页映射缓存
@@ -1756,16 +1817,18 @@
   - 父进程把特定 RAM 页以只读或读写共享内存方式映射给插件；
   - 但该优化必须建立在明确的失效/一致性协议之上，不能破坏 guest 可感知行为。
 
-### 5. 中断与门铃机制
+### 6. 中断、deadline 与 guest 时间同步
 
 目标：
-- 让插件能以稳定方式向主模拟器报告中断状态变化，而不让插件直接碰 GIC 内部结构。
+- 让插件能以稳定方式向主模拟器报告中断状态变化与未来 deadline，同时保证 guest 时间仍只以父进程为准。
 
 任务：
 - [ ] 在 manifest 中声明插件需要的 IRQ 输出数量与类型：
+  - 允许声明 `0..N` 条 IRQ 输出，MVP 可先从 `0` 条起步；
   - 电平触发 line
   - 脉冲触发 line
-  - 后续如有 MSI/doorbell，再单独扩展。
+  - 后续如有 MSI/doorbell，再单独扩展；
+  - 在真正开始做 IRQ 路由后，配置入口可先聚焦“每实例一个 IRQ 路由”，manifest 继续保留多 line 扩展位。
 - [ ] SDK 暴露最小 IRQ API：
   - `irq_set(line, level)`
   - `irq_pulse(line)`
@@ -1776,14 +1839,7 @@
 - [ ] 为中断去抖与幂等行为定规则：
   - 重复 `irq_set(1)` 不应造成额外副作用；
   - line 状态以父进程记录为准；
-  - snapshot/restore 后应能恢复中断电平状态。
-
-### 6. 时间同步与设备时钟模型
-
-目标：
-- 防止复杂插件拥有独立时间基准后与主模拟器越跑越偏；简单插件则允许只在 MMIO 访问时惰性推进。
-
-任务：
+  - 发生子进程崩溃或 timeout 后，父进程要能清晰定义该 line 的收敛状态。
 - [ ] 明确“guest 时间只以父进程为准”：
   - 子进程不得自行读取宿主机 wall clock 作为设备时间；
   - 所有设备时间推进都由父进程通过 `guest_now` 或 `ADVANCE_TO` 驱动。
@@ -1796,13 +1852,14 @@
   - `get_guest_now()`
 - [ ] 明确同步机制：
   - 在每次主模拟器与插件发生可见交互前，父进程确保插件至少被推进到相同的 `guest_now`；
-  - 当插件声明未来 deadline 时，父进程把它纳入统一事件调度器；
+  - 当插件声明未来 deadline 时，父进程把它纳入 `SoC::next_device_event()` 的统一事件调度器；
   - 如果插件没有 deadline，则视为纯惰性设备。
 - [ ] 为“防漂移”增加可选校验：
   - 父进程可周期性要求插件回报其内部 `device_now`；
   - 若插件报告时间回退、超前或持续滞后，视为插件逻辑错误并给出日志。
 
 设计判断：
+- [ ] 整体设计保留外部 IRQ 能力，但 MVP 第一阶段允许插件完全不声明 IRQ line，只先打通 MMIO 与子进程装载。
 - [ ] 第一版不允许插件自建独立 host thread 按 wall clock 跑设备时钟。
 - [ ] 第一版优先做确定性、可重放的 guest-time 驱动模型；需要更复杂异步设备时，再在此基础上扩展。
 
@@ -1826,8 +1883,6 @@
   - `mmio_read`
   - `mmio_write`
   - `advance_to`
-  - `save_state`
-  - `load_state`
   - `on_shutdown`
 - [ ] 宿主机回调表至少包含：
   - `dma_read`
@@ -1845,6 +1900,7 @@
   - 公共头文件
   - 最小构建脚本模板
   - 一个示例设备
+  - 一个独立 `cmake -S sdk -B ...` 的构建示例
   - 协议与生命周期文档
 
 设计判断：
@@ -1854,36 +1910,28 @@
   - `SoC` 内部调度实现
   - GIC 具体内部状态结构
 
-### 8. 快照、复位与错误恢复
+### 8. 复位、snapshot 限制与错误恢复
 
 目标：
-- 让外设插件可以参与快照与恢复，并在失败场景下保持可诊断。
+- 不为插件引入 snapshot 负担，同时把 reset、故障与“不支持 snapshot”的行为定义清楚。
 
 任务：
-- [ ] 定义插件状态保存协议：
-  - 父进程发送 `SAVE_STATE`；
-  - 子进程返回 opaque blob；
-  - snapshot 中额外保存：
-    - 插件路径
-    - 插件 ABI 版本
-    - 实例参数
-    - 插件状态 blob
-    - 当前 IRQ level
-    - 当前 deadline/时间戳
-- [ ] 恢复协议：
-  - 父进程重新 `fork()` 新子进程；
-  - 子进程重新 `dlopen()` 插件；
-  - 完成 handshake 后由父进程下发 `LOAD_STATE`；
-  - 恢复成功后再重新接入 bus。
 - [ ] 定义 reset 语义：
   - system reset 时插件收到 `reset(kind)`；
   - 必须清理内部 DMA 状态、IRQ level、deadline 与暂存事务。
+- [ ] 明确 snapshot 不支持策略：
+  - 只要命令行配置了外部插件，`-snapshot-load` 启动路径就直接拒绝；
+  - 只要运行时存在外部插件，`-snapshot-save` 请求就直接失败并打印明确错误；
+  - snapshot 文件格式不记录插件路径、配置或状态，避免留下“似乎能恢复、实际恢复不全”的假语义。
 - [ ] 定义故障恢复策略：
   - 子进程崩溃时主进程打印明确日志；
   - 可选策略包括：
     - 终止整个模拟器；
     - 将设备标记为永久故障；
     - 尝试按 reset 级别重启子进程。
+- [ ] 明确重启与 reset 的关系：
+  - 如果后续允许“故障后重启插件”，其语义应等价于“重新 `fork()+dlopen()` 一个全新实例，再走一次 `reset + handshake`”；
+  - 不允许伪造类似 snapshot 的热恢复语义。
 
 ### 9. 安全与隔离加强项
 
@@ -1899,6 +1947,7 @@
   - 独立工作目录
   - 只读插件目录
   - 禁止插件任意打开文件/网络
+  - 关闭不必要的继承 fd
 - [ ] 为调试保留开关：
   - 输出 IPC trace
   - 输出插件日志前缀
@@ -1907,47 +1956,83 @@
 ### 10. 测试与落地顺序
 
 目标：
-- 先做最小可用闭环，再逐步增加 DMA、IRQ、快照与复杂时钟模型。
+- 先做最小可用闭环，再逐步增加 DMA、IRQ、deadline 与健壮性；snapshot 不在范围内。
 
 任务：
-- [ ] 第一阶段最小闭环：
+- [ ] 阶段 0：SDK 构建与 ABI 烟测
+  - `cmake -S sdk -B out/sdk-build` 能独立配置成功；
+  - 示例插件能单独生成 `.so`，且不依赖把主项目可执行文件链接进来；
+  - 宿主侧白盒测试覆盖：缺失导出符号、ABI major 不匹配、manifest 非法、MMIO 窗口非法时必须拒绝加载。
+- [ ] 阶段 1：最小 MMIO 闭环
   - 一个独立子进程插件；
   - 一个 MMIO 窗口；
   - 同步 MMIO read/write；
-  - 一个 IRQ line；
+  - 无 IRQ；
   - 无 DMA；
+  - 无 deadline；
   - 无 snapshot；
-  - 用最简单的“寄存器 + 中断”示例设备打通。
-- [ ] 第二阶段：
+  - 用最简单的“纯寄存器型”示例设备打通。
+- [ ] 阶段 1 测试：
+  - 单元测试：协议头编码/解码、配置解析、请求序号匹配、超时、断连、状态机；
+  - 集成测试：裸机程序读写插件寄存器并验证寄存器语义；
+  - 负向测试：重复 MMIO 窗口、子进程初始化崩溃、子进程无响应；
+  - 限制性测试：启用插件时 `-snapshot-save/-snapshot-load` 必须显式失败。
+- [ ] 阶段 2：IRQ + deadline
+  - 引入 `irq_set/irq_pulse`；
+  - 增加 `advance_to` / `set_deadline`；
+  - 让插件进入统一事件调度；
+  - 把插件逻辑 line 正式接到 SoC/GIC。
+- [ ] 阶段 2 测试：
+  - 集成测试：裸机程序验证 IRQ 拉高/清除、脉冲中断与 deadline 唤醒；
+  - 调度测试：`next_device_event()` 能正确纳入插件 deadline，避免纯 busy poll；
+  - 负向测试：非法 IRQ 路由、重复 `irq_set()`、子进程故障后的 line 收敛。
+- [ ] 阶段 3：DMA
   - 引入 `dma_read/dma_write`；
-  - 增加 deadline/`advance_to`；
-  - 让插件进入统一事件调度。
-- [ ] 第三阶段：
-  - snapshot/save/load；
+  - 让插件能完成基本 bus-master RAM 访问。
+- [ ] 阶段 3 测试：
+  - 集成测试：插件通过 DMA 改写 guest RAM，guest 代码能看到结果；
+  - 一致性测试：插件 DMA 与当前 `block/virtio` 一样，必须触发 CPU decode / exclusive monitor 失效链路；
+  - 组合测试：DMA 完成后可选择再配合阶段 2 的 IRQ 能力发完成中断。
+- [ ] 阶段 4：reset / restart / 健壮性
   - reset/restart；
-  - 错误恢复与日志体系。
-- [ ] 第四阶段：
-  - 协议性能优化；
-  - 共享内存优化；
-  - 多窗口、多中断、批量 DMA。
-- [ ] 为每一阶段准备独立测试：
-  - 单元测试：协议编码/解码、超时、断连、状态机；
-  - 集成测试：MMIO 正确性、IRQ 正确性、DMA 一致性、snapshot 恢复；
+  - 错误恢复与日志体系；
+  - 故障策略收敛。
+- [ ] 阶段 4 测试：
   - 压力测试：插件死循环、崩溃、超时、异常退出；
-  - 回归测试：与现有 Linux/BusyBox/snapshot 流程并存，确认插件机制不会破坏主线功能。
+  - 故障注入：在初始化、MMIO、DMA、`advance_to` 各阶段杀死子进程；
+  - 行为断言：父进程日志、IRQ 收敛状态、后续 MMIO 返回值与退出码要符合既定策略。
+- [ ] 阶段 5：协议性能优化
+  - 批量 MMIO / 批量 DMA；
+  - 共享内存优化；
+  - 多窗口、多中断。
+- [ ] 阶段 5 测试：
+  - 保留前述功能回归；
+  - 新增 perf smoke，先统计 `plugin_mmio/plugin_dma/plugin_irq` 基本计数，再决定是否值得做共享内存优化。
+- [ ] 回归策略：
+  - “无插件”场景下，现有 `tests/arm64/run_all.sh`、Linux functional suite、snapshot 流程应保持不变；
+  - “有插件”场景优先从裸机回归开始，不把 Linux DTB/驱动枚举强绑进第一阶段；
+  - 如后续要让 Linux 使用插件设备，再单独补 DTB 与 guest 驱动测试，不要把这一步混进最小闭环。
 
 ### 11. 建议的首个示例插件
 
 目标：
-- 用一个足够简单、但能覆盖 MMIO/IRQ/时间推进的设备作为 SDK 示例。
+- 用一组从简到繁的设备作为 SDK 示例，先覆盖 MMIO，再覆盖 IRQ / 时间推进 / DMA。
 
 任务：
-- [ ] 首个示例建议实现“定时器/doorbell 类设备”：
+- [ ] 首个示例建议实现 `sdk/examples/register_bank`：
+  - 几个只读 ID / version 寄存器；
+  - 一个或多个可读写 scratch 寄存器；
+  - 不依赖 IRQ、DMA、deadline；
+  - 专门用于阶段 0/1 的 SDK 构建与 MMIO 烟测。
+- [ ] 第二个示例再实现 `sdk/examples/timer_doorbell`：
   - 少量控制寄存器；
   - 一个计数器；
   - 一个比较寄存器；
-  - 到期后拉高 IRQ。
-- [ ] 第二个示例再考虑“简化 DMA 设备”：
+  - 一个 pending/status 寄存器；
+  - 一个 ACK/clear 寄存器；
+  - 到期后拉高 IRQ；
+  - 同时可额外保留一个“写入即脉冲”的 doorbell 寄存器，方便验证 `irq_pulse()`。
+- [ ] 第三个示例再考虑“简化 DMA 设备”：
   - 通过 `dma_read/dma_write` 搬运内存；
   - 验证 DMA API、时间推进与中断完成语义。
 
