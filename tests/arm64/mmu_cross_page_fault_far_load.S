@@ -56,7 +56,7 @@ _start:
     msr  ttbr0_el1, x20
     movz x2, #16
     msr  tcr_el1, x2
-    movz x2, #0
+    movz x2, #0x00ff
     msr  mair_el1, x2
     movz x2, #1
     msr  sctlr_el1, x2

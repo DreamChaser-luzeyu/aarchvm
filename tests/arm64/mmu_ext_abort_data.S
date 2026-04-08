@@ -113,6 +113,14 @@ sync_handler:
     and  x4, x2, #0x3f
     cmp  x4, #0x10                // sync external abort, not on table walk
     b.ne fail_from_handler
+    tst  x2, #(1 << 10)           // FnV=0: FAR_EL1 is valid in this model.
+    b.ne fail_from_handler
+    tst  x2, #(1 << 9)            // EA=0 in this model.
+    b.ne fail_from_handler
+    tst  x2, #(1 << 8)            // CM=0: normal load/store, not cache maintenance/AT.
+    b.ne fail_from_handler
+    tst  x2, #(1 << 7)            // S1PTW=0: final access, not stage-2 walk fault.
+    b.ne fail_from_handler
     mrs  x5, far_el1
     subs xzr, x5, x30
     b.ne fail_from_handler

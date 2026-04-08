@@ -139,7 +139,10 @@ ec_b27_ok:
     b fail_from_handler
 ec_ok:
 
-    // Permission fault level 3 + WnR.
+    // Permission fault level 3 + WnR, with the remaining data-abort ISS bits clear.
+    tbnz x2, #10, fail_from_handler // FnV=0: FAR_EL1 is valid in this model.
+    tbnz x2, #8, fail_from_handler  // CM=0: normal store, not cache maintenance/AT.
+    tbnz x2, #7, fail_from_handler  // S1PTW=0: final access, not stage-2 on stage-1 walk.
     tbnz x2, #6, wnr_ok
     b fail_from_handler
 wnr_ok:

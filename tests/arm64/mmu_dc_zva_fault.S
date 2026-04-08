@@ -102,7 +102,9 @@ sync_handler:
     ubfx x3, x2, #26, #6
     cmp  x3, #0x25
     b.ne fail_from_handler
+    tbnz x2, #10, fail_from_handler // FnV=0: FAR_EL1 is valid in this model.
     tbnz x2, #8, fail_from_handler // DC ZVA faults are store-like, CM must be 0.
+    tbnz x2, #7, fail_from_handler // S1PTW=0: final access, not stage-2 on stage-1 walk.
     tbz  x2, #6, fail_from_handler // WnR must be 1.
     and  x4, x2, #0x3f
     cmp  x4, #0x07                // translation fault, level 3

@@ -276,10 +276,13 @@ movn_ok:
     tst  x22, #0x2
     b.ne fail
 
+    // In an AArch64-only implementation DBGBCR<n>_EL1.BAS[3:0] is RES1, so
+    // reads must force bits [8:5] high even if software wrote another value.
     movz x21, #0x3456
     msr  dbgbcr0_el1, x21
     mrs  x22, dbgbcr0_el1
-    cmp  x22, x21
+    movz x23, #0x35f6
+    cmp  x22, x23
     b.ne fail
 
     movz x21, #0x789a

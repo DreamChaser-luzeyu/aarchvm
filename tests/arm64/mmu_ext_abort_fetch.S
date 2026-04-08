@@ -108,6 +108,16 @@ sync_handler:
     and  x4, x2, #0x3f
     cmp  x4, #0x10                // sync external abort, not on table walk
     b.ne fail_from_handler
+    tst  x2, #(1 << 10)           // FnV=0: FAR_EL1 is valid in this model.
+    b.ne fail_from_handler
+    tst  x2, #(1 << 9)            // EA=0: no implementation-defined classification.
+    b.ne fail_from_handler
+    tst  x2, #(1 << 8)            // RES0 for instruction aborts.
+    b.ne fail_from_handler
+    tst  x2, #(1 << 7)            // S1PTW=0: no stage-2 walk fault in this model.
+    b.ne fail_from_handler
+    tst  x2, #(1 << 6)            // RES0 for instruction aborts.
+    b.ne fail_from_handler
     mrs  x5, far_el1
     subs xzr, x5, x30
     b.ne fail_from_handler

@@ -152,6 +152,10 @@ fsc_b4_ok:
     b fail_from_handler
 fsc_ok:
 
+    // Permission-fault instruction abort keeps the non-IFSC ISS bits clear.
+    and  x3, x2, #0x7c0
+    cbnz x3, fail_from_handler
+
     mrs  x5, far_el1
     subs xzr, x5, x20
     b.ne fail_from_handler

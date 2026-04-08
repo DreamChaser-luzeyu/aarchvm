@@ -125,7 +125,9 @@ sync_lower:
     ubfx x3, x2, #26, #6
     cmp  x3, #0x24                // data abort from lower EL
     b.ne fail_from_handler
+    tbnz x2, #10, fail_from_handler // FnV=0: FAR_EL1 is valid in this model.
     tbz  x2, #8, fail_from_handler // CM=1
+    tbnz x2, #7, fail_from_handler // S1PTW=0: final access, not stage-2 on stage-1 walk.
     tbz  x2, #6, fail_from_handler // WnR=1
     and  x4, x2, #0x3f
     cmp  x4, #0x0f                // permission fault, level 3

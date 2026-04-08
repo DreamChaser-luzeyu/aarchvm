@@ -100,6 +100,7 @@
 - [x] 已补 `ICC_HPPIR1_EL1/ICC_IAR1_EL1/ICC_EOIR1_EL1/ICC_DIR_EL1` 在“非 IRQ 异常上下文”下的最小程序可见语义：同步异常或普通 EL1 代码里现在也能手动查询最高优先级 pending IRQ、完成 acknowledge / priority drop / deactivate，`GIC` 侧会按优先级而不是纯 `INTID` 顺序选中断，并新增 `gic_sysreg_manual_ack` 裸机回归与 snapshot 状态持久化覆盖这一路径。
 - [x] 已对齐 `ID_AA64PFR0_EL1.GIC` 与当前 `ICC_*` system register 可见性，避免对外声明与实现矛盾。
 - [x] 已收口 debug sysreg 资源数量边界，使 `ID_AA64DFR0_EL1` 的资源声明与 `DBGBVR<n>/DBGWVR<n>` 等可见性一致。
+- [x] 已按 AArch64-only 实现收口 `DBGBCR<n>_EL1.BAS[3:0]=RES1` 语义：当前 direct read 与 breakpoint 匹配都统一把 `BAS[3:0]` 视为 `0b1111`，并新增 `debug_break_bas_res1` 正式裸机回归锁定 `DBGBCR` 读回值、EL1 breakpoint 异常的 `ESR_EL1/ELR_EL1/FAR_EL1` 与“faulting instruction 不执行”边界；同时修正 `instr_legacy_each`、`debug_sysreg_resource_bounds`、`debug_software_access_halt_read` 里依赖旧 readback 假设的回归。
 - [x] 已按 `OS Lock` / `OS Double Lock` / `CORENPDRQ` 收口 self-hosted debug 异常生成条件，确保除 `BRK` 外，hardware breakpoint、watchpoint、software step 在锁定时都被正确抑制，而 `BRK` 保持始终可见。
 - [x] 已新增 `debug_lock_exception_gating` 裸机回归覆盖上述 debug lock 语义，并修正 `debug_break_watch_basic`、`software_step_basic` 的测试前置条件，使其显式解锁 debug lock，不再依赖旧的错误宽放行行为。
 - [x] 已为 `MDSCR_EL1.TDA` 补上最小 software-access debug event 行为：对本来会成功的 `DBGBVR/DBGBCR/DBGWVR/DBGWCR` 访问，在 `OS Lock` 解锁且 `TDA=1` 时进入 halting 行为；并补 `debug_software_access_halt_read/write` 裸机回归覆盖“锁着不触发、解锁后 halt”的读写路径。
@@ -172,6 +173,9 @@
 
 当前进展：
 - [x] 已补齐并回归验证一组高优先级对齐/fault 边界：`SP` alignment、标量 misaligned load/pair、`LDAR/STLR/LDXR/LSE atomic` misaligned fault、普通 `SIMD&FP` `LDR/STR Q` misaligned fault、`LDP/STP Q,Q` misaligned fault。
+- [x] 已按 `AArch64.S1DisabledOutput()` 收口 `M=0` 时 stage-1 direct output 的程序可见语义：数据访问与 `AT` 数据翻译现在按 `Device-nGnRnE + OSH + PA=VA[55:0]` 生成 `PAR/翻译结果`，取指 direct output 维持 `Normal` 并受 `SCTLR_EL1.I` 控制；同时新增 `mmu_off_at_par_direct_data`、`mmu_off_dc_zva_align_fault`、`mmu_off_wxn_ignored_fetch` 正式回归，并把 `dc_zva`、`el0_cache_ops_privilege`、`smp_dc_zva_invalidate` 的成功路径改成在最小 Normal 映射下验证，避免继续依赖错误的 `M=0` 旧假设。
+- [x] 已修正普通 load/store 在 `SCTLR_EL1.A=0` 时遗漏的“由 Device 内存类型决定的 alignment fault”语义缺口：当前 misaligned 访问即使关闭了常规 alignment check，只要 stage-1 输出是 Device memory 仍会报告 `FSC=0x21` 的 `Data Abort`，并新增 `mmu_device_unaligned_fault` 正式裸机回归同时锁定 load/store 两条路径的 `WnR/FAR_EL1` 与“fault 前内存不应被写坏”边界。
+- [x] 已修正 translation fault 状态在 `AT` / cache-maintenance 翻译路径上的 stale `FAR` 污染问题：`translate_address()` 与 `translate_cache_maintenance_address()` 现在都会先清空旧的 `last_data_fault_va_`，避免前一条 data fault 的地址残留到后续 address-translation walk abort 或 cache-maintenance translation fault；同时新增白盒单测 `cache_maintenance_translation_fault_uses_requested_far` 与 `address_translation_walk_abort_uses_requested_far` 锁定这两条边界。
 - [x] 已补裸机单测确认 structured `LD1/ST1` `.16B` multiple-structures 在 `SCTLR_EL1.A=1` 下仍按 byte element 对齐工作，不应错误 fault。
 - [x] 已修正 whole-register structured `AdvSIMD` `LD1/ST1/LD2/ST2/LD3/ST3/LD4/ST4` 在跨页 fault 时的 `FAR_EL1` 报告，确保返回实际 faulting byte 而不是起始地址，并补裸机单测覆盖 sequential/interleaved、load/store 与 post-index fault 不写回。
 - [x] 已修正 single-structure lane/replicate `AdvSIMD` load/store 在多字节元素跨页 fault 时的 `FAR_EL1` 报告，并补裸机单测覆盖 lane load、replicate load 与 post-index lane store 的 faulting byte 和 fault 时不写回。
@@ -185,7 +189,12 @@
 - [x] 已补 `snapshot restore / TLBI tagged upper / IC IVAU tagged upper` 这组三类 predecode 一致性护栏：当前 `load_state()` 会显式清空 predecode cache，`TLBI VAE1*` 的 decode invalidation 会按 bit[55] 重建 canonical stage-1 VA 页，`IC IVAU` 的 decode invalidation 也统一走 `normalize_stage1_address()`；同时新增主机侧单测 `aarchvm_unit_cpu_cache_consistency` 与裸机回归 `mmu_tbi0_tagged_fault_far`，分别锁定内部 cache 失效一致性与 tagged translation fault 的 `FAR_EL1` 语义。
 - [x] 已收口 `SCTLR_EL1.WXN` 对 stage-1 取指权限的程序可见语义：当前 `EL1` fetch 会把 `PXN || (WXN && privileged-writeable)` 作为 execute deny 条件，`EL0` fetch 会把 `UXN || (WXN && EL0-writeable)` 作为 execute deny 条件，并新增 `mmu_wxn_fetch_abort` 与 `mmu_el0_wxn_fetch_abort` 正式裸机回归，同时覆盖 fast/slow decode 路径。
 - [x] 已修正 predecode cache 的 `PA` 侧失效索引错误：decode page 是按 `VA page` direct-mapped 入槽，旧实现却按 `PA page` 直接索引槽位，导致 `hash(VA)!=hash(PA)` 时 `on_code_write()` 的 `PA` 失效会漏掉真正缓存的 decoded page；现已改为按 `pa_page` 扫描全表失效，并新增白盒单测 `pa_invalidation_clears_decode_page_with_different_cache_index` 与正式裸机回归 `predecode_pa_alias_codegen` 锁定 alias self-modifying code 的程序可见行为。
+- [x] 已修正外设/DMA 直接写 guest RAM 时绕过 CPU 失效链路的真实一致性缺口：`Bus` 现提供统一的 RAM buffer 写入口与 observer，`SoC` 会把外部 RAM 写入广播给所有 CPU 执行 `notify_external_memory_write()`，`BlockMmio/VirtioBlkMmio` 已改走该入口；新增白盒单测 `block_dma_write_notifies_cpu_decode_and_exclusive` 与 `virtio_dma_write_notifies_cpu_decode_and_exclusive`，锁定设备写入会同步清掉 stale predecode page 并清除 exclusive monitor。
 - [x] 已把 `mmu_at_walk_ext_abort`、`mmu_walk_ext_abort_data`、`mmu_walk_ext_abort_fetch` 这组三条“页表 walk 上 synchronous External abort”正式纳入 `-decode slow` 一致性回归，避免此类 `ESR_EL1/FAR_EL1/CM/WnR/PAR_EL1 保持值` 边界只在 fast-path 下被验证。
+- [x] 已收口 `!FEAT_MTE` 下 `ADDG/SUBG` 被 generic `ADD/SUB (immediate)` 误吞的 decode overlap：普通解释路径与 predecode/fast-path 现在都会把这两条编码稳定视为同步 `UNDEFINED`，并新增 `mte_absent_undef` 正式裸机回归覆盖 `ADDG/SUBG/IRG/GMI/STGP/STG/LDG` 的 `ESR_EL1.EC/IL/ISS`、`ELR_EL1`、`FAR_EL1` 与“无副作用”边界。
+- [x] 已把一组 absent-feature decode overlap 高风险样例补进 `-decode slow` 一致性回归护栏：`flagm_integer_undef`、`pauth_absent_integer_undef`、`pauth_lr_absent_integer_undef`、`ldraa_ldrab_absent_undef`、`lrcpc_absent_undef`、`ls64_absent_undef` 现在都会随 `tests/arm64/run_all.sh` 同时验证 fast-path 与 slow-path，降低后续解码调整把缺特性指令误吞成已实现通路的风险。
+- [x] 已新增 `mmu_cache_maint_el1_no_cmow_perm` 正式裸机回归，锁定当前 `ID_AA64MMFR1_EL1.CMOW=0` 模型下：`EL1` 上的 `DC CVAC/CVAU/CIVAC` 与 `IC IVAU` 不应仅因 stage-1 页是 privileged-only + read-only 就误报 permission fault；同时保持既有 `DC IVAC`“仍要求写权限”的程序可见边界不变。
+- [x] 已修正 `TLBI VAE1/VALE1/VAAE1/VAALE1` 对 stage-1 block leaf 的失效范围：旧实现只会清掉命中 operand 的那个 4KB shadow TLB 项，导致同一 `L1/L2` block 内其它已缓存 page 仍可能继续命中旧翻译；现已按 leaf level 覆盖范围失效整块，并新增 `mmu_tlbi_block_vae1_scope` 正式裸机回归锁定 fast/slow decode 下“block remap 后仅以块内一个 VA 执行 TLBI，整块 shadow TLB 项都必须失效”的程序可见语义。
 
 ### 5. 正确性验证基础设施补强
 
@@ -214,7 +223,7 @@
 - [x] 已新增 `sysreg_trap_iss_rt_fields`，把 `EC=0x18` system-access trap 的 syndrome 覆盖从 smoke 提升为强断言，显式锁定 `ISS` 的 `Rt/read-write/op fields` 与 `FAR_EL1`。
 - [x] 已把 Linux UMP/SMP 功能回归接入 `mprotect_exec_stress`、`pthread_sync_stress` 与 `run_dmesg_stress_check` 的显式输出断言和无乱码检查。
 - [x] 已新增 host 侧 `tests/linux/run_qemu_user_diff.sh`，把 `fpsimd_selftest`、`fpint_selftest`、`mprotect_exec_stress`、`pthread_sync_stress` 固化为 `qemu-aarch64` 差分验证入口。
-- [x] 已新增主机侧白盒单测目标 `aarchvm_unit_cpu_cache_consistency`，直接覆盖 snapshot restore 后 predecode cache 清理，以及 tagged upper `TLBI VAE1` / `IC IVAU` 对 canonical decode page 的失效行为，并把它接入 `tests/arm64/run_all.sh` 作为正式回归前置检查。
+- [x] 已新增主机侧白盒单测目标 `aarchvm_unit_cpu_cache_consistency`，直接覆盖 snapshot restore 后 predecode cache 清理、tagged upper `TLBI VAE1` / `IC IVAU` 对 canonical decode page 的失效行为，以及 `block/virtio` DMA 写 guest RAM 时对 predecode stale page 和 exclusive monitor 的统一失效，并把它接入 `tests/arm64/run_all.sh` 作为正式回归前置检查。
 - [x] 已把 `fpsimd_debian_unimpl` 这条历史上用于覆盖 Debian/systemd 实际打到的 `FP/AdvSIMD` 指令族回归正式接入 `tests/arm64/run_all.sh`，避免它继续停留在“只构建不执行”的测试空洞状态。
 - [x] 已把 `tests/arm64/build_tests.sh` 与 `tests/arm64/run_all.sh` 的构建/执行一致性固化为脚本自检：`run_all.sh` 现在会在开头检查所有已构建的 `.bin/.snap` 都被正式回归引用，后续若再出现“只构建不执行”的测试空洞会直接失败。
 - [x] 已修正 `FCVTN/FCVTN2` 对 `BFCVTN/BFCVTN2` 的 decode overlap：当前 `ID_AA64ISAR1_EL1.BF16=0` 模型下，`BFCVTN/BFCVTN2` 不再误落到普通 `FCVTN/FCVTN2` 路径，而会按 absent-feature 语义同步 `UNDEFINED`；并新增 `bf16_absent_undef` 正式裸机回归，覆盖 `BFCVT/BFCVTN/BFCVTN2/BFMLALB/BFDOT/BFMMLA` 这几条 `BF16` 指令族在当前模型下的 `EC=0/IL=1/ISS=0/FAR=0/目的寄存器不变` 边界。

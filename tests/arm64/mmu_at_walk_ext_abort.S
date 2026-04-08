@@ -121,8 +121,14 @@ sync_handler:
     movz x5, #0x16                // walk external abort, level 2
     cmp  x4, x5
     b.ne fail_from_handler
+    tst  x2, #(1 << 10)           // FnV is RES0 for walk external aborts.
+    b.ne fail_from_handler
+    tst  x2, #(1 << 9)            // EA=0 in this model.
+    b.ne fail_from_handler
     tbz  x2, #8, fail_from_handler // CM=1 for AT
     tbz  x2, #6, fail_from_handler // WnR=1 for AT
+    tst  x2, #(1 << 7)            // S1PTW=0: stage-1 walk fault, not stage-2 on stage-1 walk.
+    b.ne fail_from_handler
     mrs  x6, far_el1
     subs xzr, x6, x29
     b.ne fail_from_handler

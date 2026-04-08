@@ -347,7 +347,8 @@ constexpr std::uint32_t kDebugExceptionIfsc = 0x22u;
 constexpr std::uint64_t kDebugCtrlEnable = 1ull << 0;
 constexpr std::uint64_t kDebugCtrlPrivilegeMask = 0x3ull << 1;
 constexpr std::uint64_t kDebugCtrlTypeMask = 0x3ull << 3;
-constexpr std::uint64_t kDebugCtrlLenMask = 0xFFull << 5;
+constexpr std::uint64_t kDebugCtrlBreakpointBasMask = 0xFull << 5;
+constexpr std::uint64_t kDebugCtrlWatchpointBasMask = 0xFFull << 5;
 constexpr std::uint32_t kDebugCtrlPrivilegeEl1 = 0x1u;
 constexpr std::uint32_t kDebugCtrlPrivilegeEl0 = 0x2u;
 constexpr std::uint32_t kDebugCtrlTypeExecute = 0x0u;
@@ -3076,6 +3077,37 @@ std::uint64_t Cpu::normalize_stage1_address(std::uint64_t va, bool is_instructio
   return ((va >> 55) & 0x1u) != 0u ? (masked | kTopByteMask) : masked;
 }
 
+void Cpu::fill_stage1_disabled_output(std::uint64_t effective_va,
+                                      AccessType access,
+                                      TranslationResult* out_result) const {
+  if (out_result == nullptr) {
+    return;
+  }
+  const bool va_upper = (effective_va >> 63) != 0;
+  out_result->pa = stage1_disabled_output_pa(effective_va);
+  out_result->asid = current_translation_asid(va_upper);
+  out_result->level = 3;
+  out_result->attr_index = 0;
+  out_result->global_entry = true;
+  out_result->writable = true;
+  out_result->user_accessible = true;
+  out_result->executable = true;
+  out_result->pxn = false;
+  out_result->uxn = false;
+  out_result->leaf_shareability = Shareability::OuterShareable;
+  out_result->walk_attrs = decode_walk_attributes(va_upper);
+  if (access == AccessType::Fetch) {
+    // AArch64.S1DisabledOutput(): instruction accesses use Normal memory and
+    // depend on SCTLR_EL1.I for the direct-mapped cacheability attributes.
+    out_result->mair_attr = (sysregs_.sctlr_el1() & (1ull << 12)) != 0u ? 0xAAu : 0x44u;
+    out_result->memory_type = MemoryType::Normal;
+  } else {
+    // AArch64.S1DisabledOutput(): data accesses use Device-nGnRnE.
+    out_result->mair_attr = 0x00u;
+    out_result->memory_type = MemoryType::Device;
+  }
+}
+
 bool Cpu::alignment_check_enabled() const {
   return (sysregs_.sctlr_el1() & (1ull << 1)) != 0u;
 }
@@ -3103,8 +3135,35 @@ bool Cpu::maybe_take_data_alignment_fault(std::uint64_t addr,
                                           std::size_t align,
                                           AccessType access,
                                           bool force_check) {
-  if (align <= 1u || (addr % align) == 0u || (!force_check && !alignment_check_enabled())) {
+  if (align <= 1u || (addr % align) == 0u) {
     return false;
+  }
+  if (!force_check && !alignment_check_enabled()) {
+    MemoryType memory_type = MemoryType::Unknown;
+    if (!sysregs_.mmu_enabled()) {
+      const std::uint64_t effective_va = normalize_stage1_address(addr, false);
+      const std::uint64_t direct_pa = stage1_disabled_output_pa(effective_va);
+      // With stage-1 disabled the architectural output memory type for data
+      // accesses is Device-nGnRnE. This model chooses to permit unaligned
+      // accesses only for RAM-backed direct-mapped locations, reflecting the
+      // implementation-defined "Device location supports unaligned access"
+      // latitude in AArch64.S1HasAlignmentFaultDueToMemType().
+      memory_type = (bus_.ram_ptr(direct_pa, 1u) != nullptr) ? MemoryType::Normal : MemoryType::Device;
+    } else {
+      TranslationResult result{};
+      TranslationFault fault{};
+      const std::uint64_t effective_va = normalize_stage1_address(addr, false);
+      // Alignment faults caused by memory type are prioritized after
+      // translation and Access Flag faults, but before permission faults.
+      // Probe the stage-1 output attributes accordingly.
+      if (!walk_page_tables(effective_va, access, &result, &fault, false, false)) {
+        return false;
+      }
+      memory_type = result.memory_type;
+    }
+    if (memory_type != MemoryType::Device) {
+      return false;
+    }
   }
   last_translation_fault_.reset();
   last_data_abort_iss_override_.reset();
@@ -3164,7 +3223,7 @@ bool Cpu::translate_data_address_fast(std::uint64_t va, AccessType access, std::
 
   if (!sysregs_.mmu_enabled()) {
     if (out_pa != nullptr) {
-      *out_pa = effective_va;
+      *out_pa = stage1_disabled_output_pa(effective_va);
     }
     return true;
   }
@@ -3577,6 +3636,9 @@ Cpu::DecodedInsn Cpu::decode_insn(std::uint32_t insn) const {
     if ((insn >> 31) != 0u) {
       decoded.flags |= kDecodedFlagSf;
     }
+    return decoded;
+  }
+  if ((insn & 0x7FC00000u) == 0x11800000u || (insn & 0x7FC00000u) == 0x51800000u) {
     return decoded;
   }
   if ((insn & 0x7F000000u) == 0x11000000u || (insn & 0x7F000000u) == 0x31000000u ||
@@ -4775,7 +4837,7 @@ bool Cpu::maybe_take_breakpoint_exception(std::uint64_t fault_pc) {
     if (((ctrl & kDebugCtrlTypeMask) >> 3) != kDebugCtrlTypeExecute) {
       continue;
     }
-    if ((ctrl & kDebugCtrlLenMask) == 0u || !debug_privilege_matches(ctrl)) {
+    if ((ctrl & kDebugCtrlBreakpointBasMask) == 0u || !debug_privilege_matches(ctrl)) {
       continue;
     }
     if ((fault_pc & ~0x3ull) != (sysregs_.dbgbvr_el1(i) & ~0x3ull)) {
@@ -4809,7 +4871,7 @@ bool Cpu::maybe_take_watchpoint_exception(std::uint64_t va,
     if ((type & required) == 0u) {
       continue;
     }
-    const std::uint64_t bas = (ctrl & kDebugCtrlLenMask) >> 5;
+    const std::uint64_t bas = (ctrl & kDebugCtrlWatchpointBasMask) >> 5;
     if (bas == 0u) {
       continue;
     }
@@ -5395,25 +5457,12 @@ bool Cpu::translate_address(std::uint64_t va,
   ++perf_counters_.translate_calls;
   last_translation_fault_.reset();
   last_data_abort_iss_override_.reset();
+  last_data_fault_va_.reset();
 
   const std::uint64_t effective_va = normalize_stage1_address(va, access == AccessType::Fetch);
 
   if (!sysregs_.mmu_enabled()) {
-    const bool ram_backed = bus_.ram_ptr(effective_va, 1u) != nullptr;
-    out_result->pa = effective_va;
-    out_result->asid = current_translation_asid(false);
-    out_result->level = 3;
-      out_result->attr_index = 0;
-      out_result->mair_attr = 0;
-      out_result->global_entry = true;
-      out_result->writable = true;
-    out_result->user_accessible = true;
-    out_result->executable = true;
-    out_result->pxn = false;
-    out_result->uxn = false;
-    out_result->memory_type = ram_backed ? MemoryType::Normal : MemoryType::Device;
-    out_result->leaf_shareability = Shareability::InnerShareable;
-    out_result->walk_attrs = decode_walk_attributes(false);
+    fill_stage1_disabled_output(effective_va, access, out_result);
     return true;
   }
 
@@ -5480,25 +5529,12 @@ bool Cpu::translate_cache_maintenance_address(std::uint64_t va,
   ++perf_counters_.translate_calls;
   last_translation_fault_.reset();
   last_data_abort_iss_override_.reset();
+  last_data_fault_va_.reset();
 
   const std::uint64_t effective_va = normalize_stage1_address(va, false);
 
   if (!sysregs_.mmu_enabled()) {
-    const bool ram_backed = bus_.ram_ptr(effective_va, 1u) != nullptr;
-    out_result->pa = effective_va;
-    out_result->asid = current_translation_asid(false);
-    out_result->level = 3;
-      out_result->attr_index = 0;
-      out_result->mair_attr = 0;
-      out_result->global_entry = true;
-      out_result->writable = true;
-    out_result->user_accessible = true;
-    out_result->executable = true;
-    out_result->pxn = false;
-    out_result->uxn = false;
-    out_result->memory_type = ram_backed ? MemoryType::Normal : MemoryType::Device;
-    out_result->leaf_shareability = Shareability::InnerShareable;
-    out_result->walk_attrs = decode_walk_attributes(false);
+    fill_stage1_disabled_output(effective_va, AccessType::Read, out_result);
     return true;
   }
 
@@ -5574,7 +5610,8 @@ bool Cpu::walk_page_tables(std::uint64_t va,
                            TranslationResult* out_result,
                            TranslationFault* fault,
                            bool check_permissions,
-                           bool apply_pan) {
+                           bool apply_pan,
+                           bool check_access_flag) {
   ++perf_counters_.page_walks;
   const std::uint64_t effective_va = normalize_stage1_address(va, access == AccessType::Fetch);
   const bool write = access_is_write(access);
@@ -5766,7 +5803,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
       out_result->memory_type = decode_memory_type(mair_attr);
       out_result->leaf_shareability = static_cast<Shareability>((desc >> 8) & 0x3u);
       out_result->walk_attrs = walk_attrs;
-      if (!af) {
+      if (check_access_flag && !af) {
         if (fault != nullptr) {
           *fault = TranslationFault{.kind = TranslationFault::Kind::AccessFlag,
                                     .level = static_cast<std::uint8_t>(level),
@@ -5845,7 +5882,7 @@ bool Cpu::walk_page_tables(std::uint64_t va,
     out_result->memory_type = decode_memory_type(mair_attr);
     out_result->leaf_shareability = static_cast<Shareability>((desc >> 8) & 0x3u);
     out_result->walk_attrs = walk_attrs;
-    if (!af) {
+    if (check_access_flag && !af) {
       if (fault != nullptr) {
         *fault = TranslationFault{.kind = TranslationFault::Kind::AccessFlag,
                                   .level = static_cast<std::uint8_t>(level),
@@ -6068,21 +6105,22 @@ void Cpu::tlb_insert_entry(std::uint64_t va_page, const TlbEntry& entry) {
 void Cpu::tlb_invalidate_page(std::uint64_t va_page, std::uint16_t asid, bool match_asid) {
   asid &= mmu_asid_mask();
   if (tlb_last_fetch_.valid &&
-      tlb_last_fetch_.va_page == va_page &&
+      tlb_entry_covers_va_page(tlb_last_fetch_, va_page) &&
       (!match_asid || tlb_entry_matches_asid(tlb_last_fetch_, asid))) {
     tlb_last_fetch_.valid = false;
   }
   if (tlb_last_data_.valid &&
-      tlb_last_data_.va_page == va_page &&
+      tlb_entry_covers_va_page(tlb_last_data_, va_page) &&
       (!match_asid || tlb_entry_matches_asid(tlb_last_data_, asid))) {
     tlb_last_data_.valid = false;
   }
-  auto& set = tlb_entries_[tlb_set_index(va_page)];
-  for (TlbEntry& entry : set) {
-    if (entry.valid &&
-        entry.va_page == va_page &&
-        (!match_asid || tlb_entry_matches_asid(entry, asid))) {
-      entry.valid = false;
+  for (auto& set : tlb_entries_) {
+    for (TlbEntry& entry : set) {
+      if (entry.valid &&
+          tlb_entry_covers_va_page(entry, va_page) &&
+          (!match_asid || tlb_entry_matches_asid(entry, asid))) {
+        entry.valid = false;
+      }
     }
   }
 }
@@ -12529,6 +12567,14 @@ bool Cpu::exec_data_processing(std::uint32_t insn) {
       }
       set_reg32(rd, static_cast<std::uint32_t>(value));
     }
+    return true;
+  }
+
+  // FEAT_MTE is absent in the current model. ADDG/SUBG share the generic
+  // ADD/SUB (immediate) top-level opcode space, so without an explicit guard
+  // they execute as ordinary arithmetic instead of remaining UNDEFINED.
+  if ((insn & 0x7FC00000u) == 0x11800000u || (insn & 0x7FC00000u) == 0x51800000u) {
+    enter_sync_exception(pc_ - 4u, 0x00u, 0u, false, 0u);
     return true;
   }
 

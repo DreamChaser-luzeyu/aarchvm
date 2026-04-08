@@ -168,6 +168,7 @@ private:
   [[nodiscard]] std::optional<ScheduledDeviceEvent> next_device_event(std::uint64_t guest_tick) const;
   void rebuild_fast_path();
   void broadcast_event(Cpu& source);
+  void on_external_ram_write(std::uint64_t pa, std::size_t size);
   void on_cpu_memory_write(Cpu& source, std::uint64_t pa, std::size_t size);
   void broadcast_tlbi_vmalle1(Cpu& source);
   void broadcast_tlbi_vae1(Cpu& source, std::uint64_t operand, bool all_asids);

@@ -37,10 +37,14 @@ _start:
     cmp  x2, x0
     b.ne fail1
 
+    // DBGBCR<n>_EL1.BAS[3:0] is RES1 in this AArch64-only model, so direct
+    // reads must observe bits [8:5] set even if software wrote another value.
     LOAD64 x0, 0x5555, 0x6666, 0x7777, 0x8888
     msr  dbgbcr1_el1, x0
     mrs  x2, dbgbcr1_el1
-    cmp  x2, x0
+    movz x3, #0x01e0
+    orr  x3, x0, x3
+    cmp  x2, x3
     b.ne fail2
 
     LOAD64 x0, 0x9999, 0xaaaa, 0xbbbb, 0xcccc

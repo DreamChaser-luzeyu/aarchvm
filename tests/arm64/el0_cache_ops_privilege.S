@@ -12,6 +12,25 @@ _start:
     adr  x11, allow_done
     str  xzr, [x11]
 
+    movz x9, #3
+    movz x20, #0x1000              // L0
+    movz x21, #0x2000              // L1
+    movz x22, #0x3000              // L2
+    movz x23, #0x4000              // L3
+    movz x15, #0x0443              // AttrIdx=0, AF=1, EL0 RW
+
+    orr  x2, x21, x9
+    str  x2, [x20]
+    orr  x2, x22, x9
+    str  x2, [x21]
+    orr  x2, x23, x9
+    str  x2, [x22]
+
+    // Identity-map the low VA page containing code, vectors, and zva_buf.
+    movz x3, #0x0000
+    orr  x2, x3, x15
+    str  x2, [x23]
+
     mrs  x2, sctlr_el1
     movz x3, #1
     lsl  x4, x3, #26               // UCI
@@ -83,6 +102,17 @@ after_at_enabled_undef:
     ldr  x12, [x11]
     tbz  x12, #4, fail5
 
+    movz x20, #0x1000              // L0 base; lower-sync handler clobbers x20-x27
+    msr  ttbr0_el1, x20
+    movz x2, #16
+    msr  tcr_el1, x2
+    movz x2, #0x00ff
+    msr  mair_el1, x2
+    mrs  x2, sctlr_el1
+    orr  x2, x2, #1                // Enable stage-1 translation for the allowed EL0 path.
+    msr  sctlr_el1, x2
+    isb
+
     adr  x3, el0_allowed
     msr  elr_el1, x3
     msr  spsr_el1, xzr
@@ -110,6 +140,9 @@ after_allowed:
     ldr  x17, [x16, #56]
     cbnz x17, fail8
 
+    movz x2, #0
+    msr  sctlr_el1, x2
+    isb
     movz x0, #'C'
     str  x0, [x1]
     movz x0, #'\n'
@@ -145,6 +178,9 @@ fail8:
     b out
 
 out:
+    movz x2, #0
+    msr  sctlr_el1, x2
+    isb
     movz x1, #0x0000
     movk x1, #0x0900, lsl #16
     str  x0, [x1]

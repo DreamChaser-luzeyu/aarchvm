@@ -5,6 +5,33 @@ _start:
     movk x1, #0x0900, lsl #16      // UART
     adr  x20, buf
 
+    movz x9, #3
+    movz x15, #0x0403              // AttrIdx=0, AF=1, EL1 RW, executable
+    movz x21, #0x1000              // L0
+    movz x22, #0x2000              // L1
+    movz x23, #0x3000              // L2
+    movz x24, #0x4000              // L3
+
+    orr  x2, x22, x9
+    str  x2, [x21]
+    orr  x2, x23, x9
+    str  x2, [x22]
+    orr  x2, x24, x9
+    str  x2, [x23]
+
+    movz x3, #0x0000
+    orr  x2, x3, x15
+    str  x2, [x24]
+
+    msr  ttbr0_el1, x21
+    movz x2, #16
+    msr  tcr_el1, x2
+    movz x2, #0x00ff
+    msr  mair_el1, x2
+    movz x2, #1
+    msr  sctlr_el1, x2
+    isb
+
     mrs  x2, dczid_el0
     tbnz x2, #4, fail1
     and  x2, x2, #0xf
@@ -35,6 +62,10 @@ check:
     subs xzr, x6, #8
     b.ne check
 
+    movz x2, #0
+    msr  sctlr_el1, x2
+    isb
+
     movz x0, #'Z'
     str  x0, [x1]
     movz x0, #'\n'
@@ -50,6 +81,9 @@ fail2:
 fail3:
     movz x0, #'3'
 out:
+    movz x2, #0
+    msr  sctlr_el1, x2
+    isb
     str  x0, [x1]
     brk  #0
 

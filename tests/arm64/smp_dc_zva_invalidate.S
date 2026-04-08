@@ -8,6 +8,33 @@ _start:
     add  x23, x21, #72              // stage1
     add  x24, x21, #80              // fail char
 
+    movz x9, #3
+    movz x15, #0x0403               // AttrIdx=0, AF=1
+    movz x16, #0x1000               // L0
+    movz x17, #0x2000               // L1
+    movz x18, #0x3000               // L2
+    movz x19, #0x4000               // L3
+
+    orr  x2, x17, x9
+    str  x2, [x16]
+    orr  x2, x18, x9
+    str  x2, [x17]
+    orr  x2, x19, x9
+    str  x2, [x18]
+
+    movz x3, #0x0000
+    orr  x2, x3, x15
+    str  x2, [x19]
+
+    msr  ttbr0_el1, x16
+    movz x2, #16
+    msr  tcr_el1, x2
+    movz x2, #0x00ff
+    msr  mair_el1, x2
+    movz x2, #1
+    msr  sctlr_el1, x2
+    isb
+
     mrs  x0, mpidr_el1
     and  x0, x0, #0xff
     cbz  x0, core0
@@ -70,6 +97,9 @@ primary_fail_c:
     movz x0, #'C'
 
 print_and_halt:
+    movz x2, #0
+    msr  sctlr_el1, x2
+    isb
     str  x0, [x20]
     movz x0, #'\n'
     str  x0, [x20]

@@ -657,15 +657,7 @@ bool VirtioBlkMmio::read_guest(std::uint64_t addr, void* dst, std::size_t size) 
 }
 
 bool VirtioBlkMmio::write_guest(std::uint64_t addr, const void* src, std::size_t size) {
-  if (size == 0u) {
-    return true;
-  }
-  std::uint8_t* dst = bus_.ram_mut_ptr(addr, size);
-  if (dst == nullptr) {
-    return false;
-  }
-  std::memcpy(dst, src, size);
-  return true;
+  return bus_.write_ram_buffer(addr, src, size);
 }
 
 bool VirtioBlkMmio::read_guest_u16(std::uint64_t addr, std::uint16_t& value) const {

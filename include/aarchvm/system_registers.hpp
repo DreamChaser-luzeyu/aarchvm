@@ -83,7 +83,10 @@ public:
   [[nodiscard]] bool software_step_state() const { return pstate_.ss; }
   void set_software_step_state(bool value) { pstate_.ss = value; }
   [[nodiscard]] std::uint64_t dbgbvr_el1(std::uint32_t index) const { return dbgbvr_el1_[index]; }
-  [[nodiscard]] std::uint64_t dbgbcr_el1(std::uint32_t index) const { return dbgbcr_el1_[index]; }
+  [[nodiscard]] std::uint64_t dbgbcr_el1(std::uint32_t index) const {
+    // This model is AArch64-only, so DBGBCR<n>_EL1.BAS[3:0] is RES1.
+    return (dbgbcr_el1_[index] & ~(0xFull << 5u)) | (0xFull << 5u);
+  }
   [[nodiscard]] std::uint64_t dbgwvr_el1(std::uint32_t index) const { return dbgwvr_el1_[index]; }
   [[nodiscard]] std::uint64_t dbgwcr_el1(std::uint32_t index) const { return dbgwcr_el1_[index]; }
   [[nodiscard]] std::uint64_t tpidr_el0() const { return tpidr_el0_; }

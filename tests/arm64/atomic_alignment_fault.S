@@ -117,6 +117,9 @@ sync_handler:
     ubfx x3, x2, #26, #6
     cmp  x3, #0x25
     b.ne fail_from_handler
+    tbnz x2, #10, fail_from_handler // FnV=0: FAR_EL1 is valid in this model.
+    tbnz x2, #8, fail_from_handler  // CM=0: atomic alignment faults are not cache maintenance/AT.
+    tbnz x2, #7, fail_from_handler  // S1PTW=0 in this model.
     and  x4, x2, #0x3f
     cmp  x4, #0x21
     b.ne fail_from_handler

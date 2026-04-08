@@ -493,7 +493,7 @@ bool SystemRegisters::read(std::uint32_t op0,
     }
     switch (op2) {
     case 4u: value = dbgbvr_el1_[crm]; return true;
-    case 5u: value = dbgbcr_el1_[crm]; return true;
+    case 5u: value = dbgbcr_el1(crm); return true;
     case 6u: value = dbgwvr_el1_[crm]; return true;
     case 7u: value = dbgwcr_el1_[crm]; return true;
     default: break;

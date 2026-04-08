@@ -3,6 +3,8 @@
 #include "aarchvm/bus_fast_path.hpp"
 #include "aarchvm/ram.hpp"
 
+#include <cstring>
+
 namespace aarchvm {
 
 void Bus::map(std::uint64_t base, std::uint64_t size, std::shared_ptr<Device> device) {
@@ -70,6 +72,24 @@ bool Bus::write_ram_fast(std::uint64_t addr, std::uint64_t value, std::size_t si
   }
   ++perf_counters_.write_ops;
   perf_counters_.write_bytes += size;
+  return true;
+}
+
+bool Bus::write_ram_buffer(std::uint64_t addr, const void* src, std::size_t size) const {
+  if (size == 0u) {
+    return true;
+  }
+  if (src == nullptr) {
+    return false;
+  }
+  std::uint8_t* dst = ram_mut_ptr(addr, size);
+  if (dst == nullptr) {
+    return false;
+  }
+  std::memcpy(dst, src, size);
+  if (ram_write_observer_) {
+    ram_write_observer_(addr, size);
+  }
   return true;
 }
 

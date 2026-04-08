@@ -1,3 +1,235 @@
+# 修改日志 2026-04-08 19:19
+
+## 本轮修改
+
+- 继续沿 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 与 fast-path / predecode 一致性主线做白盒审计后，确认并修正了一条真实的 absent-feature decode overlap：
+  - 在当前 `!FEAT_MTE` 模型下，`ADDG/SUBG` 与普通 `ADD/SUB (immediate)` 共享顶层编码空间；
+  - 旧实现里 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 的普通解释路径会把这两条指令当作普通整数加减执行，而不是按架构要求保持同步 `UNDEFINED`；
+  - 即使修正了普通解释路径，如果不同时修 `decode_insn()`，predecode / fast-path 仍会把它们缓存成 `DecodedKind::AddSubImm`，形成 guest 可见的 fast/slow 不一致。
+- 现在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 已在两处都加入 `!FEAT_MTE` 拦截：
+  - `exec_data_processing()` 会在 generic `ADD/SUB (immediate)` 前显式拦截 `ADDG/SUBG`，直接进入 `EC=0` 的同步 `UNDEFINED`；
+  - `decode_insn()` 会在 `DecodedKind::AddSubImm` 之前把这两条编码留给慢路径处理，不再错误缓存成普通加减立即数。
+- 新增正式裸机回归 [tests/arm64/mte_absent_undef.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mte_absent_undef.S)，并接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)：
+  - 覆盖 `ADDG/SUBG/IRG/GMI/STGP/STG/LDG`；
+  - 显式锁定 `ESR_EL1.EC=0`、`IL=1`、`ISS=0`、`FAR_EL1=0`、`ELR_EL1` 指向 faulting instruction，以及目的寄存器 / 内存不被改写。
+- 同时把一组“容易被 generic integer / load-store 解码误吞”的 absent-feature 样例纳入 `-decode slow` 一致性护栏：
+  - `flagm_integer_undef`
+  - `pauth_absent_integer_undef`
+  - `pauth_lr_absent_integer_undef`
+  - `ldraa_ldrab_absent_undef`
+  - `lrcpc_absent_undef`
+  - `ls64_absent_undef`
+- 同步更新了 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)，把这轮 `!FEAT_MTE` decode overlap 收口与新增 fast/slow 护栏补回当前 Armv8-A 程序可见正确性计划。
+
+## 本轮测试
+
+- `timeout 1800s ./tests/arm64/run_all.sh`
+- `python` 定向 fast/slow 抽查：
+  - `flagm_integer_undef.bin`
+  - `pauth_absent_integer_undef.bin`
+  - `ldraa_ldrab_absent_undef.bin`
+  - `lrcpc_absent_undef.bin`
+  - `ls64_absent_undef.bin`
+  - `mops_absent_undef.bin`
+  - `pauth_lr_absent_integer_undef.bin`
+  - `pauth_lr_return_imm_absent_undef.bin`
+  - `pauth_lr_return_absent_undef.bin`
+- `timeout 1800s ./tests/linux/run_functional_suite.sh`
+- `timeout 1800s ./tests/linux/run_functional_suite_smp.sh`
+- `timeout 1800s ./tests/linux/run_block_mount_smoke.sh`
+
+## 当前结论
+
+- 这轮修掉的不是 workload 特判，也不是“只在某个 PC 上绕过去”的补丁，而是一条真实的 decode overlap：只要 `!FEAT_MTE` 下没有在 generic `ADD/SUB (immediate)` 之前把 `ADDG/SUBG` 拦住，guest 就会把本应 `UNDEFINED` 的指令执行成普通整数运算。
+- 这条修复的重点不是只修慢路径，而是把普通解释路径和 predecode / fast-path 一起收紧，避免同一条指令在不同执行模式下出现不同 guest 可见结果。
+- 新增的 slow-path 护栏也说明：在目前这批高风险 absent-feature 家族里，除 `ADDG/SUBG` 外，`FlagM/PAuth/LRCPC/LS64` 相关代表性样例当前 fast/slow 行为保持一致。
+- `tests/arm64/run_all.sh`、Linux UMP functional suite、Linux SMP functional suite 与 block-mount smoke 当前都通过。
+- 截至本轮，我仍不能自信宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”；剩余高优先级缺口仍主要集中在：
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 对所有已实现异常家族的最终逐类对账；
+  - `MMU/TLB/fault` 与 fast-path / predecode 其余细颗粒一致性边界继续压实；
+  - 更系统化的 Linux system-level 长时压力与 `qemu-system-aarch64` 差分验证。
+
+# 修改日志 2026-04-08 16:30
+
+## 本轮修改
+
+- 继续沿 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 与 `MMU/TLB/fault` 两条主线做白盒审计后，确认并修正了一条真实的 syndrome/FAR 污染问题：
+  - 旧实现里 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 的 `translate_address()` 与 `translate_cache_maintenance_address()` 在开始新一轮翻译前会清 `last_translation_fault_` 和 `last_data_abort_iss_override_`，但没有同步清 `last_data_fault_va_`；
+  - 结果是如果前一条 data fault 留下了 `last_data_fault_va_`，后续 `AT` walk abort 或 cache-maintenance translation fault 在进入同步异常时，有机会错误复用旧 `FAR` 来源，而不是本次请求的 VA。
+- 现在这两个翻译入口都在函数开头显式 `reset()` `last_data_fault_va_`，确保每次新的 translation / cache-maintenance fault 都从干净的 fault-state 开始生成 syndrome。
+- 在 [tests/unit_cpu_cache_consistency.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/unit_cpu_cache_consistency.cpp) 中新增两条白盒单测：
+  - `cache_maintenance_translation_fault_uses_requested_far`
+  - `address_translation_walk_abort_uses_requested_far`
+- 这两条测试分别锁定：
+  - stale `last_data_fault_va_` 不得污染新的 cache-maintenance translation fault；
+  - stale `last_data_fault_va_` 不得污染新的 address-translation walk abort。
+- 同步更新了 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)，把这条 `AT/cache-maintenance -> FAR` 边界收口补回 `MMU / 地址翻译 / fault` 当前进展。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j4 --target aarchvm_unit_cpu_cache_consistency`
+- `timeout 1200s cmake --build build -j4 --target aarchvm`
+- `timeout 30s ./build/aarchvm_unit_cpu_cache_consistency`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+- `timeout 5400s ./tests/linux/run_block_mount_smoke.sh`
+
+## 当前结论
+
+- 这轮修掉的不是测试脚本偶发问题，也不是 workload 特判，而是一条内部 fault-state 生命周期缺口：只要旧 `last_data_fault_va_` 能跨路径残留，就会污染后续 `AT` 或 cache-maintenance fault 的 `FAR_EL1`。
+- 新增白盒单测、裸机全量回归，以及 Linux UMP/SMP/块设备 system 回归当前都保持通过，说明这条修复没有把现有系统路径打坏。
+- 截至本轮，我仍不能自信宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”；剩余高优先级缺口仍主要集中在：
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 对所有已实现异常家族的最终逐类对账；
+  - `MMU/TLB/fault` 与 fast-path / predecode 其余细颗粒一致性边界继续压实；
+  - 更系统化的 Linux system-level 长时压力与 `qemu-system-aarch64` 差分验证。
+
+# 修改日志 2026-04-08 15:18
+
+## 本轮修改
+
+- 继续沿 `MMU/TLB/fault` 与 predecode / exclusive 一致性主线审计后，确认并修正了一条真实的 guest 可见缺口：设备或 DMA 路径直接写 guest RAM 时，旧实现会绕过 CPU 的 `notify_external_memory_write()` 链路，导致两类错误结果：
+  - stale predecode page 可能在外设改写代码页后继续命中；
+  - exclusive monitor 可能在外设改写监视地址后没有被清除。
+- 在 [include/aarchvm/bus.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/bus.hpp) 与 [src/bus.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/bus.cpp) 中加入统一的 RAM buffer 写入口与 observer：
+  - `Bus::set_ram_write_observer(...)`
+  - `Bus::write_ram_buffer(...)`
+- 在 [include/aarchvm/soc.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/soc.hpp) 与 [src/soc.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/soc.cpp) 中把这条 observer 接到 `SoC`，外设写 RAM 后现在会向所有 CPU 广播 `notify_external_memory_write(pa, size)`，统一处理 decode 失效与 exclusive monitor 清除。
+- 在 [src/block_mmio.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/block_mmio.cpp) 与 [src/virtio_blk_mmio.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/virtio_blk_mmio.cpp) 中把 block / virtio 的 guest RAM 写入改为统一走 `Bus::write_ram_buffer(...)`，不再各自 `ram_mut_ptr()+memcpy` 绕过这条一致性链路。
+- 在 [tests/unit_cpu_cache_consistency.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/unit_cpu_cache_consistency.cpp) 中新增：
+  - `block_dma_write_notifies_cpu_decode_and_exclusive`
+  - `virtio_dma_write_notifies_cpu_decode_and_exclusive`
+- 同时修正 [CMakeLists.txt](/media/luzeyu/Storage2/FOSS_src/aarchvm/CMakeLists.txt) 中单测目标的链接依赖，把 `src/block_mmio.cpp` 纳入 `aarchvm_unit_cpu_cache_consistency`，避免新单测编译失败。
+- 同步更新了 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)，把“外设写 guest RAM 必须同步失效 predecode / exclusive 状态”这条已收口进展补回到当前 Armv8-A 程序可见正确性计划。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j --target aarchvm_unit_cpu_cache_consistency aarchvm`
+- `timeout 30s ./build/aarchvm_unit_cpu_cache_consistency`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+- `timeout 5400s ./tests/linux/run_block_mount_smoke.sh`
+
+## 当前结论
+
+- 这轮修掉的不是 workload 特判，而是一条结构性一致性缺口：只要外设改写 guest RAM，就必须和 CPU 自己写内存一样，触发 decode cache 失效与 exclusive monitor 清除；否则自修改代码、DMA 覆盖锁变量、以及 SMP 下的监视地址都可能出现错误行为。
+- 新增白盒单测、裸机完整回归、Linux UMP/SMP 功能回归与块设备 smoke 当前都保持通过，说明这条修复没有把系统路径打坏。
+- 截至这一轮，我仍然不能自信宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”；剩余高优先级缺口仍主要集中在：
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 对所有已实现异常家族的最终逐类对账；
+  - `MMU/TLB/fault` 与 fast-path / predecode 其余细颗粒一致性边界继续压实；
+  - 更系统化的 Linux system-level 长时压力与 `qemu-system-aarch64` 差分验证。
+
+# 修改日志 2026-04-08 12:44
+
+## 本轮修改
+
+- 继续沿 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 与 `MMU/TLB/fault` 两条线收口 Armv8-A 程序可见语义，这轮真正落地的 CPU 行为修正集中在 `SCTLR_EL1.M=0` 的 stage-1 disabled direct output。
+- 对照 `AArch64.S1DisabledOutput()` 后，已在 [include/aarchvm/cpu.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/cpu.hpp) 与 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中统一修正 `M=0` 路径：
+  - direct-mapped `PA` 现在统一取 `VA[55:0]`；
+  - 数据访问与 `AT` 的 direct output 现在按 `Device-nGnRnE + Outer Shareable` 报告；
+  - 取指 direct output 现在维持 `Normal`，并按 `SCTLR_EL1.I` 区分 `WT RA no-WA` 与 `NC` 属性；
+  - `maybe_take_data_alignment_fault()` 的 direct-map RAM probe 也同步改为基于 `VA[55:0]` 的物理地址。
+- 新增正式裸机回归 [tests/arm64/mmu_off_at_par_direct_data.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_off_at_par_direct_data.S)，并接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)，把 `M=0` 下 `AT S1E1R/W` 的 `PAR_EL1` direct-output 结果正式锁进回归。
+- 同时补了两条围绕这组语义变化的护栏测试：
+  - [tests/arm64/mmu_off_dc_zva_align_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_off_dc_zva_align_fault.S)：锁定 `M=0` 时 RAM-backed VA 上 `DC ZVA` 仍因 direct output 为 Device memory 而触发 `Alignment fault`；
+  - [tests/arm64/mmu_off_wxn_ignored_fetch.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_off_wxn_ignored_fetch.S)：锁定当前模型下 `M=0` direct fetch 不会被 `WXN` 误伤。
+- 这轮还顺手修正了三条旧回归的错误前提，它们此前都在错误假定“`M=0` 下 `DC ZVA` 可以正常成功”：
+  - [tests/arm64/dc_zva.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/dc_zva.S)
+  - [tests/arm64/el0_cache_ops_privilege.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/el0_cache_ops_privilege.S)
+  - [tests/arm64/smp_dc_zva_invalidate.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/smp_dc_zva_invalidate.S)
+- 现在这些成功路径都改成先建立最小的 `Normal` 映射，再去验证 `DC ZVA` 的零化、EL0 放行行为，以及跨核 exclusive monitor 失效，不再依赖已经被手册否定的旧假设。
+- 同步更新了 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)，把这组 `M=0` direct output / `DC ZVA` / `AT PAR_EL1` 的收口状态补回到当前 `MMU/TLB/fault` 进展里。
+
+## 本轮测试
+
+- `timeout 600s ./tests/arm64/build_tests.sh`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/mmu_off_at_par_direct_data.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -decode slow -bin tests/arm64/out/mmu_off_at_par_direct_data.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/mmu_off_dc_zva_align_fault.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/mmu_off_wxn_ignored_fetch.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/el0_cache_ops_privilege.bin -load 0x0 -entry 0x0 -steps 600000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -smp 2 -bin tests/arm64/out/smp_dc_zva_invalidate.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -decode slow -smp 2 -bin tests/arm64/out/smp_dc_zva_invalidate.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite.sh`
+- `timeout 5400s ./tests/linux/run_functional_suite_smp.sh`
+- `timeout 5400s ./tests/linux/run_qemu_user_diff.sh`
+
+## 当前结论
+
+- 这轮坐实并修掉的一条真实 CPU 语义缺口是：`M=0` 时 direct output 不能继续沿用“普通 RAM 就视作 Normal data”的旧实现，而必须按手册区分“数据=Device、取指=Normal、PA=VA[55:0]”。
+- 这条修复也反过来揭露了几条旧回归的不正确前提；现在这些回归都已改成在架构上成立的环境里验证原本想验证的行为。
+- 新增/改写用例的定向 fast/slow 运行、`arm64` 全量回归、Linux UMP/SMP 功能回归与 `qemu-user` 差分当前都保持通过。
+- 截至这一轮，我仍然不能自信宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”；剩余高优先级缺口仍主要集中在：
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 对所有已实现异常家族的最终逐类对账；
+  - `MMU/TLB/fault` 与 fast-path / predecode 其余细颗粒一致性边界继续压实；
+  - 更系统化的 Linux system-level 长时压力与 `qemu-system-aarch64` 差分验证。
+
+# 修改日志 2026-04-08 04:35
+
+## 本轮修改
+
+- 继续沿 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 与 `MMU/TLB/fault` 两条线做 Armv8-A 程序可见语义收口，这轮落地的是 `TLBI VAE1*` 对 stage-1 block leaf 的一个真实失效范围错误。
+- 在 [include/aarchvm/cpu.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/cpu.hpp) 与 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中补齐了 block-scope TLB 失效辅助逻辑：
+  - 新增按 leaf level 计算 block 覆盖范围的 helper；
+  - `tlb_invalidate_page()` 不再只按“精确 4KB page + 单 set”查找，而是会按 entry 覆盖范围扫描并失效所有命中的 shadow TLB 项；
+  - 这样 `TLBI VAE1/VALE1/VAAE1/VAALE1` 命中 `L1/L2` block 描述符时，不会再只清掉块内单页。
+- 新增正式裸机回归 [tests/arm64/mmu_tlbi_block_vae1_scope.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_tlbi_block_vae1_scope.S)，并接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)。
+- 同步更新了 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)，把这条 `TLBI` block-scope 一致性修复补回当前 `MMU/TLB/fault` 收口状态。
+
+## 本轮测试
+
+- `timeout 600s cmake --build build -j`
+- `timeout 120s ./build/aarchvm -bin tests/arm64/out/mmu_tlbi_block_vae1_scope.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 120s ./build/aarchvm -decode slow -bin tests/arm64/out/mmu_tlbi_block_vae1_scope.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 1800s ./tests/linux/run_functional_suite.sh`
+- `timeout 2400s ./tests/linux/run_functional_suite_smp.sh`
+- `timeout 2400s ./tests/linux/run_block_mount_smoke.sh`
+- `timeout 2400s ./tests/linux/run_qemu_user_diff.sh`
+
+## 当前结论
+
+- 这轮坐实并修掉的真实 bug 是：`TLBI VAE1*` 作用到 stage-1 block 映射时，旧实现只会清掉 operand 命中的那个 4KB shadow TLB 项，块内其它 page 的 stale translation 仍可能继续命中。
+- 修复后，focused fast/slow 用例、裸机完整回归、Linux UMP/SMP 功能回归、块设备挂载 smoke 与 `qemu-user` 差分都保持通过。
+- 这轮继续静态复核了 `enter_sync_exception`、`fault_status_code`、`data_abort_iss`、`set_par_el1_for_fault`、`translate_address`、`translate_cache_maintenance_address`、`walk_page_tables`、`AT/PAR_EL1` 与 `TLBI` 相关路径；除这条 block-scope `TLBI` 失效范围问题外，没有再坐实新的执行语义 bug。
+- 截至这一轮，我仍然不能自信宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”；剩余高优先级缺口仍主要集中在：
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 对所有已实现异常家族的最终逐类对账；
+  - `MMU/TLB/fault` 与 fast-path / predecode 其余细颗粒一致性边界继续压实；
+  - 更系统化的 Linux system-level 长时压力与 `qemu-system-aarch64` 差分验证。
+
+# 修改日志 2026-04-08 02:37
+
+## 本轮修改
+
+- 继续沿 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 与 `MMU/TLB/fault` 两条线做 Armv8-A 程序可见语义收口，这轮没有再改模拟器执行行为，而是补上一条此前缺失、但对当前 cache-maintenance/MMU 语义很关键的正式回归。
+- 新增正式裸机回归 [tests/arm64/mmu_cache_maint_el1_no_cmow_perm.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_cache_maint_el1_no_cmow_perm.S)，并接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)。
+- 这条新回归把当前 `ID_AA64MMFR1_EL1.CMOW=0` 模型下的一个关键边界正式锁进回归：
+  - `EL1` 上 `DC CVAC/CVAU/CIVAC` 与 `IC IVAU` 不能仅因目标页是 `privileged-only + read-only` 就误报 permission fault；
+  - 同时与既有 `mmu_dc_ivac_perm_fault` / `mmu_cache_maint_fault` 一起，继续维持 `DC IVAC` 仍要求写权限的程序可见语义。
+- 这轮也顺手把当前计划文档补齐到最新状态：在 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md) 中记录这条 `!CMOW` 边界已被 fast/slow 裸机完整回归锁定。
+
+## 本轮测试
+
+- `timeout 600s ./tests/arm64/build_tests.sh`
+- `timeout 120s ./build/aarchvm -bin tests/arm64/out/mmu_cache_maint_el1_no_cmow_perm.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 120s ./build/aarchvm -decode slow -bin tests/arm64/out/mmu_cache_maint_el1_no_cmow_perm.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 1800s ./tests/linux/run_functional_suite.sh`
+- `timeout 2400s ./tests/linux/run_functional_suite_smp.sh`
+- `timeout 2400s ./tests/linux/run_block_mount_smoke.sh`
+- `timeout 2400s ./tests/linux/run_qemu_user_diff.sh`
+
+## 当前结论
+
+- 这轮没有发现新的已坐实模拟器行为 bug，但补上了一条之前缺的正式覆盖空洞：当前模型既公开 `CMOW=0`，就需要显式锁定 `EL1` cache-maintenance-by-VA 不会错误沿用 `DC IVAC` 那套写权限要求。
+- 新增回归的单跑、裸机完整回归、Linux UMP/SMP 功能回归、块设备挂载 smoke 与 `qemu-user` 差分都保持通过。
+- 截至这一轮，我仍然不能自信宣称“模拟器已经完整实现 Armv8-A 要求的最小集合”；剩余高优先级缺口仍主要集中在：
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 对所有已实现异常家族的最终逐类对账；
+  - `MMU/TLB/fault` 与 fast-path / predecode 其余细颗粒一致性边界继续压实；
+  - 更系统化的 Linux system-level 长时压力与 `qemu-system-aarch64` 差分验证。
+
 # 修改日志 2026-04-08 00:38
 
 ## 本轮修改
@@ -8390,3 +8622,74 @@
   - 继续逐类对账其余已实现异常来源的 `ESR_EL1/FAR_EL1/PAR_EL1/ISS`；
   - 继续审 `MMU/TLB/fault` 与 fast-path / predecode 的一致性边界；
   - 继续把长期 system 压力与更系统的 `qemu-system-aarch64` 差分补齐。
+
+# 修改日志 2026-04-08 11:35
+
+## 本轮修改
+
+- 继续沿 `MMU/TLB/fault` 与 `ESR_EL1/FAR_EL1/ISS` 交叉边界审计后，修正了 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中一条真实的程序可见缺口：此前普通 load/store 的 misaligned 访问只实现了“翻译前”的 alignment 检查，没有补“翻译成功后由 Device 内存类型决定的 alignment fault”。结果是 `SCTLR_EL1.A=0` 时，对 Device 映射的 misaligned 访问会被错误放行。
+- 现在 `maybe_take_data_alignment_fault()` 在 `A=0` 且访问未对齐时，会额外按当前访问类型做一次“不检查权限/AF 的 stage-1 翻译语义探测”；如果 stage-1 输出内存类型为 Device，就仍然按架构要求生成 `FSC=0x21` 的 `Data Abort`，并继续带出正确的 `WnR/FAR_EL1`。
+- 为了让这条路径不被 `AF` 检查过早截断，同时不影响普通访问路径，已扩展 [include/aarchvm/cpu.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/cpu.hpp) 与 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中 `walk_page_tables()` 的内部控制参数，使其可以在这类“只探测翻译结果”的场景下跳过 access-flag 检查，而不改变正常翻译路径的既有行为。
+- 新增 [tests/arm64/mmu_device_unaligned_fault.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_device_unaligned_fault.S)，并接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)。该回归显式锁定：
+  - `SCTLR_EL1.A=0` 时，misaligned Device load 仍应 fault；
+  - `SCTLR_EL1.A=0` 时，misaligned Device store 仍应 fault；
+  - 两条路径的 `ESR_EL1.WnR`、`FAR_EL1` 与 `ELR_EL1`；
+  - store fault 必须发生在真实写入之前，不能破坏底层内存内容。
+
+## 本轮测试
+
+- `timeout 1200s cmake --build build -j`
+- `timeout 600s ./tests/arm64/build_tests.sh`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/mmu_device_unaligned_fault.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 30s env AARCHVM_BRK_MODE=halt ./build/aarchvm -decode slow -bin tests/arm64/out/mmu_device_unaligned_fault.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 5400s ./tests/arm64/run_all.sh`
+- `timeout 1800s ./tests/linux/run_functional_suite.sh`
+- `timeout 2400s ./tests/linux/run_functional_suite_smp.sh`
+- `timeout 2400s ./tests/linux/run_block_mount_smoke.sh`
+- `timeout 2400s ./tests/linux/run_qemu_user_diff.sh`
+
+## 当前结论
+
+- 这轮又坐实并修掉了一条 `MMU/fault` 细颗粒边界缺口：`A=0` 只关闭“普通 alignment 检查”，并不意味着 Device memory 上的 misaligned access 可以被放行。
+- 经过裸机定向用例、`arm64` 全量、Linux UMP/SMP 功能回归、block smoke 与 `qemu-user` 差分验证，这次修复当前没有引入新的程序可见回归。
+- 即便如此，我仍不会在本轮宣称“Armv8-A 最小集合已经完整收口”。剩余重点仍然是：
+  - 继续逐异常家族最终对账 `ESR_EL1/FAR_EL1/PAR_EL1/ISS`；
+  - 继续压实 `MMU/TLB/fault` 与 fast-path / predecode 的其他一致性边界。
+
+# 修改日志 2026-04-08 17:30
+
+## 本轮修改
+
+- 继续沿 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 与 self-hosted debug 边界做审计后，修正了 [include/aarchvm/system_registers.hpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/include/aarchvm/system_registers.hpp)、[src/system_registers.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/system_registers.cpp)、[src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 中一条真实的 AArch64-only 可见缺口：`DBGBCR<n>_EL1.BAS[3:0]` 现在对 direct read 与 breakpoint 匹配都强制按 `RES1` 处理，不再允许软件把 BAS 低 4 位写成 `0` 后让 A64 breakpoint 悄悄失效。
+- 新增 [tests/arm64/debug_break_bas_res1.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/debug_break_bas_res1.S)，并接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)。该回归显式锁定：
+  - `mrs dbgbcr0_el1` 在 AArch64-only 模型下必须把 `BAS[3:0]` 读成 `0b1111`；
+  - EL1 hardware breakpoint 仍必须在 faulting instruction 执行前命中；
+  - `ESR_EL1.EC=0x31`、`ISS=0x22`、`ELR_EL1=break_insn`、`FAR_EL1=0`。
+- 同步修正了三条受旧假设影响的已有裸机回归：
+  - [tests/arm64/instr_legacy_each.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/instr_legacy_each.S)
+  - [tests/arm64/debug_sysreg_resource_bounds.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/debug_sysreg_resource_bounds.S)
+  - [tests/arm64/debug_software_access_halt_read.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/debug_software_access_halt_read.S)
+- 上述旧用例现在都改为按 `DBGBCR.BAS[3:0]=RES1` 的架构语义校验 direct read，不再依赖“读回值与写入值完全一致”的旧宽松行为。
+
+## 本轮测试
+
+- `timeout 1800s cmake --build build -j`
+- `timeout 1800s tests/arm64/build_tests.sh`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/debug_break_bas_res1.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -decode slow -bin tests/arm64/out/debug_break_bas_res1.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/instr_legacy_each.bin -load 0x0 -entry 0x0 -steps 3000000`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/debug_sysreg_resource_bounds.bin -load 0x0 -entry 0x0 -steps 800000`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -bin tests/arm64/out/debug_software_access_halt_read.bin -load 0x0 -entry 0x0 -steps 400000`
+- `timeout 5400s bash -lc './tests/arm64/run_all.sh > out/arm64-run-all-rerun.log 2>&1'; printf '%s' $?`
+- `timeout 5400s bash -lc './tests/linux/run_functional_suite.sh > out/linux-functional-ump-rerun.log 2>&1'; printf '%s' $?`
+- `timeout 5400s bash -lc './tests/linux/run_functional_suite_smp.sh > out/linux-functional-smp.log 2>&1'; printf '%s' $?`
+- `timeout 5400s bash -lc './tests/linux/run_block_mount_smoke.sh > out/linux-block-mount-rerun.log 2>&1'; printf '%s' $?`
+
+## 当前结论
+
+- 这一轮确认并修掉了一条真实的 self-hosted debug 程序可见缺口：AArch64-only 模型里 `DBGBCR<n>_EL1.BAS[3:0]` 不应作为可关闭的 breakpoint 字节选择字段暴露给 guest。
+- `debug_break_bas_res1` 已把这条行为正式锁进 fast/slow 两条执行路径，受影响的旧用例也已对齐到同一语义。
+- `arm64` 全量、Linux UMP/SMP 功能回归与 block mount smoke 当前都重新通过；其中 Linux UMP 与 block smoke 首次并行运行时踩到了共享 `out/initramfs-usertests-root` 的构建目录，后续顺序重跑已通过，因此这两次初始失败不视为模拟器执行行为回归。
+- 即便如此，我仍不会在本轮宣称“Armv8-A 最小集合已经完整收口”。当前剩余重点仍然是：
+  - 继续逐异常家族最终对账 `ESR_EL1/FAR_EL1/PAR_EL1/ISS`；
+  - 继续压实 `MMU/TLB/fault` 与 fast-path / predecode 的剩余细颗粒一致性边界。

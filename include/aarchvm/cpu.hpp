@@ -233,7 +233,8 @@ private:
                                   TranslationResult* out_result,
                                   TranslationFault* fault,
                                   bool check_permissions = true,
-                                  bool apply_pan = true);
+                                  bool apply_pan = true,
+                                  bool check_access_flag = true);
   [[nodiscard]] bool access_permitted(const TranslationResult& result,
                                       AccessType access,
                                       std::uint8_t level,
@@ -286,6 +287,12 @@ private:
   [[nodiscard]] bool dirty_state_hw_update_enabled() const;
   [[nodiscard]] bool effective_tbi(std::uint64_t va, bool is_instruction) const;
   [[nodiscard]] std::uint64_t normalize_stage1_address(std::uint64_t va, bool is_instruction) const;
+  [[nodiscard]] static constexpr std::uint64_t stage1_disabled_output_pa(std::uint64_t va) {
+    return va & 0x00FFFFFFFFFFFFFFull;
+  }
+  void fill_stage1_disabled_output(std::uint64_t effective_va,
+                                   AccessType access,
+                                   TranslationResult* out_result) const;
   void tlb_flush_all();
   void tlb_flush_va(std::uint64_t operand);
   void tlb_flush_asid(std::uint16_t asid);
@@ -307,6 +314,15 @@ private:
   }
   [[nodiscard]] static constexpr bool tlb_entry_matches_asid(const TlbEntry& entry, std::uint16_t asid) {
     return entry.global_entry || entry.asid == asid;
+  }
+  [[nodiscard]] static constexpr std::uint64_t tlb_level_page_span(std::uint8_t level) {
+    return (level >= 3u) ? 1ull : (1ull << (9u * (3u - level)));
+  }
+  [[nodiscard]] static constexpr std::uint64_t tlb_level_page_base(std::uint64_t va_page, std::uint8_t level) {
+    return va_page & ~(tlb_level_page_span(level) - 1ull);
+  }
+  [[nodiscard]] static constexpr bool tlb_entry_covers_va_page(const TlbEntry& entry, std::uint64_t va_page) {
+    return tlb_level_page_base(entry.va_page, entry.level) == tlb_level_page_base(va_page, entry.level);
   }
   [[nodiscard]] const TlbEntry* tlb_lookup(std::uint64_t va_page, std::uint16_t asid) const {
     const TlbEntry* global_hit = nullptr;

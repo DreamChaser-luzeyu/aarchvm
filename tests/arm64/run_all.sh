@@ -177,6 +177,7 @@ run_expect mmu_ttbr_switch.bin 4000000 2
 run_expect mmu_unmap_data_abort.bin 4000000 3
 test "$(./build/aarchvm -bin tests/arm64/out/mmu_cache_maint_fault.bin -load 0x0 -entry 0x0 -steps 4000000 | tr -d '\r\n')" = 'M'
 run_expect mmu_tlbi_non_target.bin 4000000 4
+run_expect mmu_tlbi_block_vae1_scope.bin 4000000 B
 run_expect mmu_l2_block_vmalle1.bin 4000000 5
 run_expect mmu_at_tlb_observe.bin 4000000 6
 run_expect mmu_at_el0_permissions.bin 4000000 A
@@ -192,6 +193,11 @@ run_expect mmu_tbi1_tagged_ttbr1_exec_tlbi.bin 5000000 AAB
 run_expect mmu_tbi1_tagged_ttbr1_exec_pxn_tlbi.bin 5000000 AAC
 run_expect mmu_perm_ro_write_abort.bin 4000000 8
 run_expect mmu_dbm_hafdbs_absent.bin 4000000 D
+run_expect mmu_device_unaligned_fault.bin 4000000 U
+run_expect mmu_device_unaligned_af_priority.bin 4000000 A
+run_expect mmu_off_dc_zva_align_fault.bin 4000000 D
+run_expect mmu_off_wxn_ignored_fetch.bin 4000000 W
+run_expect mmu_cache_maint_el1_no_cmow_perm.bin 4000000 O
 run_expect mmu_dc_cva_el0_perm_fault.bin 4000000 C
 run_expect mmu_dc_ivac_perm_fault.bin 4000000 I
 run_expect mmu_dc_ivac_pan_ignore.bin 4000000 V
@@ -215,6 +221,7 @@ run_expect mmu_tcr_ips_mair_decode.bin 4000000 Z
 run_expect mmu_af_fault.bin 4000000 0
 run_expect mmu_at_par_formats.bin 4000000 P
 run_expect mmu_at_par_fault_kinds.bin 4000000 G
+run_expect mmu_off_at_par_direct_data.bin 4000000 H
 run_expect mmu_at_walk_ext_abort.bin 4000000 A
 run_expect mmu_at_pan_ignore.bin 400000 N
 run_expect mmu_ext_abort_data.bin 4000000 E
@@ -231,6 +238,7 @@ run_expect gic_sysreg_id_consistency.bin 300000 J
 run_expect gic_sysreg_manual_ack.bin 400000 M
 run_expect debug_sysreg_resource_bounds.bin 800000 K
 run_expect debug_break_watch_basic.bin 1200000 Q
+run_expect debug_break_bas_res1.bin 800000 R
 run_expect debug_cache_maint_watchpoints.bin 1200000 W
 run_expect debug_halted_sysregs_undef.bin 800000 D
 run_expect debug_dcc_minimal.bin 800000 C
@@ -293,6 +301,7 @@ test "$(./build/aarchvm -bin tests/arm64/out/el0_hvc_smc_undef.bin -load 0x0 -en
 test "$(./build/aarchvm -bin tests/arm64/out/el1_hvc_smc_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'J'
 test "$(./build/aarchvm -bin tests/arm64/out/bf16_absent_undef.bin -load 0x0 -entry 0x0 -steps 1000000 | tr -d '\r\n')" = 'F'
 test "$(./build/aarchvm -bin tests/arm64/out/fjcvtzs_absent_undef.bin -load 0x0 -entry 0x0 -steps 600000 | tr -d '\r\n')" = 'J'
+test "$(./build/aarchvm -bin tests/arm64/out/mte_absent_undef.bin -load 0x0 -entry 0x0 -steps 1000000 | tr -d '\r\n')" = 'M'
 test "$(./build/aarchvm -bin tests/arm64/out/rdm_absent_undef.bin -load 0x0 -entry 0x0 -steps 1000000 | tr -d '\r\n')" = 'R'
 test "$(./build/aarchvm -bin tests/arm64/out/fp16_absent_more_undef2.bin -load 0x0 -entry 0x0 -steps 1000000 | tr -d '\r\n')" = 'G'
 test "$(./build/aarchvm -bin tests/arm64/out/fp16_absent_misc_undef.bin -load 0x0 -entry 0x0 -steps 1000000 | tr -d '\r\n')" = 'M'
@@ -594,6 +603,7 @@ run_expect_slow mmu_dc_ivac_pan_ignore.bin 4000000 V
 run_expect_slow mmu_at_tlb_observe.bin 4000000 6
 run_expect_slow mmu_tlbi_vaae1_all_asids.bin 4000000 Y
 run_expect_slow mmu_tlbi_vale1_asid_scope.bin 4000000 N
+run_expect_slow mmu_tlbi_block_vae1_scope.bin 4000000 B
 run_expect_slow mmu_af_fault.bin 4000000 0
 run_expect_slow mmu_tbi0_tagged_addrs.bin 4000000 T
 run_expect_slow mmu_tbi0_tagged_fault_far.bin 4000000 K
@@ -604,6 +614,11 @@ run_expect_slow mmu_tbi1_tagged_ttbr1_exec_tlbi.bin 5000000 AAB
 run_expect_slow mmu_tbi1_tagged_ttbr1_exec_pxn_tlbi.bin 5000000 AAC
 run_expect_slow mmu_perm_ro_write_abort.bin 4000000 8
 run_expect_slow mmu_dbm_hafdbs_absent.bin 4000000 D
+run_expect_slow mmu_device_unaligned_fault.bin 4000000 U
+run_expect_slow mmu_device_unaligned_af_priority.bin 4000000 A
+run_expect_slow mmu_off_dc_zva_align_fault.bin 4000000 D
+run_expect_slow mmu_off_wxn_ignored_fetch.bin 4000000 W
+run_expect_slow mmu_cache_maint_el1_no_cmow_perm.bin 4000000 O
 run_expect_slow mmu_el0_ap_fault.bin 4000000 U
 run_expect_slow mmu_el0_uxn_fetch_abort.bin 4000000 u
 run_expect_slow mmu_el0_wxn_fetch_abort.bin 4000000 w
@@ -612,9 +627,18 @@ run_expect_slow mmu_xn_fetch_abort.bin 4000000 9
 run_expect_slow mmu_wxn_fetch_abort.bin 4000000 W
 run_expect_slow mmu_at_par_formats.bin 4000000 P
 run_expect_slow mmu_at_par_fault_kinds.bin 4000000 G
+run_expect_slow mmu_off_at_par_direct_data.bin 4000000 H
 run_expect_slow mmu_at_walk_ext_abort.bin 4000000 A
 run_expect_slow mmu_ext_abort_data.bin 4000000 E
 run_expect_slow mmu_ext_abort_fetch.bin 4000000 Q
 run_expect_slow mmu_walk_ext_abort_data.bin 4000000 W
 run_expect_slow mmu_walk_ext_abort_fetch.bin 4000000 X
+run_expect_slow debug_break_bas_res1.bin 800000 R
+run_expect_slow flagm_integer_undef.bin 800000 m
+run_expect_slow mte_absent_undef.bin 1000000 M
+run_expect_slow pauth_absent_integer_undef.bin 1200000 U
+run_expect_slow pauth_lr_absent_integer_undef.bin 1200000 L
+run_expect_slow ldraa_ldrab_absent_undef.bin 800000 A
+run_expect_slow lrcpc_absent_undef.bin 1200000 R
+run_expect_slow ls64_absent_undef.bin 1200000 S
 run_expect_slow debug_cache_maint_watchpoints.bin 1200000 W

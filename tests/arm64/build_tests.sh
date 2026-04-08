@@ -166,6 +166,10 @@ build_asm_prog vbar_el1_res0_bits
 build_asm_prog sctlr_endian_fixed_bits
 build_asm_prog sp_alignment_fault
 build_asm_prog data_alignment_fault
+build_asm_prog mmu_device_unaligned_fault
+build_asm_prog mmu_device_unaligned_af_priority
+build_asm_prog mmu_off_dc_zva_align_fault
+build_asm_prog mmu_off_wxn_ignored_fetch
 build_asm_prog atomic_alignment_fault
 build_asm_prog fpsimd_q_alignment_fault
 build_asm_prog fpsimd_q_pair_alignment_fault
@@ -174,6 +178,7 @@ build_asm_prog fpsimd_sp_alignment_fault
 build_asm_prog id_aa64_feature_regs
 build_asm_prog sp_special_sysreg_access
 build_asm_prog debug_break_watch_basic
+build_asm_prog debug_break_bas_res1
 build_asm_prog debug_cache_maint_watchpoints
 build_asm_prog debug_halted_sysregs_undef
 build_asm_prog debug_dcc_minimal
@@ -196,6 +201,7 @@ build_asm_prog el0_hvc_smc_undef
 build_asm_prog el1_hvc_smc_undef
 build_asm_prog bf16_absent_undef
 build_asm_prog fjcvtzs_absent_undef
+build_asm_prog mte_absent_undef
 build_asm_prog rdm_absent_undef
 build_asm_prog brk_exception
 build_asm_prog hlt_undef
@@ -255,9 +261,11 @@ build_asm_prog mmu_ttbr_switch
 build_asm_prog mmu_unmap_data_abort
 build_asm_prog mmu_cache_maint_fault
 build_asm_prog mmu_tlbi_non_target
+build_asm_prog mmu_tlbi_block_vae1_scope
 build_asm_prog mmu_l2_block_vmalle1
 build_asm_prog mmu_at_tlb_observe
 build_asm_prog mmu_at_el0_permissions
+build_asm_prog mmu_off_at_par_direct_data
 build_asm_prog mmu_ttbr_asid_mask
 build_asm_prog ttbr_el1_visible_bits
 build_asm_prog mmu_tbi0_tagged_addrs
@@ -275,6 +283,7 @@ build_asm_prog mmu_ldtr_sttr_pan
 build_asm_prog mmu_el0_ap_fault
 build_asm_prog mmu_perm_ro_write_abort
 build_asm_prog mmu_dbm_hafdbs_absent
+build_asm_prog mmu_cache_maint_el1_no_cmow_perm
 build_asm_prog mmu_dc_cva_el0_perm_fault
 build_asm_prog mmu_dc_ivac_perm_fault
 build_asm_prog mmu_dc_ivac_pan_ignore

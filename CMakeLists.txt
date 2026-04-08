@@ -37,6 +37,7 @@ target_compile_options(aarchvm PRIVATE ${SDL2_CFLAGS_OTHER})
 
 add_executable(aarchvm_unit_cpu_cache_consistency
   tests/unit_cpu_cache_consistency.cpp
+  src/block_mmio.cpp
   src/bus.cpp
   src/perf_mailbox.cpp
   src/ram.cpp

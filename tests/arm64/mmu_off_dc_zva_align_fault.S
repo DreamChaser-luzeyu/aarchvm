@@ -10,8 +10,7 @@ _start:
     adr  x11, handled
     str  xzr, [x11]
 
-    movz x30, #0x0000
-    movk x30, #0x0900, lsl #16     // UART MMIO is Device memory
+    adr  x30, buf                  // RAM-backed VA, but M=0 direct output is Device
 fault_zva:
     dc   zva, x30
     b    fail
@@ -21,7 +20,7 @@ after_fault:
     ldr  x12, [x11]
     cbz  x12, fail
 
-    movz x0, #'A'
+    movz x0, #'D'
     str  x0, [x1]
     movz x0, #'\n'
     str  x0, [x1]
@@ -72,6 +71,10 @@ fail_from_handler:
     eret
 
     .data
+    .balign 64
+buf:
+    .space 64
+
     .balign 8
 handled:
     .quad 0

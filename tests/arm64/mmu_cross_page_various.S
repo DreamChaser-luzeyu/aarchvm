@@ -58,11 +58,13 @@ _start:
     orr  x2, x3, x15
     str  x2, [x25, #8]
 
-    // Enable MMU with 4KB granule, TTBR0 only.
+    // Enable MMU with 4KB granule, TTBR0 only. Attr0 is explicit Normal
+    // memory so this test exercises cross-page RAM behaviour rather than
+    // Device-memory alignment rules.
     msr  ttbr0_el1, x20
     movz x2, #16
     msr  tcr_el1, x2
-    movz x2, #0
+    movz x2, #0x00ff
     msr  mair_el1, x2
     movz x2, #1
     msr  sctlr_el1, x2

@@ -150,13 +150,11 @@ bool BlockMmio::transfer_from_image() {
     return false;
   }
   const std::size_t byte_count = static_cast<std::size_t>(count_) * static_cast<std::size_t>(kBlockSize);
-  std::uint8_t* dst = bus_.ram_mut_ptr(buffer_addr_, byte_count);
-  if (dst == nullptr) {
+  const std::size_t image_off = static_cast<std::size_t>(lba_) * static_cast<std::size_t>(kBlockSize);
+  if (!bus_.write_ram_buffer(buffer_addr_, image_.data() + image_off, byte_count)) {
     status_ = Status::Buffer;
     return false;
   }
-  const std::size_t image_off = static_cast<std::size_t>(lba_) * static_cast<std::size_t>(kBlockSize);
-  std::memcpy(dst, image_.data() + image_off, byte_count);
   return true;
 }
 

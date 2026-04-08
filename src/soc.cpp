@@ -175,6 +175,9 @@ SoC::SoC(std::size_t cpu_count)
   bus_.map(kVirtioBlkBase, kVirtioBlkSize, virtio_blk_mmio_);
   bus_.map(kGicBase, kGicSize, gic_);
   bus_.map(kTimerBase, kTimerSize, timer_);
+  bus_.set_ram_write_observer([this](std::uint64_t pa, std::size_t size) {
+    on_external_ram_write(pa, size);
+  });
 
   gic_->set_cpu_count(cpu_count);
   timer_->set_cpu_count(cpu_count);
@@ -276,6 +279,15 @@ void SoC::on_cpu_memory_write(Cpu& source, std::uint64_t pa, std::size_t size) {
     if (cpu.get() == &source) {
       continue;
     }
+    woke_waiter |= cpu->waiting_for_event();
+    cpu->notify_external_memory_write(pa, size);
+  }
+  runnable_state_dirty_ = runnable_state_dirty_ || woke_waiter;
+}
+
+void SoC::on_external_ram_write(std::uint64_t pa, std::size_t size) {
+  bool woke_waiter = false;
+  for (auto& cpu : cpus_) {
     woke_waiter |= cpu->waiting_for_event();
     cpu->notify_external_memory_write(pa, size);
   }

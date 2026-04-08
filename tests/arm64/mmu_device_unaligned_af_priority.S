@@ -7,9 +7,6 @@ _start:
     adr  x10, vectors
     msr  vbar_el1, x10
 
-    adr  x11, handled
-    str  xzr, [x11]
-
     movz x9, #3
     movz x20, #0x1000              // L0
     movz x21, #0x2000              // L1
@@ -29,7 +26,7 @@ _start:
     orr  x2, x25, x9
     str  x2, [x24]
 
-    movz x15, #0x0443              // low identity map: EL0 RW, AF=1
+    movz x15, #0x0403
 
     movz x3, #0x0000
     orr  x2, x3, x15
@@ -53,46 +50,76 @@ _start:
     orr  x2, x3, x15
     str  x2, [x23, #64]
 
-    // VA 0x40000000 -> PA 0x500000, AF=1, privileged-only.
+    // VA 0x40000000 -> PA 0x500000, Device attr0, AF=0.
     movz x3, #0x0050, lsl #16
-    movz x2, #0x0403              // AP=00, AF=1, valid page descriptor
+    movz x2, #0x0003
     orr  x2, x2, x3
     str  x2, [x25]
+
+    movz x26, #0x0050, lsl #16
+    movz x27, #0x2211
+    movk x27, #0x4433, lsl #16
+    movk x27, #0x6655, lsl #32
+    movk x27, #0x8877, lsl #48
+    str  x27, [x26]
 
     msr  ttbr0_el1, x20
     movz x2, #16
     msr  tcr_el1, x2
     movz x2, #0
     msr  mair_el1, x2
-
-    mrs  x2, sctlr_el1
-    movz x3, #1
-    lsl  x4, x3, #26              // UCI
-    orr  x2, x2, x4
-    orr  x2, x2, x3               // M
+    movz x2, #1                    // A=0, MMU=1
     msr  sctlr_el1, x2
     isb
 
     movz x30, #0x4000, lsl #16
-    adr  x2, el0_fault
-    msr  elr_el1, x2
-    msr  spsr_el1, xzr            // EL0t
-    eret
+    add  x30, x30, #1
 
-el0_fault:
-fault_ic_ivau:
-    ic   ivau, x30
+    adr  x11, expected_wnr
+    str  xzr, [x11]
+    adr  x11, expected_elr
+    adr  x12, fault_ldr
+    str  x12, [x11]
+    adr  x11, resume_elr
+    adr  x12, after_ldr_fault
+    str  x12, [x11]
+    adr  x11, expected_far
+    str  x30, [x11]
+fault_ldr:
+    ldr  x4, [x30]
     b    fail
 
-after_fault:
+after_ldr_fault:
+    adr  x11, expected_wnr
+    movz x12, #1
+    str  x12, [x11]
+    adr  x11, expected_elr
+    adr  x12, fault_str
+    str  x12, [x11]
+    adr  x11, resume_elr
+    adr  x12, after_str_fault
+    str  x12, [x11]
+    adr  x11, expected_far
+    str  x30, [x11]
+
+    movz x5, #0xdead
+    movk x5, #0xbeef, lsl #16
+    movk x5, #0xcafe, lsl #32
+    movk x5, #0x1234, lsl #48
+fault_str:
+    str  x5, [x30]
+    b    fail
+
+after_str_fault:
     movz x2, #0
     msr  sctlr_el1, x2
     isb
-    adr  x11, handled
-    ldr  x12, [x11]
-    cbz  x12, fail
 
-    movz x0, #'I'
+    ldr  x6, [x26]
+    subs xzr, x6, x27
+    b.ne fail
+
+    movz x0, #'A'
     str  x0, [x1]
     movz x0, #'\n'
     str  x0, [x1]
@@ -110,46 +137,53 @@ fail:
 vectors:
     .space 0x200
 sync_spx:
-    b fail
-    .space 0x1fc
-sync_lower:
+    b sync_handler
+
+sync_handler:
     mrs  x2, esr_el1
     ubfx x3, x2, #26, #6
-    cmp  x3, #0x24                // data abort from lower EL
-    b.ne fail_from_handler
-    tbnz x2, #10, fail_from_handler // FnV=0: FAR_EL1 is valid in this model.
-    tbz  x2, #8, fail_from_handler // CM=1
-    tbnz x2, #7, fail_from_handler // S1PTW=0: final access, not stage-2 on stage-1 walk.
-    tbz  x2, #6, fail_from_handler // WnR=1
-    and  x4, x2, #0x3f
-    cmp  x4, #0x0f                // permission fault, level 3
+    cmp  x3, #0x25
     b.ne fail_from_handler
 
-    mrs  x5, far_el1
-    subs xzr, x5, x30
+    ubfx x4, x2, #6, #1
+    adr  x5, expected_wnr
+    ldr  x5, [x5]
+    cmp  x4, x5
     b.ne fail_from_handler
-    mrs  x6, elr_el1
-    adr  x7, fault_ic_ivau
+
+    and  x4, x2, #0x3f
+    cmp  x4, #0x0b
+    b.ne fail_from_handler
+
+    mrs  x6, far_el1
+    adr  x7, expected_far
+    ldr  x7, [x7]
     subs xzr, x6, x7
     b.ne fail_from_handler
 
-    adr  x11, handled
-    movz x12, #1
-    str  x12, [x11]
-    adr  x8, after_fault
-    movz x9, #0x5                 // EL1h
-    msr  spsr_el1, x9
-    msr  elr_el1, x8
+    mrs  x8, elr_el1
+    adr  x9, expected_elr
+    ldr  x9, [x9]
+    subs xzr, x8, x9
+    b.ne fail_from_handler
+
+    adr  x10, resume_elr
+    ldr  x10, [x10]
+    msr  elr_el1, x10
     eret
 
 fail_from_handler:
-    adr  x8, fail
-    movz x9, #0x5
-    msr  spsr_el1, x9
-    msr  elr_el1, x8
+    adr  x10, fail
+    msr  elr_el1, x10
     eret
 
     .data
     .balign 8
-handled:
+expected_wnr:
+    .quad 0
+expected_elr:
+    .quad 0
+resume_elr:
+    .quad 0
+expected_far:
     .quad 0

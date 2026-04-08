@@ -84,6 +84,10 @@ ec_b27_ok:
     b fail_from_handler
 ec_ok:
 
+    // Translation-fault instruction abort keeps the non-IFSC ISS bits clear.
+    and  x3, x2, #0x7c0
+    cbnz x3, fail_from_handler
+
     // FAR_EL1 and ELR_EL1 should point to the faulting PC.
     mrs  x5, far_el1
     subs xzr, x5, x20

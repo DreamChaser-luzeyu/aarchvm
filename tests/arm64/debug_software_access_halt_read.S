@@ -15,8 +15,12 @@ _start:
     movz x0, #0x20, lsl #16         // MDSCR_EL1.TDA
     msr  mdscr_el1, x0
 
+    // Even before unlocking OS Lock, direct reads of DBGBCR<n>_EL1 must still
+    // reflect AArch64-only BAS[3:0]=RES1 semantics.
     mrs  x2, dbgbcr0_el1
-    cbnz x2, hang
+    movz x3, #0x01e0
+    cmp  x2, x3
+    b.ne hang
 
     PUTCH 'T'
     PUTCH 'D'
