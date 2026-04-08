@@ -2,8 +2,6 @@
 
 #include "aarchvm/snapshot_io.hpp"
 
-#include <boost/multiprecision/cpp_int.hpp>
-
 #include <cfenv>
 #include <bit>
 #include <cmath>
@@ -13,12 +11,144 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace aarchvm {
 
 namespace {
 
-using boost::multiprecision::cpp_int;
+class BigUInt {
+ public:
+  BigUInt() = default;
+  explicit BigUInt(std::uint64_t value) {
+    if (value != 0u) {
+      limbs_.push_back(static_cast<std::uint32_t>(value));
+      const std::uint32_t high = static_cast<std::uint32_t>(value >> 32);
+      if (high != 0u) {
+        limbs_.push_back(high);
+      }
+    }
+  }
+
+  bool is_zero() const { return limbs_.empty(); }
+
+  unsigned msb_index() const {
+    const std::uint32_t limb = limbs_.back();
+    return static_cast<unsigned>((limbs_.size() - 1u) * 32u + (31u - std::countl_zero(limb)));
+  }
+
+  void shift_left(unsigned shift) {
+    if (is_zero() || shift == 0u) {
+      return;
+    }
+    const std::size_t limb_shift = shift / 32u;
+    const unsigned bit_shift = shift % 32u;
+    std::vector<std::uint32_t> shifted(limbs_.size() + limb_shift + (bit_shift != 0u ? 1u : 0u), 0u);
+    if (bit_shift == 0u) {
+      for (std::size_t i = 0; i < limbs_.size(); ++i) {
+        shifted[i + limb_shift] = limbs_[i];
+      }
+      limbs_ = std::move(shifted);
+      return;
+    }
+    std::uint32_t carry = 0u;
+    std::size_t out = limb_shift;
+    for (std::uint32_t limb : limbs_) {
+      const std::uint64_t wide = (static_cast<std::uint64_t>(limb) << bit_shift) | carry;
+      shifted[out++] = static_cast<std::uint32_t>(wide);
+      carry = static_cast<std::uint32_t>(wide >> 32);
+    }
+    if (carry != 0u) {
+      shifted[out] = carry;
+    }
+    limbs_ = std::move(shifted);
+    normalize();
+  }
+
+  static int compare(const BigUInt& lhs, const BigUInt& rhs) {
+    if (lhs.limbs_.size() != rhs.limbs_.size()) {
+      return lhs.limbs_.size() < rhs.limbs_.size() ? -1 : 1;
+    }
+    for (std::size_t i = lhs.limbs_.size(); i > 0; --i) {
+      const std::uint64_t lhs_limb = lhs.limbs_[i - 1u];
+      const std::uint64_t rhs_limb = rhs.limbs_[i - 1u];
+      if (lhs_limb != rhs_limb) {
+        return lhs_limb < rhs_limb ? -1 : 1;
+      }
+    }
+    return 0;
+  }
+
+  friend bool operator<(const BigUInt& lhs, const BigUInt& rhs) { return compare(lhs, rhs) < 0; }
+
+  friend BigUInt operator+(const BigUInt& lhs, const BigUInt& rhs) {
+    BigUInt sum;
+    const std::size_t count = lhs.limbs_.size() > rhs.limbs_.size() ? lhs.limbs_.size() : rhs.limbs_.size();
+    sum.limbs_.assign(count + 1u, 0u);
+    std::uint64_t carry = 0u;
+    for (std::size_t i = 0; i < count; ++i) {
+      const std::uint64_t lhs_limb = i < lhs.limbs_.size() ? lhs.limbs_[i] : 0u;
+      const std::uint64_t rhs_limb = i < rhs.limbs_.size() ? rhs.limbs_[i] : 0u;
+      const std::uint64_t wide = lhs_limb + rhs_limb + carry;
+      sum.limbs_[i] = static_cast<std::uint32_t>(wide);
+      carry = wide >> 32;
+    }
+    sum.limbs_[count] = static_cast<std::uint32_t>(carry);
+    sum.normalize();
+    return sum;
+  }
+
+  friend BigUInt operator-(const BigUInt& lhs, const BigUInt& rhs) {
+    BigUInt diff;
+    diff.limbs_.assign(lhs.limbs_.size(), 0u);
+    std::uint64_t borrow = 0u;
+    for (std::size_t i = 0; i < lhs.limbs_.size(); ++i) {
+      const std::uint64_t lhs_limb = lhs.limbs_[i];
+      const std::uint64_t rhs_limb = i < rhs.limbs_.size() ? rhs.limbs_[i] : 0u;
+      const std::uint64_t subtrahend = rhs_limb + borrow;
+      diff.limbs_[i] = static_cast<std::uint32_t>(lhs_limb - subtrahend);
+      borrow = lhs_limb < subtrahend ? 1u : 0u;
+    }
+    diff.normalize();
+    return diff;
+  }
+
+  friend BigUInt operator*(const BigUInt& lhs, const BigUInt& rhs) {
+    if (lhs.is_zero() || rhs.is_zero()) {
+      return BigUInt{};
+    }
+    BigUInt product;
+    product.limbs_.assign(lhs.limbs_.size() + rhs.limbs_.size(), 0u);
+    for (std::size_t i = 0; i < lhs.limbs_.size(); ++i) {
+      std::uint64_t carry = 0u;
+      for (std::size_t j = 0; j < rhs.limbs_.size(); ++j) {
+        const std::uint64_t wide = static_cast<std::uint64_t>(lhs.limbs_[i]) *
+                                       static_cast<std::uint64_t>(rhs.limbs_[j]) +
+                                   product.limbs_[i + j] + carry;
+        product.limbs_[i + j] = static_cast<std::uint32_t>(wide);
+        carry = wide >> 32;
+      }
+      std::size_t k = i + rhs.limbs_.size();
+      while (carry != 0u) {
+        const std::uint64_t wide = static_cast<std::uint64_t>(product.limbs_[k]) + carry;
+        product.limbs_[k] = static_cast<std::uint32_t>(wide);
+        carry = wide >> 32;
+        ++k;
+      }
+    }
+    product.normalize();
+    return product;
+  }
+
+ private:
+  void normalize() {
+    while (!limbs_.empty() && limbs_.back() == 0u) {
+      limbs_.pop_back();
+    }
+  }
+
+  std::vector<std::uint32_t> limbs_;
+};
 
 bool env_flag_enabled(const char* name) {
   const char* value = std::getenv(name);
@@ -770,7 +900,7 @@ struct ExactFpValue {
   bool finite = true;
   bool zero = true;
   bool negative = false;
-  cpp_int magnitude = 0;
+  BigUInt magnitude{};
   int exp2 = 0;
 };
 
@@ -1269,60 +1399,61 @@ ExactFpValue<UIntT> fp_exact_value_bits(UIntT bits) {
       return value;
     }
     value.zero = false;
-    value.magnitude = static_cast<std::uint64_t>(frac);
+    value.magnitude = BigUInt{static_cast<std::uint64_t>(frac)};
     value.exp2 = 1 - fp_exp_bias<UIntT>() - static_cast<int>(frac_bits);
     return value;
   }
   value.zero = false;
-  cpp_int implicit = 1;
-  for (std::uint32_t i = 0; i < frac_bits; ++i) {
-    implicit *= 2;
-  }
-  value.magnitude = implicit + static_cast<std::uint64_t>(frac);
+  BigUInt implicit{1u};
+  implicit.shift_left(frac_bits);
+  value.magnitude = implicit + BigUInt{static_cast<std::uint64_t>(frac)};
   value.exp2 = static_cast<int>(exp) - fp_exp_bias<UIntT>() - static_cast<int>(frac_bits);
   return value;
 }
 
-cpp_int exact_scale_pow2(cpp_int value, unsigned shift) {
-  for (unsigned i = 0; i < shift; ++i) {
-    value *= 2;
-  }
+BigUInt exact_scale_pow2(BigUInt value, unsigned shift) {
+  value.shift_left(shift);
   return value;
 }
 
-bool exact_abs_lt_power_of_two(const cpp_int& magnitude, int exp2, int threshold_exp2) {
-  if (magnitude == 0) {
+bool exact_abs_lt_power_of_two(const BigUInt& magnitude, int exp2, int threshold_exp2) {
+  if (magnitude.is_zero()) {
     return false;
   }
   if (exp2 >= threshold_exp2) {
     return false;
   }
-  return boost::multiprecision::msb(magnitude) < static_cast<unsigned>(threshold_exp2 - exp2);
+  return magnitude.msb_index() < static_cast<unsigned>(threshold_exp2 - exp2);
 }
 
 template <typename UIntT>
 bool fp_exact_tiny_sum_terms(bool lhs_negative,
-                             const cpp_int& lhs_magnitude,
+                             const BigUInt& lhs_magnitude,
                              int lhs_exp2,
                              bool rhs_negative,
-                             const cpp_int& rhs_magnitude,
+                             const BigUInt& rhs_magnitude,
                              int rhs_exp2,
                              bool* negative_result) {
   const int common_exp2 = std::min(lhs_exp2, rhs_exp2);
-  cpp_int lhs = exact_scale_pow2(lhs_magnitude, static_cast<unsigned>(lhs_exp2 - common_exp2));
-  cpp_int rhs = exact_scale_pow2(rhs_magnitude, static_cast<unsigned>(rhs_exp2 - common_exp2));
-  if (lhs_negative) {
-    lhs = -lhs;
+  const BigUInt lhs = exact_scale_pow2(lhs_magnitude, static_cast<unsigned>(lhs_exp2 - common_exp2));
+  const BigUInt rhs = exact_scale_pow2(rhs_magnitude, static_cast<unsigned>(rhs_exp2 - common_exp2));
+  BigUInt magnitude{};
+  if (lhs_negative == rhs_negative) {
+    magnitude = lhs + rhs;
+    *negative_result = lhs_negative;
+  } else {
+    const int cmp = BigUInt::compare(lhs, rhs);
+    if (cmp == 0) {
+      return false;
+    }
+    if (cmp > 0) {
+      magnitude = lhs - rhs;
+      *negative_result = lhs_negative;
+    } else {
+      magnitude = rhs - lhs;
+      *negative_result = rhs_negative;
+    }
   }
-  if (rhs_negative) {
-    rhs = -rhs;
-  }
-  const cpp_int sum = lhs + rhs;
-  if (sum == 0) {
-    return false;
-  }
-  *negative_result = sum < 0;
-  const cpp_int magnitude = (sum < 0) ? -sum : sum;
   return exact_abs_lt_power_of_two(magnitude, common_exp2, 1 - fp_exp_bias<UIntT>());
 }
 
