@@ -1,0 +1,1 @@
+aarchvm_add_plugin(aarchvm_reset_observable reset_observable.c)

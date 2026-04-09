@@ -16,3 +16,4 @@ include(AarchvmPlugin)
 
 add_subdirectory(examples/register_bank)
 add_subdirectory(tests/abi_smoke)
+add_subdirectory(tests/runtime_reset)

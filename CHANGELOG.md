@@ -1,3 +1,44 @@
+# 修改日志 2026-04-09 19:23
+
+## 本轮修改
+
+- 在“准备合并”的复审里继续补齐了一处真实缺口，而不是只停留在测试层：
+  - [src/soc.cpp](/home/luzeyu/my_projs/aarchvm/src/soc.cpp) 现在会在 `attach_external_plugin()` 成功握手后先对插件做一次显式 `reset()`，并在后续 `SoC::reset()` 时继续向所有外部插件广播 reset，避免此前“协议里有 RESET，但真实启动/SoC reset 路径没有调用”的语义脱节；
+  - 新增 `runtime_reset` 测试插件 [sdk/tests/runtime_reset/reset_observable.c](/home/luzeyu/my_projs/aarchvm/sdk/tests/runtime_reset/reset_observable.c) 与裸机回归 [tests/arm64/plugin_reset_on_boot.S](/home/luzeyu/my_projs/aarchvm/tests/arm64/plugin_reset_on_boot.S)，锁定“插件 `create()` 中的非零哨兵状态必须在 guest 运行前被 reset 清空”；
+  - [sdk/README.md](/home/luzeyu/my_projs/aarchvm/sdk/README.md)、[doc/README.en.md](/home/luzeyu/my_projs/aarchvm/doc/README.en.md)、[doc/README.zh.md](/home/luzeyu/my_projs/aarchvm/doc/README.zh.md) 已把 `guest_now`/`get_guest_now()` 的当前现实写实：现阶段 MMIO-only 宿主仍把 MMIO 回调中的 `guest_now` 固定为 `0`，时间相关字段仍只是 ABI 占位。
+
+## 本轮测试
+
+- `"/home/luzeyu/my_projs/docker-workspace/skills/workspace-escalation/scripts/workspace.sh" -- timeout 1800s ./tests/arm64/run_all.sh`
+
+## 当前结论
+
+- 这轮复审里坐实并修掉的 merge blocker 是：插件 reset 协议此前没有真正接入启动与 SoC reset 主路径。
+- 修复后，包含新增 `plugin_reset_on_boot` 在内的完整 `tests/arm64/run_all.sh` 已再次在 `workspace` 容器内通过。
+- 到这一步，当前分支在插件 MMIO MVP 与现有 arm64 回归层面已经达到可合并状态；剩余未做项仍集中在 TODO 已明确保留到后续阶段的 IRQ、DMA、deadline/guest-time 与更完整的故障/超时策略。
+
+# 修改日志 2026-04-09 18:32
+
+## 本轮修改
+
+- 继续补强“隔离式 `.so` 外设扩展机制”的测试闭环：
+  - 宿主侧 [tests/unit_external_plugin.cpp](/home/luzeyu/my_projs/aarchvm/tests/unit_external_plugin.cpp) 新增 `register_bank_proxy_subword_mmio`、`register_bank_proxy_reset` 与 `register_bank_invalid_mmio_faults_proxy`，覆盖 `ExternalDeviceProxy` 的子字宽 MMIO 拼接、`reset()` 语义，以及插件返回 fault 后的代理故障状态与日志路径；
+  - 新增裸机插件 MMIO 用例 [tests/arm64/plugin_mmio_register_bank_subword.S](/home/luzeyu/my_projs/aarchvm/tests/arm64/plugin_mmio_register_bank_subword.S)，并接入 [tests/arm64/build_tests.sh](/home/luzeyu/my_projs/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/home/luzeyu/my_projs/aarchvm/tests/arm64/run_all.sh)，覆盖 `str/strh/strb` 组合写、对齐半字读取、独立 scratch1 写入以及 hole 区读零语义；
+  - [tests/arm64/run_all.sh](/home/luzeyu/my_projs/aarchvm/tests/arm64/run_all.sh) 现在会优先使用 `python3`，并把 `plugin_mmio_register_bank_subword.bin` 纳入正式回归，避免脚本在仅提供 `python3` 的环境里直接失败。
+- 同步更新了 [TODO.md](/home/luzeyu/my_projs/aarchvm/TODO.md)，把插件测试当前进展从“缺工具链未实跑”收正为“已在 `workspace` 容器内完成实际回归验证”。
+
+## 本轮测试
+
+- `"/home/luzeyu/my_projs/docker-workspace/skills/workspace-escalation/scripts/workspace.sh" -- timeout 1800s ./tests/arm64/run_all.sh`
+
+## 当前结论
+
+- 当前至少已有两个真正经由 guest MMIO 访问插件的裸机测试程序：
+  - [tests/arm64/plugin_mmio_register_bank.S](/home/luzeyu/my_projs/aarchvm/tests/arm64/plugin_mmio_register_bank.S)
+  - [tests/arm64/plugin_mmio_register_bank_subword.S](/home/luzeyu/my_projs/aarchvm/tests/arm64/plugin_mmio_register_bank_subword.S)
+- `tests/arm64/run_all.sh` 已在 `workspace` 容器内完整通过，说明这轮插件测试增强没有破坏现有 arm64 全量回归。
+- `TODO.md` 里的“阶段 1 测试”仍不应整体勾选：协议头编码/解码、超时、断连、子进程无响应等健壮性场景还没有补齐。
+
 # 修改日志 2026-04-09 10:57
 
 ## 本轮修改

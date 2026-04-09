@@ -488,6 +488,13 @@ bool SoC::attach_external_plugin(const ExternalPluginConfig& config, std::string
   if (!proxy) {
     return false;
   }
+
+  std::string reset_error;
+  if (!proxy->reset(guest_time_ticks(), &reset_error)) {
+    error = reset_error.empty() ? "plugin reset failed" : ("plugin reset failed: " + reset_error);
+    return false;
+  }
+
   bus_.map(config.mmio_base, config.mmio_size, proxy);
   external_devices_.push_back(std::move(proxy));
   invalidate_device_schedule();
@@ -529,6 +536,14 @@ void SoC::reset(std::uint64_t entry_pc) {
   guest_time_fp_ = 0;
   timer_->set_cycles_per_step(timer_tick_scale_);
   timer_->set_clock_mode(arch_timer_mode_, guest_time_ticks());
+  for (auto& proxy : external_devices_) {
+    std::string error;
+    if (!proxy->reset(guest_time_ticks(), &error)) {
+      std::cerr << "PLUGIN-FAULT reset failed for instance " << proxy->config().instance_name
+                << ": " << (error.empty() ? "plugin reset failed" : error) << '\n';
+      request_stop();
+    }
+  }
   perf_mailbox_->reset_state();
   reset_perf_measurement_state();
   stop_on_uart_window_.clear();

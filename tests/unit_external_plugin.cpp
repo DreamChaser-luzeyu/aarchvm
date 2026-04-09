@@ -17,6 +17,8 @@ constexpr std::uint64_t kPluginSize = 0x1000ull;
 constexpr std::uint32_t kExpectedId = 0x504C5547u;       // "PLUG"
 constexpr std::uint32_t kExpectedVersion = 0x00010000u;  // 1.0
 constexpr std::uint64_t kScratchValue = 0x1122334455667788ull;
+constexpr std::uint64_t kSubwordScratch0 = 0x8877665544332211ull;
+constexpr std::uint64_t kScratch1Value = 0x00000000A1A2BEEFull;
 
 std::filesystem::path sdk_build_dir() {
   return std::filesystem::path(AARCHVM_SDK_BUILD_DIR);
@@ -105,6 +107,118 @@ bool test_register_bank_proxy_mmio_roundtrip() {
   return faults.empty();
 }
 
+bool test_register_bank_proxy_subword_mmio() {
+  const std::filesystem::path plugin_path =
+      sdk_artifact("examples/register_bank/aarchvm_register_bank.so");
+  if (!ensure_artifact_exists(plugin_path)) {
+    return false;
+  }
+
+  std::vector<std::string> faults;
+  std::string error;
+  auto proxy = ExternalDeviceProxy::spawn(
+      make_config(plugin_path),
+      [&faults](const std::string& message) { faults.push_back(message); },
+      error);
+  if (!proxy) {
+    std::cerr << error << '\n';
+    return false;
+  }
+
+  if (proxy->read(0x8, 8u) != 0u || proxy->read(0x10, 8u) != 0u) {
+    return false;
+  }
+
+  proxy->write(0x8, 0x44332211u, 4u);
+  proxy->write(0xCu, 0x6655u, 2u);
+  proxy->write(0xEu, 0x77u, 1u);
+  proxy->write(0xFu, 0x88u, 1u);
+  if (proxy->read(0x8, 8u) != kSubwordScratch0) {
+    return false;
+  }
+  if (proxy->read(0x9, 2u) != 0x3322u) {
+    return false;
+  }
+
+  proxy->write(0x10u, kScratch1Value, 4u);
+  if (proxy->read(0x10u, 8u) != kScratch1Value) {
+    return false;
+  }
+  if (proxy->read(0x18u, 8u) != 0u) {
+    return false;
+  }
+
+  return faults.empty();
+}
+
+bool test_register_bank_proxy_reset() {
+  const std::filesystem::path plugin_path =
+      sdk_artifact("examples/register_bank/aarchvm_register_bank.so");
+  if (!ensure_artifact_exists(plugin_path)) {
+    return false;
+  }
+
+  std::vector<std::string> faults;
+  std::string error;
+  auto proxy = ExternalDeviceProxy::spawn(
+      make_config(plugin_path),
+      [&faults](const std::string& message) { faults.push_back(message); },
+      error);
+  if (!proxy) {
+    std::cerr << error << '\n';
+    return false;
+  }
+
+  proxy->write(0x8, kScratchValue, 8u);
+  proxy->write(0x10u, kScratch1Value, 4u);
+
+  std::string reset_error;
+  if (!proxy->reset(1234u, &reset_error)) {
+    std::cerr << reset_error << '\n';
+    return false;
+  }
+  if (!reset_error.empty()) {
+    std::cerr << "unexpected reset error: " << reset_error << '\n';
+    return false;
+  }
+  if (proxy->read(0x8, 8u) != 0u || proxy->read(0x10u, 8u) != 0u) {
+    return false;
+  }
+
+  return faults.empty();
+}
+
+bool test_register_bank_invalid_mmio_faults_proxy() {
+  const std::filesystem::path plugin_path =
+      sdk_artifact("examples/register_bank/aarchvm_register_bank.so");
+  if (!ensure_artifact_exists(plugin_path)) {
+    return false;
+  }
+
+  std::vector<std::string> faults;
+  std::string error;
+  auto proxy = ExternalDeviceProxy::spawn(
+      make_config(plugin_path),
+      [&faults](const std::string& message) { faults.push_back(message); },
+      error);
+  if (!proxy) {
+    std::cerr << error << '\n';
+    return false;
+  }
+
+  proxy->write(0x0u, 0x1u, 1u);
+  if (!proxy->faulted()) {
+    return false;
+  }
+  if (faults.size() != 1u || faults[0].find("status 3") == std::string::npos) {
+    return false;
+  }
+  if (proxy->read(0x0u, 4u) != 0u) {
+    return false;
+  }
+  return true;
+}
+
 bool test_missing_entry_rejected() {
   const std::filesystem::path plugin_path = sdk_artifact("tests/abi_smoke/aarchvm_no_entry.so");
   if (!ensure_artifact_exists(plugin_path)) {
@@ -164,6 +278,9 @@ int main() {
       {"parse_external_plugin_spec", test_parse_external_plugin_spec},
       {"parse_external_plugin_irq_rejected", test_parse_external_plugin_irq_rejected},
       {"register_bank_proxy_mmio_roundtrip", test_register_bank_proxy_mmio_roundtrip},
+      {"register_bank_proxy_subword_mmio", test_register_bank_proxy_subword_mmio},
+      {"register_bank_proxy_reset", test_register_bank_proxy_reset},
+      {"register_bank_invalid_mmio_faults_proxy", test_register_bank_invalid_mmio_faults_proxy},
       {"missing_entry_rejected", test_missing_entry_rejected},
       {"bad_abi_rejected", test_bad_abi_rejected},
       {"bad_manifest_rejected", test_bad_manifest_rejected},

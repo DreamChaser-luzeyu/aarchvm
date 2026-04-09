@@ -6,6 +6,15 @@ cd "$ROOT_DIR"
 
 set -x
 
+if command -v python3 >/dev/null 2>&1; then
+  PYTHON_BIN="python3"
+elif command -v python >/dev/null 2>&1; then
+  PYTHON_BIN="python"
+else
+  echo "run_all.sh requires python3 or python in PATH" >&2
+  exit 1
+fi
+
 cmake --build build -j
 cmake -S sdk -B build/sdk
 cmake --build build/sdk -j
@@ -16,7 +25,7 @@ cmake --build build/sdk -j
 tests/arm64/build_tests.sh
 
 verify_build_run_parity() {
-  python - "$ROOT_DIR/tests/arm64/build_tests.sh" "$ROOT_DIR/tests/arm64/run_all.sh" <<'PY'
+  "$PYTHON_BIN" - "$ROOT_DIR/tests/arm64/build_tests.sh" "$ROOT_DIR/tests/arm64/run_all.sh" <<'PY'
 import pathlib
 import re
 import sys
@@ -182,11 +191,23 @@ run_expect_failure_contains() {
 
 PLUGIN_SO="$ROOT_DIR/build/sdk/examples/register_bank/aarchvm_register_bank.so"
 PLUGIN_SPEC="$PLUGIN_SO,mmio=0x09050000,size=0x1000,name=arm64-smoke"
+PLUGIN_RESET_SO="$ROOT_DIR/build/sdk/tests/runtime_reset/aarchvm_reset_observable.so"
+PLUGIN_RESET_SPEC="$PLUGIN_RESET_SO,mmio=0x09060000,size=0x1000,name=reset-smoke"
 
 capture_cmd plugin_stdout plugin_stderr ./build/aarchvm -plugin "$PLUGIN_SPEC" -bin "tests/arm64/out/plugin_mmio_register_bank.bin" -load 0x0 -entry 0x0 -steps 400000
 test "$CAPTURE_STATUS" -eq 0
 check_simulator_stderr "$plugin_stderr"
 test "$(printf '%s' "$plugin_stdout" | tr -d '\r\n')" = "P"
+
+capture_cmd plugin_subword_stdout plugin_subword_stderr ./build/aarchvm -plugin "$PLUGIN_SPEC" -bin "tests/arm64/out/plugin_mmio_register_bank_subword.bin" -load 0x0 -entry 0x0 -steps 400000
+test "$CAPTURE_STATUS" -eq 0
+check_simulator_stderr "$plugin_subword_stderr"
+test "$(printf '%s' "$plugin_subword_stdout" | tr -d '\r\n')" = "S"
+
+capture_cmd plugin_reset_stdout plugin_reset_stderr ./build/aarchvm -plugin "$PLUGIN_RESET_SPEC" -bin "tests/arm64/out/plugin_reset_on_boot.bin" -load 0x0 -entry 0x0 -steps 400000
+test "$CAPTURE_STATUS" -eq 0
+check_simulator_stderr "$plugin_reset_stderr"
+test "$(printf '%s' "$plugin_reset_stdout" | tr -d '\r\n')" = "Z"
 
 SNAP_TEST_PATH="$(mktemp)"
 rm -f "$SNAP_TEST_PATH"

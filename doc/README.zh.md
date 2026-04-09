@@ -351,6 +351,81 @@ mkdir -p out/initramfs-full-root/{dev,proc,sys,tmp,run,root,mnt,etc}
 - 只要启用了任意外部插件，`-snapshot-load` 与 `-snapshot-save` 都会直接失败。
 - 仓库内示例插件在 SDK 构建后生成于 `build/sdk/examples/register_bank/aarchvm_register_bank.so`；更多说明见 `sdk/README.md`。
 
+#### 外设插件快速使用
+
+先分别构建主程序和 SDK：
+
+```bash
+cmake -S . -B build
+cmake --build build -j
+cmake -S sdk -B build/sdk
+cmake --build build/sdk -j
+```
+
+如果你只是想快速确认“插件能被加载进子进程并挂到 bus 上”，可以先用一条 `BRK` 指令做最小装载 smoke：
+
+```bash
+printf '\x00\x00\x20\xd4' > /tmp/aarchvm_plugin_brk.bin
+
+./build/aarchvm \
+  -plugin build/sdk/examples/register_bank/aarchvm_register_bank.so,mmio=0x09050000,size=0x1000,name=demo \
+  -bin /tmp/aarchvm_plugin_brk.bin \
+  -load 0x0 \
+  -entry 0x0 \
+  -steps 1
+```
+
+如果你要跑仓库内真正访问插件寄存器的 MMIO smoke，则需要先构建裸机测试；这一步依赖 AArch64 GNU 工具链：
+
+```bash
+./tests/arm64/build_tests.sh
+
+./build/aarchvm \
+  -plugin build/sdk/examples/register_bank/aarchvm_register_bank.so,mmio=0x09050000,size=0x1000,name=demo \
+  -bin tests/arm64/out/plugin_mmio_register_bank.bin \
+  -load 0x0 \
+  -entry 0x0 \
+  -steps 400000
+```
+
+`-plugin` 参数规则：
+- `<path>` 是插件 `.so` 的路径。
+- `mmio=` 和 `size=` 是必填项。
+- `size=` 必须与插件 manifest 声明的 MMIO 窗口大小一致，否则握手阶段会直接拒绝加载。
+- `name=` 可选；若省略，默认取 `.so` 文件名去掉扩展名后的结果。
+- `arg=` 可选；它会原样传给插件的 `opaque_arg`。如果 `arg` 里本身包含逗号，请把它放在整个 spec 的最后，因为当前解析器会把剩余字符串整体视为 `arg`。
+- 可以重复传入多个 `-plugin`；每个实例都会对应一个独立子进程。
+- 插件 MMIO 地址窗口不能与已有 bus 映射重叠。
+
+当前 MVP 限制：
+- 还不支持 `irq=` 路由
+- 宿主侧还没有 DMA API 实现
+- 还没有 deadline 调度与稳定的 guest-time 回调语义
+- 还不支持 snapshot
+- 插件 MMIO 当前始终走 bus 慢路径，不会进入硬编码 `BusFastPath`
+
+#### 外设 SDK 最小用法
+
+当前推荐的仓库内开发流程是：
+1. 新建目录，例如 `sdk/examples/my_device/`。
+2. 在其中放一个 `CMakeLists.txt`，内容先从 `aarchvm_add_plugin(aarchvm_my_device my_device.c)` 起步。
+3. 把该目录加入 `sdk/CMakeLists.txt`。
+4. 按 `sdk/include/aarchvm-plugin-sdk/plugin_api.h` 实现插件。
+5. 重新执行 `cmake -S sdk -B build/sdk && cmake --build build/sdk -j`。
+
+当前插件最少需要做到：
+- 导出 `aarchvm_plugin_get_api_v1()`
+- 声明且只声明一个 MMIO 窗口
+- 实现 `create`、`destroy`、`reset`、`mmio_read`、`mmio_write`
+- 保持 ABI major 与当前宿主一致，即 `AARCHVM_PLUGIN_ABI_MAJOR`
+
+当前宿主回调状态：
+- `log` 已可用
+- `dma_read`、`dma_write`、`irq_set`、`irq_pulse`、`set_deadline` 目前只是为后续阶段预留的 ABI 入口，当前宿主会返回 `AARCHVM_PLUGIN_STATUS_UNSUPPORTED`
+- ABI 里已经有 `guest_now`，但当前 MMIO-only 宿主路径仍会以 `guest_now == 0` 调用 MMIO 回调，`get_guest_now()` 当前也只返回 `0`
+
+更完整的最小骨架、目录布局和示例代码见 `sdk/README.md` 与 `sdk/examples/register_bank/`。
+
 行为控制环境变量：
 - `AARCHVM_BRK_MODE=trap|halt`：控制 A64 `BRK` 的处理方式。默认值是 `trap`，即按架构要求产生 Breakpoint Instruction exception。`halt` 保留历史上的裸机测试停机语义，使 `BRK` 立即终止模拟器；`tests/arm64/run_all.sh` 会导出这个模式，以兼容现有裸机回归。
 - `AARCHVM_STOP_ON_UART=<text>`：`-stop-on-uart` 的环境变量形式。

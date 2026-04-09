@@ -1609,8 +1609,10 @@
 - [x] 已完成 `sdk/` 独立 CMake 边界与最小 SDK：公共 ABI 头、`AarchvmPlugin.cmake`、`register_bank` 示例插件、ABI smoke 坏插件样例均已落地。
 - [x] 已完成 MMIO-only MVP 主链路：`-plugin` 配置解析、`socketpair(AF_UNIX, SOCK_SEQPACKET)+fork()+dlopen()+dlsym()` 子进程装载、HELLO/RESET/MMIO/SHUTDOWN 基础协议，以及父进程 `ExternalDeviceProxy` MMIO 代理已接入主项目。
 - [x] 已把“启用插件即拒绝 `-snapshot-load/-snapshot-save`”做成显式错误路径，避免留下半套 snapshot 语义。
+- [x] 已补宿主侧插件单测覆盖 `subword MMIO`、`reset` 与非法 MMIO fault：`aarchvm_unit_external_plugin` 现在会验证 `ExternalDeviceProxy` 的字节/半字/字写入拼接、`reset()` 清零，以及插件返回 fault 后的代理故障状态与日志路径。
+- [x] 已把外设 `RESET` 真正接入启动与 `SoC::reset()` 路径：宿主在 attach 后会先做一次显式 reset，后续 `SoC::reset()` 也会向所有外部插件广播 reset；新增 `runtime_reset` 测试插件与 `plugin_reset_on_boot` 裸机回归锁定这一点。
 - [ ] IRQ、DMA、deadline/guest-time 同步当前仍只保留 ABI/设计占位，宿主回调统一返回 `unsupported`，`irq=` 配置也会显式拒绝。
-- [ ] 裸机 `plugin_mmio_register_bank` 集成 smoke 已接入 `tests/arm64` 脚本，但在缺少 AArch64 GNU 工具链的环境中仍无法实际跑通该回归。
+- [x] 裸机 `plugin_mmio_register_bank` 与 `plugin_mmio_register_bank_subword` 已接入 `tests/arm64` 脚本，并已在 `workspace` 容器内随 `tests/arm64/run_all.sh` 实际通过完整回归，覆盖 64-bit roundtrip、subword 读写拼接、独立 scratch 寄存器与 hole 区读零语义。
 
 ### 0. 设计约束
 

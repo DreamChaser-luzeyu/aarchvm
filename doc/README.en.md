@@ -351,6 +351,81 @@ External plugin MVP notes:
 - `-snapshot-load` and `-snapshot-save` are rejected whenever any external plugin is active.
 - The in-tree example plugin lives at `build/sdk/examples/register_bank/aarchvm_register_bank.so` after an SDK build. Additional SDK usage notes are in `sdk/README.md`.
 
+#### External Plugin Quick Start
+
+Build the emulator and SDK first:
+
+```bash
+cmake -S . -B build
+cmake --build build -j
+cmake -S sdk -B build/sdk
+cmake --build build/sdk -j
+```
+
+Minimal attach smoke, using a one-instruction `BRK` binary:
+
+```bash
+printf '\x00\x00\x20\xd4' > /tmp/aarchvm_plugin_brk.bin
+
+./build/aarchvm \
+  -plugin build/sdk/examples/register_bank/aarchvm_register_bank.so,mmio=0x09050000,size=0x1000,name=demo \
+  -bin /tmp/aarchvm_plugin_brk.bin \
+  -load 0x0 \
+  -entry 0x0 \
+  -steps 1
+```
+
+If you want the in-tree MMIO smoke that actually reads and writes the plugin registers, build the bare-metal tests first. This requires the AArch64 GNU toolchain:
+
+```bash
+./tests/arm64/build_tests.sh
+
+./build/aarchvm \
+  -plugin build/sdk/examples/register_bank/aarchvm_register_bank.so,mmio=0x09050000,size=0x1000,name=demo \
+  -bin tests/arm64/out/plugin_mmio_register_bank.bin \
+  -load 0x0 \
+  -entry 0x0 \
+  -steps 400000
+```
+
+Plugin spec details:
+- `<path>` is the plugin `.so` path.
+- `mmio=` and `size=` are required.
+- `size=` must match the MMIO window declared by the plugin manifest, or the host rejects the plugin during handshake.
+- `name=` is optional; if omitted, the host derives it from the `.so` filename.
+- `arg=` is optional opaque text passed to the plugin config. If it contains commas, place it last in the spec because the current parser treats the rest of the string as `arg`.
+- You may pass `-plugin` multiple times; each instance gets its own child process.
+- The MMIO window must not overlap any existing device mapping.
+
+Current MVP limitations:
+- no `irq=` routing yet
+- no DMA API implementation in the host yet
+- no plugin deadline scheduling or guest-time callback contract yet
+- no snapshot interoperability
+- external plugin MMIO always uses the slow bus path, not the hard-coded `BusFastPath`
+
+#### External Plugin SDK Usage
+
+The current recommended in-tree workflow is:
+1. Create a directory such as `sdk/examples/my_device/`.
+2. Add a `CMakeLists.txt` with `aarchvm_add_plugin(aarchvm_my_device my_device.c)`.
+3. Add that directory to `sdk/CMakeLists.txt`.
+4. Implement the plugin against `sdk/include/aarchvm-plugin-sdk/plugin_api.h`.
+5. Rebuild with `cmake -S sdk -B build/sdk && cmake --build build/sdk -j`.
+
+Your plugin must currently:
+- export `aarchvm_plugin_get_api_v1()`
+- declare exactly one MMIO window
+- implement `create`, `destroy`, `reset`, `mmio_read`, and `mmio_write`
+- keep its ABI at `AARCHVM_PLUGIN_ABI_MAJOR`
+
+Current host callback status:
+- `log` is usable
+- `dma_read`, `dma_write`, `irq_set`, `irq_pulse`, and `set_deadline` are ABI placeholders for later stages and currently return `AARCHVM_PLUGIN_STATUS_UNSUPPORTED`
+- the ABI carries `guest_now`, but the current MMIO-only host path still invokes MMIO callbacks with `guest_now == 0`, and `get_guest_now()` also currently returns `0`
+
+For the concrete minimal skeleton and example source layout, see `sdk/README.md` and `sdk/examples/register_bank/`.
+
 Behavior-control environment variables:
 - `AARCHVM_BRK_MODE=trap|halt`: control how the emulator handles A64 `BRK`. The default is `trap`, which follows the architected Breakpoint Instruction exception model. `halt` keeps the historical bare-metal test behavior where `BRK` immediately stops the emulator; `tests/arm64/run_all.sh` exports this mode for legacy stop semantics.
 - `AARCHVM_STOP_ON_UART=<text>`: environment-variable form of `-stop-on-uart`.

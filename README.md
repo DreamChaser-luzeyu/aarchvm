@@ -28,6 +28,7 @@ It currently boots U-Boot, hands off to Linux, reaches interactive BusyBox shell
 ## Documentation
 - English: [doc/README.en.md](doc/README.en.md)
 - 中文: [doc/README.zh.md](doc/README.zh.md)
+- Plugin SDK: [sdk/README.md](sdk/README.md)
 
 ## Status
 The project is still intentionally small and incomplete architecturally. The guarantee is the behavior covered by the in-tree bare-metal regression suite plus the current Linux / BusyBox bring-up and user-space test flows, not a full implementation of every mandatory Armv8-A feature.
