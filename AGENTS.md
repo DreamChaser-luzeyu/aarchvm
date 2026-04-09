@@ -12,6 +12,30 @@
 - `agent_work/`目录不被git管理，是专门为AI Agent预留的临时工作目录，你可以把你所需要的临时文件放在这里
 - uboot、linux、busybox源码都不被git管理
 
+## Linux用户态测试
+在用户态测试新外设/功能时，如无特殊需求（如明确指出要跑debian/systemd，明确要测块设备等情况），应以下面脚本作为参考：
+```bash
+INITRD=out/initramfs-usertests.cpio.gz && \
+INITRD_SIZE_HEX=$(printf '0x%x' "$(stat -c '%s' "$INITRD")") && \
+{ sleep 3; printf '\n\n\n'; sleep 1; \
+  printf 'setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 rdinit=/init initramfs_async=0\n'; \
+  printf 'booti 0x40400000 0x46000000:%s 0x47f00000\n' "$INITRD_SIZE_HEX"; \
+  cat; } | \
+env AARCHVM_BUS_FASTPATH=1 AARCHVM_TIMER_SCALE=1 \
+timeout 240s ./build/aarchvm \
+  -bin images/ump-busybox/u-boot.bin \
+  -load 0x0 \
+  -entry 0x0 \
+  -sp 0x47fff000 \
+  -dtb images/ump-busybox/aarchvm-linux-min.dtb \
+  -dtb-addr 0x47f00000 \
+  -segment images/ump-busybox/Image@0x40400000 \
+  -segment images/ump-busybox/initramfs-usertests.cpio.gz@0x46000000 \
+  -steps 3000000000 \
+  -fb-sdl off
+```
+
+
 ## 性能优化工作流
 - 当我要求你优化性能时，请首先以修改前的代码作为baseline，运行一次完整的性能测试
 - 如果修改方案较为明确，就按照方案进行优化、修改源码；如果你认为方案尚需进一步讨论，请不要修改源码，并且停下来询问我，与我讨论
