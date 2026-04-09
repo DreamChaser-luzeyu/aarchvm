@@ -80,6 +80,7 @@ The following paths are currently implemented and exercised by in-tree regressio
 - Host-backed PL031 RTC recognized by Linux through `rtc-pl031`, with `/sys/class/rtc/rtc0` enumeration and read/set smoke coverage in the Linux functional suites.
 - Standard Linux `virtio-mmio + virtio-blk` raw disk path, validated through `/dev/vda` enumeration plus a read-only Debian ext4 mount smoke.
 - Full-machine snapshot save / restore.
+- Opt-in isolated external device plugin MVP for standalone `.so` plugins loaded in per-plugin child processes. The current validated scope is synchronous MMIO only; IRQ, DMA, deadline scheduling, and snapshot interoperability are intentionally out of scope for this first stage.
 - In-tree bare-metal regression, Linux functional regression, and Linux algorithm/perf regression suites.
 - Linux SMP smoke bring-up through PSCI secondary boot to BusyBox shell, with user space observing 2 CPUs in `/proc/cpuinfo`.
 
@@ -105,6 +106,7 @@ The current repository includes and uses the following device / platform pieces:
 - SDL window backend for presenting framebuffer contents
 - PL050 KMI keyboard controller
 - standard `virtio,mmio` transport with a `virtio-blk` device behind `-drive`
+- optional isolated external MMIO plugin proxy loaded from a standalone `.so`
 - full-machine snapshot support
 
 The Linux-facing DTs already contain the relevant nodes in:
@@ -336,10 +338,18 @@ Common options:
 - `-snapshot-save <file>`: save a full-machine snapshot at the end of the run
 - `-snapshot-load <file>`: resume from a snapshot
 - `-drive <image.bin>`: attach a raw image to the standard `virtio-mmio + virtio-blk` device
+- `-plugin <path>,mmio=<addr>,size=<bytes>[,name=<instance>][,arg=<opaque>]`: load an isolated external device plugin `.so` through a per-plugin child process
 - `-stop-on-uart <text>`: stop immediately when UART output matches a string
 - `-decode <fast|slow>`: switch decode execution path, default is the fast path
 - `-fb-sdl <on|off>`: explicitly enable or disable the SDL framebuffer window
 - `-arch-timer-mode <step|host>`: choose the architectural timer source. `step` keeps the deterministic guest-step counter used by regression/perf flows; `host` makes `CNTVCT/CNTPCT` follow the host monotonic clock for interactive Linux timing
+
+External plugin MVP notes:
+- Build the SDK separately with `cmake -S sdk -B build/sdk` and `cmake --build build/sdk -j`.
+- Each `-plugin` instance is loaded through `fork() + dlopen()` in its own child process; the parent process only keeps a proxy device on the guest bus.
+- The current MVP only supports one MMIO window and synchronous MMIO read/write. `irq=` routing is reserved for a later stage and is rejected for now.
+- `-snapshot-load` and `-snapshot-save` are rejected whenever any external plugin is active.
+- The in-tree example plugin lives at `build/sdk/examples/register_bank/aarchvm_register_bank.so` after an SDK build. Additional SDK usage notes are in `sdk/README.md`.
 
 Behavior-control environment variables:
 - `AARCHVM_BRK_MODE=trap|halt`: control how the emulator handles A64 `BRK`. The default is `trap`, which follows the architected Breakpoint Instruction exception model. `halt` keeps the historical bare-metal test behavior where `BRK` immediately stops the emulator; `tests/arm64/run_all.sh` exports this mode for legacy stop semantics.

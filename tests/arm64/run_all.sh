@@ -7,8 +7,11 @@ cd "$ROOT_DIR"
 set -x
 
 cmake --build build -j
+cmake -S sdk -B build/sdk
+cmake --build build/sdk -j
 
 ./build/aarchvm_unit_cpu_cache_consistency
+./build/aarchvm_unit_external_plugin
 
 tests/arm64/build_tests.sh
 
@@ -166,6 +169,30 @@ run_expect_halt_output() {
   printf '%s' "$out" | grep -q "$expected"
   printf '%s' "$out" | grep -q 'CPU-HALT'
 }
+
+run_expect_failure_contains() {
+  local expected="$1"
+  shift
+  local stdout=""
+  local stderr=""
+  capture_cmd stdout stderr "$@"
+  test "$CAPTURE_STATUS" -ne 0
+  printf '%s\n%s' "$stdout" "$stderr" | grep -q "$expected"
+}
+
+PLUGIN_SO="$ROOT_DIR/build/sdk/examples/register_bank/aarchvm_register_bank.so"
+PLUGIN_SPEC="$PLUGIN_SO,mmio=0x09050000,size=0x1000,name=arm64-smoke"
+
+capture_cmd plugin_stdout plugin_stderr ./build/aarchvm -plugin "$PLUGIN_SPEC" -bin "tests/arm64/out/plugin_mmio_register_bank.bin" -load 0x0 -entry 0x0 -steps 400000
+test "$CAPTURE_STATUS" -eq 0
+check_simulator_stderr "$plugin_stderr"
+test "$(printf '%s' "$plugin_stdout" | tr -d '\r\n')" = "P"
+
+SNAP_TEST_PATH="$(mktemp)"
+rm -f "$SNAP_TEST_PATH"
+run_expect_failure_contains "do not currently support" ./build/aarchvm -plugin "$PLUGIN_SPEC" -bin "tests/arm64/out/plugin_mmio_register_bank.bin" -load 0x0 -entry 0x0 -steps 1 -snapshot-save "$SNAP_TEST_PATH"
+run_expect_failure_contains "do not currently support" ./build/aarchvm -plugin "$PLUGIN_SPEC" -snapshot-load "$SNAP_TEST_PATH"
+run_expect_failure_contains "overlaps an existing bus mapping" ./build/aarchvm -plugin "$PLUGIN_SO,mmio=0x09000000,size=0x1000" -bin "tests/arm64/out/plugin_mmio_register_bank.bin" -load 0x0 -entry 0x0 -steps 1
 
 run_expect instr_legacy_each.bin 3000000 E
 run_expect mmu_tlb_cache.bin 5000000 Q

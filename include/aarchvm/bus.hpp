@@ -26,6 +26,7 @@ public:
   };
 
   void map(std::uint64_t base, std::uint64_t size, std::shared_ptr<Device> device);
+  [[nodiscard]] bool is_range_free(std::uint64_t base, std::uint64_t size) const;
   void set_fast_path(std::shared_ptr<BusFastPath> fast_path);
   void set_ram_write_observer(std::function<void(std::uint64_t, std::size_t)> observer) {
     ram_write_observer_ = std::move(observer);

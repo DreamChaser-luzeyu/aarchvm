@@ -265,6 +265,7 @@ build_asm_prog mmu_tlbi_block_vae1_scope
 build_asm_prog mmu_l2_block_vmalle1
 build_asm_prog mmu_at_tlb_observe
 build_asm_prog mmu_at_el0_permissions
+build_asm_prog plugin_mmio_register_bank
 build_asm_prog mmu_off_at_par_direct_data
 build_asm_prog mmu_ttbr_asid_mask
 build_asm_prog ttbr_el1_visible_bits

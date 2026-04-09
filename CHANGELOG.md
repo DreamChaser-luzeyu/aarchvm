@@ -1,3 +1,41 @@
+# 修改日志 2026-04-09 10:57
+
+## 本轮修改
+
+- 按 `TODO.md` 落地了“隔离式 `.so` 外设扩展机制”的第一阶段 MMIO-only MVP：
+  - 新增独立的仓库内 SDK 工程 [sdk/CMakeLists.txt](/home/luzeyu/my_projs/aarchvm/sdk/CMakeLists.txt)、公共 ABI 头 [sdk/include/aarchvm-plugin-sdk/plugin_api.h](/home/luzeyu/my_projs/aarchvm/sdk/include/aarchvm-plugin-sdk/plugin_api.h) 与 CMake helper [sdk/cmake/AarchvmPlugin.cmake](/home/luzeyu/my_projs/aarchvm/sdk/cmake/AarchvmPlugin.cmake)；
+  - 新增最小示例插件 [sdk/examples/register_bank/register_bank.c](/home/luzeyu/my_projs/aarchvm/sdk/examples/register_bank/register_bank.c) 和 ABI 烟测坏插件集合 [sdk/tests/abi_smoke/CMakeLists.txt](/home/luzeyu/my_projs/aarchvm/sdk/tests/abi_smoke/CMakeLists.txt)；
+  - 宿主侧新增 [src/plugin_config.cpp](/home/luzeyu/my_projs/aarchvm/src/plugin_config.cpp)、[src/plugin_protocol.cpp](/home/luzeyu/my_projs/aarchvm/src/plugin_protocol.cpp)、[src/plugin_child_runtime.cpp](/home/luzeyu/my_projs/aarchvm/src/plugin_child_runtime.cpp)、[src/external_device_proxy.cpp](/home/luzeyu/my_projs/aarchvm/src/external_device_proxy.cpp)，实现 `-plugin` 配置解析、`socketpair(AF_UNIX, SOCK_SEQPACKET)` IPC、`fork()+dlopen()+dlsym()` 子进程装载、HELLO/MMIO/RESET/SHUTDOWN 协议和父进程 MMIO 代理。
+- 把该机制接入主项目：
+  - [src/main.cpp](/home/luzeyu/my_projs/aarchvm/src/main.cpp) 新增 `-plugin <path>,mmio=...,size=...[,...]` 命令行入口，并在启用插件时显式拒绝 `-snapshot-load/-snapshot-save`；
+  - [src/soc.cpp](/home/luzeyu/my_projs/aarchvm/src/soc.cpp) / [include/aarchvm/soc.hpp](/home/luzeyu/my_projs/aarchvm/include/aarchvm/soc.hpp) 新增 `SoC::attach_external_plugin(...)` 与插件持有逻辑；
+  - [src/bus.cpp](/home/luzeyu/my_projs/aarchvm/src/bus.cpp) / [include/aarchvm/bus.hpp](/home/luzeyu/my_projs/aarchvm/include/aarchvm/bus.hpp) 新增地址窗口冲突检查，避免插件 MMIO 覆盖已有设备映射。
+- 新增测试与文档：
+  - 新增主机侧单测 [tests/unit_external_plugin.cpp](/home/luzeyu/my_projs/aarchvm/tests/unit_external_plugin.cpp)，覆盖 `-plugin` 配置解析、正常 MMIO roundtrip、缺失导出符号、ABI major 不匹配、非法 manifest 和 MMIO size 不匹配；
+  - 新增裸机插件 MMIO smoke [tests/arm64/plugin_mmio_register_bank.S](/home/luzeyu/my_projs/aarchvm/tests/arm64/plugin_mmio_register_bank.S)，并接入 [tests/arm64/build_tests.sh](/home/luzeyu/my_projs/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/home/luzeyu/my_projs/aarchvm/tests/arm64/run_all.sh)；
+  - 更新 [TODO.md](/home/luzeyu/my_projs/aarchvm/TODO.md)、[README.md](/home/luzeyu/my_projs/aarchvm/README.md)、[doc/README.en.md](/home/luzeyu/my_projs/aarchvm/doc/README.en.md)、[doc/README.zh.md](/home/luzeyu/my_projs/aarchvm/doc/README.zh.md)，并新增 [sdk/README.md](/home/luzeyu/my_projs/aarchvm/sdk/README.md) 说明当前 MVP 的构建方式、协议形态和功能边界。
+
+## 本轮测试
+
+- `cmake --build build -j4`
+- `cmake -S sdk -B build/sdk`
+- `cmake --build build/sdk -j4`
+- `timeout 30s ./build/aarchvm_unit_cpu_cache_consistency`
+- `timeout 30s ./build/aarchvm_unit_external_plugin`
+- `timeout 30s ./build/aarchvm -plugin build/sdk/examples/register_bank/aarchvm_register_bank.so,mmio=0x09050000,size=0x1000,name=smoke -bin /tmp/aarchvm_plugin_brk.bin -load 0x0 -entry 0x0 -steps 1`
+- `timeout 30s ./build/aarchvm -plugin build/sdk/examples/register_bank/aarchvm_register_bank.so,mmio=0x09050000,size=0x1000,name=smoke -bin /tmp/aarchvm_plugin_brk.bin -load 0x0 -entry 0x0 -steps 1 -snapshot-save /tmp/aarchvm_plugin_test.snap`
+- `timeout 30s ./build/aarchvm -plugin build/sdk/examples/register_bank/aarchvm_register_bank.so,mmio=0x09050000,size=0x1000,name=smoke -snapshot-load /tmp/aarchvm_plugin_test.snap`
+- `timeout 30s ./build/aarchvm -plugin build/sdk/examples/register_bank/aarchvm_register_bank.so,mmio=0x09000000,size=0x1000,name=smoke -bin /tmp/aarchvm_plugin_brk.bin -load 0x0 -entry 0x0 -steps 1`
+- `timeout 30s ./tests/arm64/build_tests.sh`（当前环境失败：`aarch64-linux-gnu-as: command not found`）
+
+## 当前结论
+
+- 当前已经落地的是“隔离式外设插件”的第一阶段 MMIO-only MVP，而不是完整的外部设备框架：
+  - 已支持独立 SDK 构建、独立 `.so` 插件、子进程隔离装载和同步 MMIO 代理；
+  - 仍未支持 IRQ、DMA、deadline/guest-time 同步与 snapshot。
+- 启用插件时显式拒绝 snapshot 是有意为之，不是临时绕过：这一步是为了避免用户误以为插件状态也能被整机快照正确保存/恢复。
+- 当前环境如果缺少 `aarch64-linux-gnu-as/ld/objcopy/objdump`，则新增的 `tests/arm64/plugin_mmio_register_bank.S` 无法在此工作区真正构建/执行；这属于测试环境缺交叉工具链，不是插件宿主链路本身的编译错误。
+
 # 修改日志 2026-04-08 19:19
 
 ## 本轮修改

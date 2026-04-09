@@ -6,6 +6,7 @@
 #include <limits>
 #include <utility>
 
+#include "aarchvm/external_device_proxy.hpp"
 #include "aarchvm/snapshot_io.hpp"
 #include "aarchvm/soc.hpp"
 
@@ -468,6 +469,28 @@ bool SoC::load_binary(std::uint64_t addr, const std::vector<std::uint8_t>& bytes
 
 bool SoC::load_block_image(const std::vector<std::uint8_t>& bytes) {
   virtio_blk_mmio_->set_image(bytes);
+  return true;
+}
+
+bool SoC::attach_external_plugin(const ExternalPluginConfig& config, std::string& error) {
+  if (!bus_.is_range_free(config.mmio_base, config.mmio_size)) {
+    error = "plugin MMIO window overlaps an existing bus mapping";
+    return false;
+  }
+
+  auto proxy = ExternalDeviceProxy::spawn(
+      config,
+      [this](const std::string& message) {
+        std::cerr << "PLUGIN-FAULT " << message << '\n';
+        request_stop();
+      },
+      error);
+  if (!proxy) {
+    return false;
+  }
+  bus_.map(config.mmio_base, config.mmio_size, proxy);
+  external_devices_.push_back(std::move(proxy));
+  invalidate_device_schedule();
   return true;
 }
 
@@ -1347,6 +1370,10 @@ std::uint64_t SoC::timer_cntp_tval() const {
 }
 
 bool SoC::save_snapshot(const std::string& path) const {
+  if (!external_devices_.empty()) {
+    std::cerr << "Snapshot save is not supported while external plugins are attached\n";
+    return false;
+  }
   const_cast<GenericTimer&>(*timer_).sync_to_steps(guest_time_ticks());
   if (stop_requested_) {
     for (auto& cpu : const_cast<SoC*>(this)->cpus_) {
@@ -1416,6 +1443,10 @@ bool SoC::save_snapshot(const std::string& path) const {
 }
 
 bool SoC::load_snapshot(const std::string& path) {
+  if (!external_devices_.empty()) {
+    std::cerr << "Snapshot load is not supported while external plugins are attached\n";
+    return false;
+  }
   std::ifstream in(path, std::ios::binary);
   if (!in) {
     return false;

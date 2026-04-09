@@ -80,6 +80,7 @@ cmake --build build -j
 - 宿主一致的 PL031 RTC，Linux 侧可由 `rtc-pl031` 识别，且 Linux 功能回归已覆盖 `/sys/class/rtc/rtc0` 枚举与读写冒烟。
 - 标准 Linux `virtio-mmio + virtio-blk` 原始磁盘路径，已通过 `/dev/vda` 枚举与只读 Debian ext4 挂载冒烟验证。
 - 整机 snapshot 保存 / 恢复。
+- 可选的隔离式外设插件 MVP：外设以独立 `.so` 构建，并由每实例独立子进程加载。当前已验证范围仅限同步 MMIO；IRQ、DMA、deadline 调度以及与 snapshot 的互操作暂不在第一阶段范围内。
 - 仓库内裸机回归、Linux 功能回归、Linux 算法/性能回归。
 - Linux SMP 冒烟路径：通过 PSCI 启动次级核，进入 BusyBox shell，用户态 `/proc/cpuinfo` 可见 2 个 CPU。
 
@@ -105,6 +106,7 @@ cmake --build build -j
 - SDL 窗口后端，用于把 framebuffer 内容显示到宿主机窗口
 - PL050 KMI 键盘控制器
 - 标准 `virtio,mmio` 传输层和其后的 `virtio-blk` 设备，可通过 `-drive` 挂载原始镜像
+- 可选的、从独立 `.so` 装载的隔离式外部 MMIO 插件代理
 - 整机 snapshot
 
 与 Linux GUI 路径相关的设备树节点已经在以下文件中提供：
@@ -336,10 +338,18 @@ mkdir -p out/initramfs-full-root/{dev,proc,sys,tmp,run,root,mnt,etc}
 - `-snapshot-save <file>`：运行结束保存整机快照
 - `-snapshot-load <file>`：从整机快照恢复
 - `-drive <image.bin>`：把原始镜像挂到标准 `virtio-mmio + virtio-blk` 设备上
+- `-plugin <path>,mmio=<addr>,size=<bytes>[,name=<instance>][,arg=<opaque>]`：以独立子进程装载一个隔离式外设插件 `.so`
 - `-stop-on-uart <text>`：UART 输出命中特定字符串时立即停止
 - `-decode <fast|slow>`：切换解码执行路径，默认使用快路径
 - `-fb-sdl <on|off>`：显式打开或关闭 SDL framebuffer 窗口
 - `-arch-timer-mode <step|host>`：选择架构定时器时间源。`step` 保持当前用于回归/性能测试的确定性 guest-step 计时；`host` 让 `CNTVCT/CNTPCT` 跟随宿主机 monotonic 时钟，更适合交互式 Linux 使用
+
+外设插件 MVP 说明：
+- SDK 需单独构建：`cmake -S sdk -B build/sdk`，随后执行 `cmake --build build/sdk -j`。
+- 每个 `-plugin` 实例都会通过 `fork() + dlopen()` 放到独立子进程中执行；父进程只在 guest bus 上保留一个代理设备。
+- 当前 MVP 只支持一个 MMIO 窗口和同步 MMIO 读写。`irq=` 路由保留给后续阶段，当前会显式拒绝。
+- 只要启用了任意外部插件，`-snapshot-load` 与 `-snapshot-save` 都会直接失败。
+- 仓库内示例插件在 SDK 构建后生成于 `build/sdk/examples/register_bank/aarchvm_register_bank.so`；更多说明见 `sdk/README.md`。
 
 行为控制环境变量：
 - `AARCHVM_BRK_MODE=trap|halt`：控制 A64 `BRK` 的处理方式。默认值是 `trap`，即按架构要求产生 Breakpoint Instruction exception。`halt` 保留历史上的裸机测试停机语义，使 `BRK` 立即终止模拟器；`tests/arm64/run_all.sh` 会导出这个模式，以兼容现有裸机回归。

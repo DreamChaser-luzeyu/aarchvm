@@ -1606,7 +1606,11 @@
 - 第一阶段优先保证正确性、可扩展性与隔离性；性能优化留给后续阶段，不为了早期性能破坏 API 稳定性。
 
 当前进展：
-- [x] 已按 `sdk/` 独立 CMake + `fork()+dlopen()` 子进程插件模型补充设计与测试拆分；当前仍未开始实现外设扩展机制本身。
+- [x] 已完成 `sdk/` 独立 CMake 边界与最小 SDK：公共 ABI 头、`AarchvmPlugin.cmake`、`register_bank` 示例插件、ABI smoke 坏插件样例均已落地。
+- [x] 已完成 MMIO-only MVP 主链路：`-plugin` 配置解析、`socketpair(AF_UNIX, SOCK_SEQPACKET)+fork()+dlopen()+dlsym()` 子进程装载、HELLO/RESET/MMIO/SHUTDOWN 基础协议，以及父进程 `ExternalDeviceProxy` MMIO 代理已接入主项目。
+- [x] 已把“启用插件即拒绝 `-snapshot-load/-snapshot-save`”做成显式错误路径，避免留下半套 snapshot 语义。
+- [ ] IRQ、DMA、deadline/guest-time 同步当前仍只保留 ABI/设计占位，宿主回调统一返回 `unsupported`，`irq=` 配置也会显式拒绝。
+- [ ] 裸机 `plugin_mmio_register_bank` 集成 smoke 已接入 `tests/arm64` 脚本，但在缺少 AArch64 GNU 工具链的环境中仍无法实际跑通该回归。
 
 ### 0. 设计约束
 
@@ -1614,14 +1618,14 @@
 - 先把边界和不变式写清楚，避免后续一边实现一边改 ABI。
 
 任务：
-- [ ] 明确外设扩展的基本边界：
+- [x] 明确外设扩展的基本边界：
   - 主模拟器拥有 guest RAM、bus 映射表、GIC/IRQ 路由、guest 时间与设备调度总控；
   - 外设插件不直接持有主模拟器进程内的任何裸指针；
   - 插件只能通过 IPC 请求访问 guest 物理地址空间、发起中断、申请未来 deadline。
-- [ ] 明确与当前代码结构的接缝：
+- [x] 明确与当前代码结构的接缝：
   - 当前 `Device` 抽象只有 `read/write`，第一版不把 deadline、reset、IRQ、故障状态一口气做成“所有设备都必须实现”的统一虚接口；
   - 第一版通过 `ExternalDeviceProxy + SoC::external_devices_` 单独管理外部设备的 deadline、IRQ 电平、健康状态与配置，避免无谓改动现有内建设备。
-- [ ] 明确第一阶段不追求的事情：
+- [x] 明确第一阶段不追求的事情：
   - 不把插件 MMIO 纳入当前 `BusFastPath`；
   - 不给插件暴露主模拟器内部 C++ 类型；
   - 不允许插件依赖主模拟器内部头文件直接访问 `Bus`/`SoC`/`Device` 私有实现；
@@ -1640,7 +1644,7 @@
 - 先把 SDK 作为独立产物边界定清楚，保证插件确实是“独立 `.so` + `dlopen()`”而不是伪插件。
 
 任务：
-- [ ] 明确 `sdk/` 是仓库内独立 CMake 项目：
+- [x] 明确 `sdk/` 是仓库内独立 CMake 项目：
   - 形如 `cmake -S sdk -B out/sdk-build` 可单独配置与构建；
   - 不要求主项目根 `CMakeLists.txt` 把 `sdk/` 直接 `add_subdirectory()` 进默认构建；
   - 主项目可后续提供脚本或 CI 任务去调用 `sdk/` 构建，但两者链接边界保持解耦。
@@ -1657,7 +1661,7 @@
   - 示例与第三方插件都应以 `add_library(<name> MODULE ...)` 方式生成 `.so`；
   - 插件只包含 SDK 头文件，最多链接 `sdk/` 自己提供的小型 helper library；
   - 插件不能在构建期依赖主项目里的 `aarchvm` 可执行文件或内部 C++ 对象。
-- [ ] 明确宿主与 SDK 的边界：
+- [x] 明确宿主与 SDK 的边界：
   - 主项目负责运行时加载、IPC、MMIO 代理、GIC 路由、guest 时间与 DMA 仲裁；
   - `sdk/` 只负责 ABI 头文件、CMake 模板、示例插件和最小测试工具；
   - “示例插件能成功生成 `.so`”应成为后续测试闭环的一部分。
@@ -1668,11 +1672,11 @@
 - 用 `fork()` 创建外设子进程，并把插件逻辑限制在子进程内执行。
 
 任务：
-- [ ] 设计外设配置入口，例如：
+- [x] 设计外设配置入口，例如：
   - `-plugin /path/to/device.so,mmio=0x...,size=0x...,irq=...[,arg=...]`
   - 或配置文件中声明插件路径、实例名、地址窗口、IRQ 路由与自定义参数；
   - 允许重复传入多个 `-plugin`，每个实例对应独立子进程。
-- [ ] 设计“父进程不直接执行插件业务逻辑”的启动流程：
+- [x] 设计“父进程不直接执行插件业务逻辑”的启动流程：
   - 父进程解析命令行与配置；
   - 父进程创建 `socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC)`；
   - 父进程 `fork()`；
@@ -1694,8 +1698,8 @@
   - `crashed/timeout`
 
 设计判断：
-- [ ] 第一版优先采用“一个插件实例对应一个子进程”的模型，而不是多个插件共享一个 worker 进程。
-- [ ] 第一版优先采用 `fork()` 而不是 `fork()+exec()`：
+- [x] 第一版优先采用“一个插件实例对应一个子进程”的模型，而不是多个插件共享一个 worker 进程。
+- [x] 第一版优先采用 `fork()` 而不是 `fork()+exec()`：
   - 实现路径更短；
   - 但后续可以把 `exec()` 隔离与 seccomp 作为加强版安全选项加入。
 
@@ -1705,11 +1709,11 @@
 - 用一套稳定、可扩展、可调试的协议承载 MMIO、DMA、IRQ、时间同步与快照操作。
 
 任务：
-- [ ] 第一版 IPC 传输层使用 `AF_UNIX + SOCK_SEQPACKET`：
+- [x] 第一版 IPC 传输层使用 `AF_UNIX + SOCK_SEQPACKET`：
   - 保证消息边界；
   - 便于调试；
   - 不需要自己处理流分帧。
-- [ ] 设计统一消息头：
+- [x] 设计统一消息头：
   - magic
   - ABI major/minor
   - 消息类型
@@ -1758,12 +1762,12 @@
 - 让主模拟器像访问内建设备一样访问插件暴露的 MMIO 地址范围，但实际请求转发到子进程。
 
 任务：
-- [ ] 明确推荐新增的宿主侧模块：
+- [x] 明确推荐新增的宿主侧模块：
   - `plugin_config.*`：解析 `-plugin` 配置与参数；
   - `plugin_protocol.*`：消息头、序列化/反序列化、状态码；
   - `plugin_child_runtime.*`：子进程装载器与事件循环；
   - `external_device_proxy.*`：父进程里的 `Device` 代理对象。
-- [ ] 在父进程侧设计 `ExternalDeviceProxy`：
+- [x] 在父进程侧设计 `ExternalDeviceProxy`：
   - 继承当前统一的 `Device` 抽象，仅承担 MMIO `read/write` 入口；
   - 被 `Bus::map()` 当作普通设备挂载；
   - 内部持有 socket、子进程 pid、健康状态、逻辑 IRQ 状态缓存、下一个 deadline 缓存与 manifest 元数据。
@@ -1784,7 +1788,7 @@
   - 超时后是返回总线错误、设备故障还是终止模拟器。
 
 设计判断：
-- [ ] 第一版插件 MMIO 一律走 bus 慢路径，不试图并入当前硬编码 `BusFastPath`。
+- [x] 第一版插件 MMIO 一律走 bus 慢路径，不试图并入当前硬编码 `BusFastPath`。
 - [ ] 等协议与行为稳定后，再单独设计“插件设备的 fast-path/offload 能力声明”，避免把热路径和 ABI 一起绑死。
 
 ### 5. 插件对 guest 物理地址空间的访问 API
@@ -1869,14 +1873,14 @@
 - 让外设开发者只依赖一套尽量稳定的 C API，而不被主模拟器内部 C++ 重构频繁打断。
 
 任务：
-- [ ] SDK 使用纯 C ABI：
+- [x] SDK 使用纯 C ABI：
   - 头文件仅暴露 `extern "C"` 接口；
   - 结构体带 `size` 字段；
   - 句柄一律使用 opaque pointer / opaque integer。
-- [ ] 插件导出统一入口，例如：
+- [x] 插件导出统一入口，例如：
   - `aarchvm_plugin_get_api_v1()`
   - 返回只读的 ops 表与 capability 描述。
-- [ ] 插件 ops 至少包含：
+- [x] 插件 ops 至少包含：
   - `create`
   - `destroy`
   - `reset`
@@ -1884,7 +1888,7 @@
   - `mmio_write`
   - `advance_to`
   - `on_shutdown`
-- [ ] 宿主机回调表至少包含：
+- [x] 宿主机回调表至少包含：
   - `dma_read`
   - `dma_write`
   - `irq_set/pulse`
@@ -1892,11 +1896,11 @@
   - `get_guest_now`
   - `log`
   - `abort_device`
-- [ ] 版本策略：
+- [x] 版本策略：
   - 采用 `ABI major/minor`；
   - `major` 不兼容变化时拒绝加载；
   - `minor` 只允许追加 capability，不破坏旧字段布局。
-- [ ] SDK 应包含：
+- [x] SDK 应包含：
   - 公共头文件
   - 最小构建脚本模板
   - 一个示例设备
@@ -1904,7 +1908,7 @@
   - 协议与生命周期文档
 
 设计判断：
-- [ ] SDK 稳定性的关键是“协议与回调表稳定”，而不是把内部类对外公开。
+- [x] SDK 稳定性的关键是“协议与回调表稳定”，而不是把内部类对外公开。
 - [ ] 插件应只感知抽象能力，不感知：
   - `BusFastPath`
   - `SoC` 内部调度实现
@@ -1919,7 +1923,7 @@
 - [ ] 定义 reset 语义：
   - system reset 时插件收到 `reset(kind)`；
   - 必须清理内部 DMA 状态、IRQ level、deadline 与暂存事务。
-- [ ] 明确 snapshot 不支持策略：
+- [x] 明确 snapshot 不支持策略：
   - 只要命令行配置了外部插件，`-snapshot-load` 启动路径就直接拒绝；
   - 只要运行时存在外部插件，`-snapshot-save` 请求就直接失败并打印明确错误；
   - snapshot 文件格式不记录插件路径、配置或状态，避免留下“似乎能恢复、实际恢复不全”的假语义。
@@ -1959,11 +1963,11 @@
 - 先做最小可用闭环，再逐步增加 DMA、IRQ、deadline 与健壮性；snapshot 不在范围内。
 
 任务：
-- [ ] 阶段 0：SDK 构建与 ABI 烟测
+- [x] 阶段 0：SDK 构建与 ABI 烟测
   - `cmake -S sdk -B out/sdk-build` 能独立配置成功；
   - 示例插件能单独生成 `.so`，且不依赖把主项目可执行文件链接进来；
   - 宿主侧白盒测试覆盖：缺失导出符号、ABI major 不匹配、manifest 非法、MMIO 窗口非法时必须拒绝加载。
-- [ ] 阶段 1：最小 MMIO 闭环
+- [x] 阶段 1：最小 MMIO 闭环
   - 一个独立子进程插件；
   - 一个 MMIO 窗口；
   - 同步 MMIO read/write；
@@ -2019,7 +2023,7 @@
 - 用一组从简到繁的设备作为 SDK 示例，先覆盖 MMIO，再覆盖 IRQ / 时间推进 / DMA。
 
 任务：
-- [ ] 首个示例建议实现 `sdk/examples/register_bank`：
+- [x] 首个示例建议实现 `sdk/examples/register_bank`：
   - 几个只读 ID / version 寄存器；
   - 一个或多个可读写 scratch 寄存器；
   - 不依赖 IRQ、DMA、deadline；

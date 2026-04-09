@@ -1,0 +1,1 @@
+aarchvm_add_plugin(aarchvm_register_bank register_bank.c)

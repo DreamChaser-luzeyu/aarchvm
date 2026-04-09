@@ -4,11 +4,26 @@
 #include "aarchvm/ram.hpp"
 
 #include <cstring>
+#include <limits>
 
 namespace aarchvm {
 
 void Bus::map(std::uint64_t base, std::uint64_t size, std::shared_ptr<Device> device) {
   mappings_.push_back(Mapping{base, size, std::move(device)});
+}
+
+bool Bus::is_range_free(std::uint64_t base, std::uint64_t size) const {
+  if (size == 0u || base > (std::numeric_limits<std::uint64_t>::max() - size)) {
+    return false;
+  }
+  const std::uint64_t end = base + size;
+  for (const Mapping& mapping : mappings_) {
+    const std::uint64_t mapping_end = mapping.base + mapping.size;
+    if (base < mapping_end && end > mapping.base) {
+      return false;
+    }
+  }
+  return true;
 }
 
 void Bus::set_fast_path(std::shared_ptr<BusFastPath> fast_path) {

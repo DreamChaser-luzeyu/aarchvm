@@ -1,3 +1,4 @@
+#include "aarchvm/plugin_config.hpp"
 #include "aarchvm/soc.hpp"
 
 #include <algorithm>
@@ -41,6 +42,7 @@ struct Options {
   std::optional<std::string> snapshot_load_path;
   std::optional<std::string> snapshot_save_path;
   std::optional<std::string> drive_path;
+  std::vector<aarchvm::ExternalPluginConfig> external_plugins;
   std::vector<BinaryLoad> extra_bins;
   std::optional<std::string> stop_on_uart_pattern;
   bool predecode_enabled = true;
@@ -167,6 +169,7 @@ void print_usage(const char* argv0) {
       << "[-load <addr>] [-entry <pc>] [-steps <n>] [-sp <addr>] [-smp <n>] [-smp-mode <all|psci>] "
       << "[-dtb <file>] [-dtb-addr <addr>] [-segment <file@addr>]... "
       << "[-snapshot-load <file>] [-snapshot-save <file>] [-drive <image.bin>] \n"
+      << "[-plugin <path>,mmio=<addr>,size=<bytes>[,name=<instance>][,arg=<opaque>]]... \n"
       << "[-stop-on-uart <text>] [-decode <fast|slow>] [-fb-sdl <on|off>] "
       << "[-arch-timer-mode <step|host>]\n";
 }
@@ -230,6 +233,14 @@ std::optional<Options> parse_args(int argc, char** argv) {
       opt.snapshot_save_path = val;
     } else if (key == "-drive") {
       opt.drive_path = val;
+    } else if (key == "-plugin") {
+      aarchvm::ExternalPluginConfig config{};
+      std::string error;
+      if (!aarchvm::parse_external_plugin_spec(val, config, error)) {
+        std::cerr << "Invalid -plugin value: " << error << '\n';
+        return std::nullopt;
+      }
+      opt.external_plugins.push_back(std::move(config));
     } else if (key == "-stop-on-uart") {
       opt.stop_on_uart_pattern = val;
     } else if (key == "-decode") {
@@ -439,6 +450,12 @@ int main(int argc, char** argv) {
   }
   const Options& opt = *parsed;
 
+  if (!opt.external_plugins.empty() &&
+      (opt.snapshot_load_path.has_value() || opt.snapshot_save_path.has_value())) {
+    std::cerr << "External plugins do not currently support -snapshot-load/-snapshot-save\n";
+    return 1;
+  }
+
   aarchvm::SoC soc(opt.cpu_count);
   const bool debug_slow_mode = env_enabled("AARCHVM_DEBUG_SLOW");
   soc.set_secondary_boot_mode(opt.secondary_boot_mode);
@@ -461,6 +478,15 @@ int main(int argc, char** argv) {
   } else if ((uart_tx_match != nullptr) != (uart_tx_reply != nullptr)) {
     std::cerr << "Ignoring partial UART auto-reply config: set both AARCHVM_UART_TX_MATCH and "
                  "AARCHVM_UART_TX_REPLY\n";
+  }
+
+  for (const auto& plugin : opt.external_plugins) {
+    std::string error;
+    if (!soc.attach_external_plugin(plugin, error)) {
+      std::cerr << "Failed to attach plugin " << plugin.shared_object_path
+                << ": " << error << '\n';
+      return 1;
+    }
   }
 
   if (opt.snapshot_load_path.has_value()) {

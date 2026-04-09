@@ -25,6 +25,9 @@
 
 namespace aarchvm {
 
+struct ExternalPluginConfig;
+class ExternalDeviceProxy;
+
 class SoC {
 public:
   enum class SecondaryBootMode {
@@ -48,6 +51,8 @@ public:
   void inject_ps2_rx(std::uint8_t byte);
   void set_stop_on_uart_pattern(std::string pattern);
   void set_uart_tx_match_reply(std::string pattern, std::string reply_text);
+  bool attach_external_plugin(const ExternalPluginConfig& config, std::string& error);
+  [[nodiscard]] bool has_external_plugins() const { return !external_devices_.empty(); }
   bool run(std::size_t max_steps);
   [[nodiscard]] bool stop_requested() const { return stop_requested_; }
   [[nodiscard]] std::optional<std::uint8_t> read_u8(std::uint64_t addr) const;
@@ -213,6 +218,7 @@ private:
   std::shared_ptr<FramebufferDirtyTracker> framebuffer_dirty_tracker_;
   std::unique_ptr<FramebufferSdl> framebuffer_sdl_;
   bool framebuffer_sdl_enabled_ = true;
+  std::vector<std::shared_ptr<ExternalDeviceProxy>> external_devices_;
   std::vector<std::unique_ptr<Cpu>> cpus_;
   std::vector<bool> cpu_powered_on_;
   SecondaryBootMode secondary_boot_mode_ = SecondaryBootMode::AllStart;
