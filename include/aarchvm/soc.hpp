@@ -14,6 +14,7 @@
 #include "aarchvm/rtc_pl031.hpp"
 #include "aarchvm/uart_pl011.hpp"
 #include "aarchvm/virtio_blk_mmio.hpp"
+#include "aarchvm/virtio_net_mmio.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -37,6 +38,7 @@ public:
   bool load_image(std::uint64_t addr, const std::vector<std::uint32_t>& words);
   bool load_binary(std::uint64_t addr, const std::vector<std::uint8_t>& bytes);
   bool load_block_image(const std::vector<std::uint8_t>& bytes);
+  void attach_network_loopback();
   void set_framebuffer_sdl_enabled(bool enabled);
   void set_secondary_boot_mode(SecondaryBootMode mode) { secondary_boot_mode_ = mode; }
   void set_arch_timer_mode(GenericTimer::ClockMode mode);
@@ -125,6 +127,8 @@ private:
   static constexpr std::uint64_t kRtcSize = 0x1000;
   static constexpr std::uint64_t kVirtioBlkBase = 0x09040000;
   static constexpr std::uint64_t kVirtioBlkSize = 0x1000;
+  static constexpr std::uint64_t kVirtioNetBase = 0x09050000;
+  static constexpr std::uint64_t kVirtioNetSize = 0x1000;
   static constexpr std::uint64_t kGicBase = 0x08000000;
   static constexpr std::uint64_t kGicSize = 0x100000;
   static constexpr std::uint64_t kTimerBase = 0x0A000000;
@@ -134,6 +138,7 @@ private:
   static constexpr std::uint32_t kUartIntId = 33;
   static constexpr std::uint32_t kKmiIntId = 34;
   static constexpr std::uint32_t kVirtioBlkIntId = 35;
+  static constexpr std::uint32_t kVirtioNetIntId = 36;
 
   void request_stop();
   void on_uart_tx(std::uint8_t byte);
@@ -207,6 +212,7 @@ private:
   std::shared_ptr<PerfMailbox> perf_mailbox_;
   std::shared_ptr<RtcPl031> rtc_;
   std::shared_ptr<VirtioBlkMmio> virtio_blk_mmio_;
+  std::shared_ptr<VirtioNetMmio> virtio_net_mmio_;
   std::shared_ptr<GicV3> gic_;
   std::shared_ptr<GenericTimer> timer_;
   std::shared_ptr<BusFastPath> fast_path_;
@@ -240,6 +246,7 @@ private:
   bool last_uart_level_ = false;
   bool last_kmi_level_ = false;
   bool last_virtio_blk_level_ = false;
+  bool last_virtio_net_level_ = false;
   bool runnable_state_dirty_ = false;
 };
 

@@ -28,6 +28,7 @@ add_executable(aarchvm
   src/pl050_kmi.cpp
   src/rtc_pl031.cpp
   src/virtio_blk_mmio.cpp
+  src/virtio_net_mmio.cpp
 )
 
 target_include_directories(aarchvm PRIVATE include ${SDL2_INCLUDE_DIRS})
@@ -43,6 +44,7 @@ add_executable(aarchvm_unit_cpu_cache_consistency
   src/ram.cpp
   src/uart_pl011.cpp
   src/virtio_blk_mmio.cpp
+  src/virtio_net_mmio.cpp
   src/gicv3.cpp
   src/generic_timer.cpp
   src/system_registers.cpp

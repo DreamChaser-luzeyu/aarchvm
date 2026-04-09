@@ -8763,3 +8763,44 @@
 - 这一轮没有新增模拟器执行语义修改，但把 `AT -> PAR_EL1` write-side fault 编码这块正式纳入了 fast/slow 双路径回归。
 - 新增回归和完整 `arm64`/Linux UMP/Linux SMP/block smoke 回归当前都通过，说明这次补测没有引入新的程序可见回归。
 - 截至本轮，我仍不会宣称“Armv8-A 最小集合已经完整收口”；不过 `AT/PAR_EL1` 这一小块的 read/write fault 家族现在比之前扎实了一步，后续可以继续把精力收回到 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 的其余异常家族和 `MMU/TLB/fault` 与 fast-path / predecode 的剩余一致性边界。
+
+# 修改日志 2026-04-09 22:23
+
+## 本轮修改
+
+- 新增标准 `virtio,mmio + virtio-net` 设备模型：
+  - 新增 [include/aarchvm/virtio_net_mmio.hpp](/root/workspace/aarchvm/include/aarchvm/virtio_net_mmio.hpp) 与 [src/virtio_net_mmio.cpp](/root/workspace/aarchvm/src/virtio_net_mmio.cpp)；
+  - 当前实现提供 Linux 主线可识别的 modern `virtio-net` MMIO 前端，挂在 `0x09050000`，中断为 `INTID 36`；
+  - 当前后端先实现最小闭环的宿主内 loopback，支持 `MAC`、`STATUS`、`VERSION_1` feature，配置空间固定 `LINK_UP`，并提供 RX/TX 两个 virtqueue。
+- 把新网卡设备接入 SoC、总线快路径、命令行和设备树：
+  - 更新 [src/soc.cpp](/root/workspace/aarchvm/src/soc.cpp)、[include/aarchvm/soc.hpp](/root/workspace/aarchvm/include/aarchvm/soc.hpp)、[include/aarchvm/bus_fast_path.hpp](/root/workspace/aarchvm/include/aarchvm/bus_fast_path.hpp)、[src/main.cpp](/root/workspace/aarchvm/src/main.cpp)；
+  - 新增 `-net <off|loopback>` 参数，默认 `off`，传 `loopback` 时显式挂接网卡；
+  - 更新 [dts/aarchvm-current.dts](/root/workspace/aarchvm/dts/aarchvm-current.dts)、[dts/aarchvm-linux-min.dts](/root/workspace/aarchvm/dts/aarchvm-linux-min.dts)、[dts/aarchvm-linux-smp.dts](/root/workspace/aarchvm/dts/aarchvm-linux-smp.dts)，补上标准 `virtio,mmio` 网卡节点。
+- 扩展 snapshot 覆盖：
+  - [src/soc.cpp](/root/workspace/aarchvm/src/soc.cpp) 的 snapshot 版本从 `24` 升到 `25`；
+  - 新版本会保存/恢复 `virtio_net_mmio_` 状态，并继续兼容旧 snapshot 的加载路径。
+- 新增裸机 loopback 冒烟测试 [tests/arm64/virtio_net_loopback.c](/root/workspace/aarchvm/tests/arm64/virtio_net_loopback.c)：
+  - 用例会校验 `virtio-net` 头部 / 配置空间 / feature 握手 / queue 建立 / TX->RX loopback / 中断置位与 ACK 清除；
+  - 已接入 [tests/arm64/build_tests.sh](/root/workspace/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/root/workspace/aarchvm/tests/arm64/run_all.sh)。
+- 顺手修正了回归脚本的一个兼容性小问题：
+  - [tests/arm64/run_all.sh](/root/workspace/aarchvm/tests/arm64/run_all.sh) 现在优先使用 `python3`，找不到时再回退 `python`；
+  - 同一脚本继续统一导出 `AARCHVM_BRK_MODE=halt`，避免末尾 `brk` 对裸机停机语义造成干扰。
+- 更新文档：
+  - [README.md](/root/workspace/aarchvm/README.md) 的 `Features` 增补了 `virtio-mmio + virtio-net`；
+  - [doc/README.en.md](/root/workspace/aarchvm/doc/README.en.md) 与 [doc/README.zh.md](/root/workspace/aarchvm/doc/README.zh.md) 增补了 `-net` 参数说明、当前 `loopback` 后端状态，以及新的设备模型说明。
+
+## 本轮测试
+
+- `timeout 1800s cmake --build build -j4`
+- `timeout 1800s tests/arm64/build_tests.sh tests/arm64/out`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -net loopback -bin tests/arm64/out/virtio_net_loopback.bin -load 0x0 -entry 0x0 -steps 2000000`
+- `timeout 1800s tests/arm64/run_all.sh`
+- `timeout 120s bash -lc '{ sleep 1; printf "/bin/rtc_smoke\n"; } | env AARCHVM_BUS_FASTPATH=1 AARCHVM_TIMER_SCALE=1 ./build/aarchvm -snapshot-load out/linux-ump-shell.snap -steps 400000000 -stop-on-uart "RTC-SMOKE PASS" -fb-sdl off'`
+- `timeout 120s bash -lc '{ sleep 1; printf "cat /sys/class/net/eth0/address\n"; } | env AARCHVM_BUS_FASTPATH=1 AARCHVM_TIMER_SCALE=1 ./build/aarchvm -net loopback -snapshot-load out/linux-ump-net-shell.snap -steps 400000000 -stop-on-uart "02:41:56:4d:00:01" -fb-sdl off'`
+
+## 当前结论
+
+- 当前仓库已经具备一个标准 Linux 主线驱动可识别的 `virtio-mmio + virtio-net` 网卡前端，且裸机 loopback 冒烟与整套 `arm64` 裸机回归当前都通过。
+- 这轮已经按 Linux 用户态工作流做过最小系统级验证：BusyBox initramfs 内的 `/bin/rtc_smoke` 通过，说明常用 shell snapshot 恢复路径正常；`eth0` 已在 Linux 中枚举成功，并读到固定 MAC `02:41:56:4d:00:01`。
+- 当前宿主侧网络后端仍只有 `loopback`，因此这轮完成的是“设备模型 + 裸机闭环 + DT/CLI 接线”，不是 TAP/桥接这类真实外联网络。
+- 这轮还没有继续做 TAP/桥接/真实外联链路验证；后续在你准备好更多 U-Boot/Linux 镜像和测试目标后，可以继续把验证扩到发包、收包、路由和多机互联层面。
