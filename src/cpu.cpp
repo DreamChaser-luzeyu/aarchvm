@@ -7501,7 +7501,11 @@ bool Cpu::exec_system(std::uint32_t insn) {
       invalidate_decode_all();
     }
     if (key == ((3u << 14) | (0u << 11) | (1u << 7) | (0u << 3) | 0u) || // SCTLR_EL1
-        key == ((3u << 14) | (0u << 11) | (2u << 7) | (0u << 3) | 2u)) { // TCR_EL1
+        key == ((3u << 14) | (0u << 11) | (2u << 7) | (0u << 3) | 2u) || // TCR_EL1
+        key == ((3u << 14) | (0u << 11) | (10u << 7) | (2u << 3) | 0u)) { // MAIR_EL1
+      // TLB entries cache resolved memory attributes, so MAIR_EL1 writes must
+      // invalidate cached translations before the post-ISB instruction stream
+      // can observe the new attribute mapping.
       tlb_flush_all();
       invalidate_decode_all();
     }

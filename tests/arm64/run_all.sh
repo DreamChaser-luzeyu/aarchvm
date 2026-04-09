@@ -218,6 +218,8 @@ run_expect mmu_cross_page_pair_fault_far.bin 4000000 P
 run_expect mmu_table_ap_inherit.bin 4000000 H
 run_expect mmu_table_pxn_inherit.bin 4000000 Y
 run_expect mmu_tcr_ips_mair_decode.bin 4000000 Z
+run_expect mmu_mair_write_flushes_tlb.bin 4000000 R
+run_expect mmu_sctlr_m_tlb_flush.bin 4000000 T
 run_expect mmu_af_fault.bin 4000000 0
 run_expect mmu_at_par_formats.bin 4000000 P
 run_expect mmu_at_par_fault_kinds.bin 4000000 G
@@ -630,6 +632,7 @@ run_expect_slow mmu_at_par_formats.bin 4000000 P
 run_expect_slow mmu_at_par_fault_kinds.bin 4000000 G
 run_expect_slow mmu_at_par_write_fault_kinds.bin 4000000 J
 run_expect_slow mmu_off_at_par_direct_data.bin 4000000 H
+run_expect_slow mmu_sctlr_m_tlb_flush.bin 4000000 T
 run_expect_slow mmu_at_walk_ext_abort.bin 4000000 A
 run_expect_slow mmu_ext_abort_data.bin 4000000 E
 run_expect_slow mmu_ext_abort_fetch.bin 4000000 Q

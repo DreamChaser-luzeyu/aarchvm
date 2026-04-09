@@ -196,6 +196,8 @@
 - [x] 已把一组 absent-feature decode overlap 高风险样例补进 `-decode slow` 一致性回归护栏：`flagm_integer_undef`、`pauth_absent_integer_undef`、`pauth_lr_absent_integer_undef`、`ldraa_ldrab_absent_undef`、`lrcpc_absent_undef`、`ls64_absent_undef` 现在都会随 `tests/arm64/run_all.sh` 同时验证 fast-path 与 slow-path，降低后续解码调整把缺特性指令误吞成已实现通路的风险。
 - [x] 已新增 `mmu_cache_maint_el1_no_cmow_perm` 正式裸机回归，锁定当前 `ID_AA64MMFR1_EL1.CMOW=0` 模型下：`EL1` 上的 `DC CVAC/CVAU/CIVAC` 与 `IC IVAU` 不应仅因 stage-1 页是 privileged-only + read-only 就误报 permission fault；同时保持既有 `DC IVAC`“仍要求写权限”的程序可见边界不变。
 - [x] 已修正 `TLBI VAE1/VALE1/VAAE1/VAALE1` 对 stage-1 block leaf 的失效范围：旧实现只会清掉命中 operand 的那个 4KB shadow TLB 项，导致同一 `L1/L2` block 内其它已缓存 page 仍可能继续命中旧翻译；现已按 leaf level 覆盖范围失效整块，并新增 `mmu_tlbi_block_vae1_scope` 正式裸机回归锁定 fast/slow decode 下“block remap 后仅以块内一个 VA 执行 TLBI，整块 shadow TLB 项都必须失效”的程序可见语义。
+- [x] 已收口 `MAIR_EL1` 改写后的 TLB 属性一致性：由于当前 TLB 项缓存了已解析的 `mair_attr/memory_type`，`MSR MAIR_EL1` 后若不失效 TLB，`ISB` 之后的 `DC ZVA` 等指令仍会错误观察旧内存类型；现已在 `MAIR_EL1` 写入后统一执行 `tlb_flush_all()`，并新增正式裸机回归 `mmu_mair_write_flushes_tlb` 锁定“先以 Device 属性填充 TLB，再改写 `MAIR_EL1` 为 Normal，`ISB` 后 `DC ZVA` 必须按新属性成功执行”的程序可见边界。
+- [x] 已新增 `mmu_sctlr_m_tlb_flush` 正式裸机回归，继续压实 `SCTLR_EL1.M` 切换与 TLB / 直通地址输出的一致性边界：当前模型在 `MMU on -> off -> on` 过程中，同一 VA 的 data access 必须先观察页表翻译、再观察 `M=0` 的 direct output `PA=VA[55:0]`，最后重新回到页表翻译，避免 stale TLB 在 `MMU` 开关两侧串味。
 
 ### 5. 正确性验证基础设施补强
 

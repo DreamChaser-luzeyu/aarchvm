@@ -1,3 +1,43 @@
+# 修改日志 2026-04-09 00:32
+
+## 本轮修改
+
+- 继续沿 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 与 `MMU/TLB/fault` 交界做白盒审计后，确认并修正了一条真实的 system-register / TLB 一致性缺口：
+  - 当前实现的 `TlbEntry` 会缓存解析后的 `mair_attr` 与 `memory_type`；
+  - 旧实现里 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 在 `MSR MAIR_EL1, Xt` 后没有失效 TLB；
+  - 结果是即使 guest 在 `MSR MAIR_EL1` 后执行了 `ISB`，后续 `DC ZVA` 一类依赖翻译输出内存类型的指令，仍可能观察到旧的 TLB-cached Device/Normal 属性，而不是新的 `MAIR_EL1` 映射。
+- 现在 [src/cpu.cpp](/media/luzeyu/Storage2/FOSS_src/aarchvm/src/cpu.cpp) 已把 `MAIR_EL1` 写入纳入和 `SCTLR_EL1/TCR_EL1` 同级的翻译上下文失效路径：
+  - `MSR MAIR_EL1, Xt` 后会统一执行 `tlb_flush_all()`；
+  - 同时保持 `invalidate_decode_all()`，保证当前“post-ISB 指令流观察到新翻译上下文”的实现模型一致。
+- 新增正式裸机回归 [tests/arm64/mmu_mair_write_flushes_tlb.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_mair_write_flushes_tlb.S)，并接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)：
+  - 先用 `AttrIdx=0 -> Device` 的页做一次普通 load，显式把旧属性填进 TLB；
+  - 再把 `MAIR_EL1` 改成 `AttrIdx=0 -> Normal` 并执行 `ISB`；
+  - 最后执行 `DC ZVA` 并验证其必须按新 Normal 属性成功、且实际把目标缓存行清零。
+- 在继续对白盒收口中，本轮还新增正式裸机回归 [tests/arm64/mmu_sctlr_m_tlb_flush.S](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/mmu_sctlr_m_tlb_flush.S)，并接入 [tests/arm64/build_tests.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/media/luzeyu/Storage2/FOSS_src/aarchvm/tests/arm64/run_all.sh)：
+  - 先在 `MMU on` 状态下用页表把同一 VA 映射到单独的 PA，显式填充 data-side TLB；
+  - 再把 `SCTLR_EL1.M` 清零，验证同一 VA 必须转而观察 `M=0` 的 direct output `PA=VA[55:0]`；
+  - 最后重新打开 `MMU`，验证同一 VA 会重新回到页表翻译结果，而不是残留在 `MMU off` 或旧 TLB 状态。
+- 同步更新了 [TODO.md](/media/luzeyu/Storage2/FOSS_src/aarchvm/TODO.md)，把这条 `MAIR_EL1` 改写后的 TLB 属性一致性收口补回当前 Armv8-A 程序可见正确性计划。
+
+## 本轮测试
+
+- `timeout 600s cmake --build build -j`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/mmu_mair_write_flushes_tlb.bin -load 0x0 -entry 0x0 -steps 4000000`
+- `timeout 1800s ./tests/arm64/run_all.sh`
+- `timeout 1800s ./tests/linux/run_functional_suite.sh`
+- `timeout 1800s ./tests/linux/run_functional_suite_smp.sh`
+- `timeout 1800s ./tests/linux/run_block_mount_smoke.sh`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/mmu_sctlr_m_tlb_flush.bin -load 0x0 -entry 0x0 -steps 4000000`
+
+## 当前结论
+
+- 这轮修掉的不是 workload 特判，而是一条真实的“system register 已改写，但 TLB 仍保留旧解析属性”的一致性缺口。
+- 对当前实现来说，这条修复是必要的，因为 `TlbEntry` 缓存的不是单纯的 `AttrIdx`，而是已经解析过的 `mair_attr/memory_type`；如果 `MAIR_EL1` 写后不失效，`ISB` 之后的 guest 指令就无法可靠观察到新属性。
+- 新增正式裸机回归与完整 Arm64/Linux UMP/SMP/块设备回归通过后，这条 `MAIR_EL1 -> TLB attribute cache` 边界当前已经被压实；但我仍不能宣称“Armv8-A 最小程序可见集合已经完全收口”，剩余高优先级工作仍集中在：
+  - `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 对其余已实现异常家族的最终逐类对账；
+  - `MMU/TLB/fault` 与 fast-path / predecode 的其余细颗粒一致性边界；
+  - 更系统化的 Linux 长时压力与差分验证。
+
 # 修改日志 2026-04-08 19:19
 
 ## 本轮修改

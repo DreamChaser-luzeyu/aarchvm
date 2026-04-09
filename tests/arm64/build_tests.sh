@@ -306,6 +306,8 @@ build_asm_prog mmu_cross_page_pair_fault_far
 build_asm_prog mmu_table_ap_inherit
 build_asm_prog mmu_table_pxn_inherit
 build_asm_prog mmu_tcr_ips_mair_decode
+build_asm_prog mmu_mair_write_flushes_tlb
+build_asm_prog mmu_sctlr_m_tlb_flush
 build_asm_prog mmu_af_fault
 build_asm_prog mmu_at_par_formats
 build_asm_prog mmu_at_par_fault_kinds
