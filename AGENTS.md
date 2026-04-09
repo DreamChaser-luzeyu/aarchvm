@@ -17,7 +17,7 @@
 ```bash
 INITRD=out/initramfs-usertests.cpio.gz && \
 INITRD_SIZE_HEX=$(printf '0x%x' "$(stat -c '%s' "$INITRD")") && \
-{ sleep 3; printf '\n\n\n'; sleep 1; \
+{ printf '\n\n\n'; \
   printf 'setenv bootargs console=ttyAMA0,115200 earlycon=pl011,0x09000000 rdinit=/init initramfs_async=0\n'; \
   printf 'booti 0x40400000 0x46000000:%s 0x47f00000\n' "$INITRD_SIZE_HEX"; \
   cat; } | \
@@ -34,6 +34,7 @@ timeout 240s ./build/aarchvm \
   -steps 3000000000 \
   -fb-sdl off
 ```
+注意，自动传uboot参数的写法会导致模拟器的stdin被占用，因此此时可能难以通过其他手段注入命令输入。建议让待测试程序在init中自动运行，如有必要操作交互式终端，请自行编写Python脚本以同时注入u-boot命令和后续输入，注意应在提示符出现后再注入命令，否则命令可能在Linux内核启动过程中被吞掉。
 
 
 ## 性能优化工作流
