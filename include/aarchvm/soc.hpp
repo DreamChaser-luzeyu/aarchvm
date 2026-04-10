@@ -26,6 +26,10 @@
 
 namespace aarchvm {
 
+#ifdef AARCHVM_HAS_SLIRP
+class SlirpNetBackend;
+#endif
+
 class SoC {
 public:
   enum class SecondaryBootMode {
@@ -34,11 +38,13 @@ public:
   };
 
   explicit SoC(std::size_t cpu_count = 1);
+  ~SoC();
 
   bool load_image(std::uint64_t addr, const std::vector<std::uint32_t>& words);
   bool load_binary(std::uint64_t addr, const std::vector<std::uint8_t>& bytes);
   bool load_block_image(const std::vector<std::uint8_t>& bytes);
   void attach_network_loopback();
+  [[nodiscard]] bool attach_network_slirp();
   void set_framebuffer_sdl_enabled(bool enabled);
   void set_secondary_boot_mode(SecondaryBootMode mode) { secondary_boot_mode_ = mode; }
   void set_arch_timer_mode(GenericTimer::ClockMode mode);
@@ -106,6 +112,12 @@ private:
     EventDriven,
   };
 
+  enum class NetBackendMode : std::uint8_t {
+    Off,
+    Loopback,
+    Slirp,
+  };
+
   static constexpr std::uint32_t kGuestTimeFracBits = 16;
   static constexpr std::uint64_t kGuestTimeFracOne = 1ull << kGuestTimeFracBits;
   static constexpr std::uint64_t kBootRamBase = 0x00000000;
@@ -151,6 +163,8 @@ private:
   void advance_guest_time(std::uint64_t executed_instructions, std::size_t active_cpu_count);
   void advance_guest_time_to(std::uint64_t guest_tick);
   void invalidate_device_schedule();
+  void clear_network_backend();
+  [[nodiscard]] bool restore_network_backend_after_snapshot();
   struct CpuDispatchState {
     bool any_powered_on = false;
     bool all_powered_on_halted = false;
@@ -219,6 +233,9 @@ private:
   std::shared_ptr<FramebufferDirtyTracker> framebuffer_dirty_tracker_;
   std::unique_ptr<FramebufferSdl> framebuffer_sdl_;
   bool framebuffer_sdl_enabled_ = true;
+#ifdef AARCHVM_HAS_SLIRP
+  std::unique_ptr<SlirpNetBackend> slirp_net_backend_;
+#endif
   std::vector<std::unique_ptr<Cpu>> cpus_;
   std::vector<bool> cpu_powered_on_;
   SecondaryBootMode secondary_boot_mode_ = SecondaryBootMode::AllStart;
@@ -236,6 +253,7 @@ private:
   std::string uart_tx_match_window_;
   std::string uart_tx_match_reply_text_;
   bool uart_tx_match_reply_armed_ = false;
+  NetBackendMode net_backend_mode_ = NetBackendMode::Off;
   bool device_sync_valid_ = false;
   std::uint64_t device_sync_guest_ticks_ = 0;
   bool device_schedule_valid_ = false;

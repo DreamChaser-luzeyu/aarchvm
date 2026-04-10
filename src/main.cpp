@@ -32,6 +32,7 @@ struct Options {
   enum class NetMode {
     Off,
     Loopback,
+    Slirp,
   };
 
   std::string bin_path;
@@ -172,7 +173,12 @@ void print_usage(const char* argv0) {
       << "Usage: " << argv0 << " -bin <program.bin> "
       << "[-load <addr>] [-entry <pc>] [-steps <n>] [-sp <addr>] [-smp <n>] [-smp-mode <all|psci>] "
       << "[-dtb <file>] [-dtb-addr <addr>] [-segment <file@addr>]... "
-      << "[-snapshot-load <file>] [-snapshot-save <file>] [-drive <image.bin>] [-net <off|loopback>] \n"
+      << "[-snapshot-load <file>] [-snapshot-save <file>] [-drive <image.bin>] "
+#ifdef AARCHVM_HAS_SLIRP
+      << "[-net <off|loopback|slirp>] \n"
+#else
+      << "[-net <off|loopback>] \n"
+#endif
       << "[-stop-on-uart <text>] [-decode <fast|slow>] [-fb-sdl <on|off>] "
       << "[-arch-timer-mode <step|host>]\n";
 }
@@ -241,8 +247,10 @@ std::optional<Options> parse_args(int argc, char** argv) {
         opt.net_mode = Options::NetMode::Off;
       } else if (val == "loopback") {
         opt.net_mode = Options::NetMode::Loopback;
+      } else if (val == "slirp") {
+        opt.net_mode = Options::NetMode::Slirp;
       } else {
-        std::cerr << "Invalid -net value (expected off or loopback): " << val << '\n';
+        std::cerr << "Invalid -net value (expected off, loopback, or slirp): " << val << '\n';
         return std::nullopt;
       }
     } else if (key == "-stop-on-uart") {
@@ -459,6 +467,11 @@ int main(int argc, char** argv) {
   soc.set_secondary_boot_mode(opt.secondary_boot_mode);
   if (opt.net_mode == Options::NetMode::Loopback) {
     soc.attach_network_loopback();
+  } else if (opt.net_mode == Options::NetMode::Slirp) {
+    if (!soc.attach_network_slirp()) {
+      std::cerr << "This build does not include libslirp host networking support\n";
+      return 1;
+    }
   }
   if (opt.framebuffer_sdl_specified) {
     soc.set_framebuffer_sdl_enabled(opt.framebuffer_sdl);

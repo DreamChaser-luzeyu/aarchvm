@@ -404,6 +404,7 @@ build_asm_prog smp_dc_zva_invalidate
 build_c_prog hello_c
 build_c_prog stack_c -O0
 build_c_prog virtio_net_loopback
+build_c_prog virtio_net_slirp
 
 echo "Built test binaries in $OUT_DIR"
 ls -1 "$OUT_DIR"/*.bin

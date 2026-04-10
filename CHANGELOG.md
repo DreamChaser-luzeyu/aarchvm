@@ -1,3 +1,50 @@
+# 修改日志 2026-04-10 00:37
+
+## 本轮修改
+
+- 为标准 `virtio-mmio + virtio-net` 设备新增了可选的 `libslirp` 宿主用户态网络后端：
+  - 新增 [include/aarchvm/slirp_net_backend.hpp](/root/workspace/aarchvm/include/aarchvm/slirp_net_backend.hpp) 与 [src/slirp_net_backend.cpp](/root/workspace/aarchvm/src/slirp_net_backend.cpp)，封装 `libslirp` 生命周期、轮询、收发和 state save/load；
+  - `SoC` 现在可在 `loopback` 与 `slirp` 后端之间切换，并在启用 `slirp` 时收紧运行 chunk，避免长时间 guest 执行把宿主网络事件饿死；
+  - snapshot 版本从 `25` 升到 `26`，整机快照现在会保存 / 恢复网卡后端模式；若当前后端是 `slirp`，还会额外保存 / 恢复 `libslirp` 状态。
+- 现有 `virtio-net` MMIO 前端被整理成“设备层 + 可插拔后端”模型：
+  - [include/aarchvm/virtio_net_mmio.hpp](/root/workspace/aarchvm/include/aarchvm/virtio_net_mmio.hpp) 与 [src/virtio_net_mmio.cpp](/root/workspace/aarchvm/src/virtio_net_mmio.cpp) 新增 TX frame handler，使 loopback 继续走设备内闭环，而 `slirp` 改走 SoC 级宿主后端；
+  - [src/main.cpp](/root/workspace/aarchvm/src/main.cpp) 的 `-net` 参数扩展为 `off|loopback|slirp`，在未编入 `libslirp` 支持的构建里会对 `-net slirp` 给出明确报错。
+- 在你补齐镜像后，继续把 `libslirp` 路径推进到了真实主线客体可用：
+  - [src/soc.cpp](/root/workspace/aarchvm/src/soc.cpp) 现在会在 guest CPU 都处于等待态、且无法快进到下一个 guest 事件时，给 `libslirp` 一个短暂的宿主等待窗口，而不是只做 `poll(..., 0)` 忙轮询；这修正了 DHCP / ping 这类依赖宿主真实时间推进的路径；
+  - 审计后又补了一处快照恢复修正：当恢复的 snapshot 指定 `virtio-net` 关闭时，[src/soc.cpp](/root/workspace/aarchvm/src/soc.cpp) 现在会真正 `detach` 设备，而不是仅仅清理 handler；这样即使命令行预先传了 `-net loopback` 或 `-net slirp`，`-snapshot-load` 之后的设备可见性也会严格以 snapshot 为准；
+  - [include/aarchvm/virtio_net_mmio.hpp](/root/workspace/aarchvm/include/aarchvm/virtio_net_mmio.hpp) 与 [src/virtio_net_mmio.cpp](/root/workspace/aarchvm/src/virtio_net_mmio.cpp) 额外修正了 `virtio-net` 头长兼容：裸机自测原本只覆盖 10 字节 `virtio_net_hdr`，而主线 U-Boot / Linux 实际会发送 12 字节变体；现在设备会正确识别 guest 发送的 10/12 字节头，并在观察到 12 字节头后，对 RX 侧也回填同样的 12 字节头与 `num_buffers=1`，从而真正接通主线驱动。
+- 新增并接通了两层最小验证：
+  - 主机侧单测 [tests/unit_slirp_backend.cpp](/root/workspace/aarchvm/tests/unit_slirp_backend.cpp) 会直接构造 ARP request，验证 `libslirp` 能回 ARP reply，并覆盖 state save/load；
+  - 裸机烟测 [tests/arm64/virtio_net_slirp.c](/root/workspace/aarchvm/tests/arm64/virtio_net_slirp.c) 会在 guest 内初始化 `virtio-net`，向 `10.0.2.2` 发 ARP，并校验返回的 ARP reply 关键字段；
+  - [tests/arm64/build_tests.sh](/root/workspace/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/root/workspace/aarchvm/tests/arm64/run_all.sh) 已接入新的 `virtio_net_slirp` 用例；`run_all.sh` 还会在当前构建包含 `libslirp` 时自动执行 `aarchvm_unit_slirp_backend`。
+- 构建与文档同步更新：
+  - [CMakeLists.txt](/root/workspace/aarchvm/CMakeLists.txt) 新增 `AARCHVM_ENABLE_HOST_NETWORK` 选项，用于在缺少 `libslirp` 依赖的环境下关闭 `-net slirp` 支持但继续保留 `virtio-net loopback`；
+  - [README.md](/root/workspace/aarchvm/README.md) 的 `Features`、[doc/README.en.md](/root/workspace/aarchvm/doc/README.en.md) 与 [doc/README.zh.md](/root/workspace/aarchvm/doc/README.zh.md) 已更新 `-net slirp` 与 `AARCHVM_ENABLE_HOST_NETWORK` 说明。
+
+## 本轮测试
+
+- `timeout 60s ./build/aarchvm_unit_slirp_backend`
+- `timeout 60s ./build/aarchvm_unit_cpu_cache_consistency`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -net loopback -bin tests/arm64/out/virtio_net_loopback.bin -load 0x0 -entry 0x0 -steps 2000000`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -net slirp -bin tests/arm64/out/virtio_net_slirp.bin -load 0x0 -entry 0x0 -steps 2000000`
+- `timeout 60s ./build/aarchvm -bin tests/arm64/out/virtio_net_loopback.bin -load 0x0 -entry 0x0 -steps 0 -snapshot-save out/snapshot-net-off.bin`
+- `timeout 60s env AARCHVM_BRK_MODE=halt ./build/aarchvm -net loopback -snapshot-load out/snapshot-net-off.bin -steps 2000000`
+- `timeout 1800s tests/arm64/build_tests.sh tests/arm64/out`
+- `timeout 1800s tests/arm64/run_all.sh`
+- `timeout 1800s cmake -S . -B build-no-net -DCMAKE_BUILD_TYPE=Release -DAARCHVM_ENABLE_HOST_NETWORK=OFF`
+- `timeout 1800s cmake --build build-no-net --target aarchvm -j4`
+- 手工系统级验证：
+  - 使用 `images/ump-busybox/{u-boot.bin,Image,initramfs-usertests.cpio.gz}` 冷启动 U-Boot，已确认 `DHCP client bound to address 10.0.2.15`；
+  - 在同一套镜像引导到 Linux BusyBox shell 后，已确认静态配置 `eth0` 后可 `ping 10.0.2.2` 成功，ARP 表正确解析到 `52:55:0a:00:02:02`；
+  - 已确认 `udhcpc -n -q -i eth0` 能完成 `DISCOVER -> SELECT -> lease obtained`，最小 rootfs 里仅缺默认 `udhcpc` 配置脚本，所以租约没有自动写回接口配置；
+  - 已确认 guest 内执行 `printf 'guest-payload-123\n' | nc 10.0.2.2 23456` 时，宿主监听端可收到真实 TCP 连接与 payload，并回显 `HOST-READY` / `HOST-ECHO:guest-payload-123`，证明 guest 到宿主的真实 TCP 收发已打通。
+
+## 当前结论
+
+- 当前仓库的标准 `virtio-mmio + virtio-net` 前端已经同时支持两类后端：仓库内 loopback，以及可选的 `libslirp` 用户态宿主网络。
+- `AARCHVM_ENABLE_HOST_NETWORK=OFF` 已经验证可用，因此在没有 `libslirp` 依赖的环境里，构建不会再被 `-net slirp` 这条可选能力卡死。
+- 当前验证范围已经覆盖主机侧 `libslirp` smoke、guest 裸机 `virtio-net + slirp` smoke、U-Boot DHCP / TFTP 到 `libslirp` 的系统级交互，以及 Linux BusyBox shell 下的 `virtio-net + slirp` 静态寻址 / ARP / ICMP / DHCP 冒烟。
+
 # 修改日志 2026-04-09 00:32
 
 ## 本轮修改

@@ -20,11 +20,16 @@ public:
   std::uint64_t read(std::uint64_t offset, std::size_t size) override;
   void write(std::uint64_t offset, std::uint64_t value, std::size_t size) override;
 
+  void attach_host_backend(std::array<std::uint8_t, 6> mac = kDefaultMac);
   void attach_loopback(std::array<std::uint8_t, 6> mac = kDefaultMac);
   void detach();
+  [[nodiscard]] bool attached() const { return device_present(); }
   [[nodiscard]] bool enqueue_rx_frame(std::vector<std::uint8_t> frame);
   [[nodiscard]] bool irq_pending() const { return interrupt_status_ != 0u; }
   void set_state_change_observer(std::function<void()> observer) { state_change_observer_ = std::move(observer); }
+  void set_tx_frame_handler(std::function<void(std::vector<std::uint8_t>)> handler) {
+    tx_frame_handler_ = std::move(handler);
+  }
 
   [[nodiscard]] bool save_state(std::ostream& out) const;
   [[nodiscard]] bool load_state(std::istream& in);
@@ -59,6 +64,10 @@ private:
   void write_queue_register(std::uint64_t offset, std::uint64_t value, std::size_t size);
   [[nodiscard]] std::uint64_t device_features() const;
   [[nodiscard]] std::uint32_t device_features_word(std::uint32_t selector) const;
+  [[nodiscard]] std::size_t net_header_size() const;
+  [[nodiscard]] std::size_t active_header_size() const;
+  [[nodiscard]] std::size_t detect_tx_header_size(const std::vector<TransferSegment>& segments,
+                                                  const std::vector<std::uint8_t>& chain_bytes) const;
   void process_queue(std::uint32_t queue_index);
   [[nodiscard]] bool process_tx();
   [[nodiscard]] bool process_rx();
@@ -87,6 +96,7 @@ private:
   static constexpr std::uint32_t kQueueCount = 2u;
   static constexpr std::uint32_t kConfigSize = 0x100u;
   static constexpr std::size_t kVirtioNetHdrSize = 10u;
+  static constexpr std::size_t kVirtioNetMrgRxbufHdrSize = 12u;
 
   Bus& bus_;
   bool present_ = false;
@@ -102,7 +112,9 @@ private:
   std::uint32_t interrupt_status_ = 0;
   std::uint32_t status_ = 0;
   std::uint32_t config_generation_ = 0;
+  std::size_t guest_header_size_ = kVirtioNetHdrSize;
   std::function<void()> state_change_observer_;
+  std::function<void(std::vector<std::uint8_t>)> tx_frame_handler_;
 };
 
 } // namespace aarchvm

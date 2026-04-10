@@ -19,7 +19,7 @@ It currently boots U-Boot, hands off to Linux, reaches interactive BusyBox shell
 - Event-driven outer scheduling by default, with legacy fixed-step mode kept for debugging and A/B comparison
 - Full-machine snapshot save / restore
 - Standard Linux-supported `virtio-mmio + virtio-blk` raw disk path (`-drive`), validated through `/dev/vda` enumeration and Debian ext4 mount smoke
-- Standard Linux-mainline-supported `virtio-mmio + virtio-net` device path (`-net loopback`), currently covered by an in-tree bare-metal loopback smoke
+- Standard Linux-mainline-supported `virtio-mmio + virtio-net` device path (`-net loopback`, plus optional `-net slirp` through `libslirp`), covered by in-tree bare-metal loopback and slirp smokes
 - In-tree bare-metal, Linux functional, and Linux algorithm/perf regression suites
 - Optional faster execution paths for bus/decode hot paths
 - Explicit halt / unexpected-stop diagnostics so guest halt states are reported instead of looking like a silent hang

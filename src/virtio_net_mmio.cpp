@@ -43,6 +43,7 @@ constexpr std::uint32_t kDeviceIdNet = 1u;
 constexpr std::uint32_t kVendorId = 0x41564d31u; // "AVM1"
 
 constexpr std::uint64_t kFeatureMac = 1ull << 5;
+constexpr std::uint64_t kFeatureMrgRxbuf = 1ull << 15;
 constexpr std::uint64_t kFeatureStatus = 1ull << 16;
 constexpr std::uint64_t kFeatureVersion1 = 1ull << 32;
 
@@ -71,6 +72,14 @@ T load_le(const std::uint8_t* src) {
 template <typename T>
 void store_le(std::uint8_t* dst, T value) {
   std::memcpy(dst, &value, sizeof(T));
+}
+
+bool looks_like_ethernet_frame(const std::uint8_t* data, std::size_t len) {
+  if (len < 14u) {
+    return false;
+  }
+  const std::uint16_t type_or_len = static_cast<std::uint16_t>((static_cast<std::uint16_t>(data[12]) << 8) | data[13]);
+  return type_or_len >= 0x0600u;
 }
 
 } // namespace
@@ -154,11 +163,22 @@ void VirtioNetMmio::write(std::uint64_t offset, std::uint64_t value, std::size_t
   write_queue_register(offset, value, size);
 }
 
+void VirtioNetMmio::attach_host_backend(std::array<std::uint8_t, 6> mac) {
+  mac_ = mac;
+  present_ = true;
+  loopback_enabled_ = false;
+  pending_rx_frames_.clear();
+  guest_header_size_ = kVirtioNetHdrSize;
+  ++config_generation_;
+  reset_device_state();
+}
+
 void VirtioNetMmio::attach_loopback(std::array<std::uint8_t, 6> mac) {
   mac_ = mac;
   present_ = true;
   loopback_enabled_ = true;
   pending_rx_frames_.clear();
+  guest_header_size_ = kVirtioNetHdrSize;
   ++config_generation_;
   reset_device_state();
 }
@@ -167,6 +187,7 @@ void VirtioNetMmio::detach() {
   present_ = false;
   loopback_enabled_ = false;
   pending_rx_frames_.clear();
+  guest_header_size_ = kVirtioNetHdrSize;
   ++config_generation_;
   reset_device_state();
 }
@@ -250,6 +271,7 @@ bool VirtioNetMmio::load_state(std::istream& in) {
   }
 
   queues_ = queues;
+  guest_header_size_ = net_header_size();
   pending_rx_frames_ = std::move(pending_frames);
   return true;
 }
@@ -258,6 +280,7 @@ void VirtioNetMmio::reset_device_state() {
   device_features_sel_ = 0;
   driver_features_sel_ = 0;
   driver_features_ = 0;
+  guest_header_size_ = kVirtioNetHdrSize;
   guest_page_size_ = 4096u;
   queue_sel_ = 0;
   reset_queue_state();
@@ -421,7 +444,7 @@ std::uint64_t VirtioNetMmio::device_features() const {
   if (!device_present()) {
     return 0;
   }
-  return kFeatureMac | kFeatureStatus | kFeatureVersion1;
+  return kFeatureMac | kFeatureMrgRxbuf | kFeatureStatus | kFeatureVersion1;
 }
 
 std::uint32_t VirtioNetMmio::device_features_word(std::uint32_t selector) const {
@@ -433,6 +456,35 @@ std::uint32_t VirtioNetMmio::device_features_word(std::uint32_t selector) const 
     return static_cast<std::uint32_t>(features >> 32);
   }
   return 0u;
+}
+
+std::size_t VirtioNetMmio::net_header_size() const {
+  return (driver_features_ & kFeatureMrgRxbuf) != 0u ? kVirtioNetMrgRxbufHdrSize : kVirtioNetHdrSize;
+}
+
+std::size_t VirtioNetMmio::active_header_size() const {
+  return std::max(net_header_size(), guest_header_size_);
+}
+
+std::size_t VirtioNetMmio::detect_tx_header_size(const std::vector<TransferSegment>& segments,
+                                                 const std::vector<std::uint8_t>& chain_bytes) const {
+  if (guest_header_size_ == kVirtioNetMrgRxbufHdrSize && chain_bytes.size() >= kVirtioNetMrgRxbufHdrSize) {
+    return kVirtioNetMrgRxbufHdrSize;
+  }
+  if (net_header_size() == kVirtioNetMrgRxbufHdrSize && chain_bytes.size() >= kVirtioNetMrgRxbufHdrSize) {
+    return kVirtioNetMrgRxbufHdrSize;
+  }
+  if (!segments.empty() &&
+      segments.front().len >= kVirtioNetMrgRxbufHdrSize &&
+      chain_bytes.size() >= kVirtioNetMrgRxbufHdrSize &&
+      std::all_of(chain_bytes.begin(),
+                  chain_bytes.begin() + static_cast<std::ptrdiff_t>(kVirtioNetMrgRxbufHdrSize),
+                  [](std::uint8_t byte) { return byte == 0u; }) &&
+      looks_like_ethernet_frame(chain_bytes.data() + kVirtioNetMrgRxbufHdrSize,
+                                chain_bytes.size() - kVirtioNetMrgRxbufHdrSize)) {
+    return kVirtioNetMrgRxbufHdrSize;
+  }
+  return kVirtioNetHdrSize;
 }
 
 void VirtioNetMmio::process_queue(std::uint32_t queue_index) {
@@ -506,9 +558,20 @@ bool VirtioNetMmio::process_tx() {
       break;
     }
 
+    const std::size_t net_hdr_size = detect_tx_header_size(segments, chain_bytes);
+    std::vector<std::uint8_t> frame(chain_bytes.begin() + static_cast<std::ptrdiff_t>(net_hdr_size),
+                                    chain_bytes.end());
+    guest_header_size_ = net_hdr_size;
+    if (net_hdr_size == kVirtioNetMrgRxbufHdrSize) {
+      // Some mainline guests emit the 12-byte merged-rx header shape even if they did not
+      // explicitly leave the negotiation bit set in the legacy register model. Persist the
+      // observed width through snapshot/restore by upgrading the internal effective feature set.
+      driver_features_ |= kFeatureMrgRxbuf;
+    }
     if (loopback_enabled_) {
-      pending_rx_frames_.emplace_back(chain_bytes.begin() + static_cast<std::ptrdiff_t>(kVirtioNetHdrSize),
-                                      chain_bytes.end());
+      pending_rx_frames_.push_back(frame);
+    } else if (tx_frame_handler_) {
+      tx_frame_handler_(std::move(frame));
     }
 
     if (!write_used(queue, head_index, 0u, queue.used_idx)) {
@@ -527,6 +590,7 @@ bool VirtioNetMmio::process_tx() {
 
 bool VirtioNetMmio::process_rx() {
   QueueState& queue = queues_[kQueueRx];
+  const std::size_t net_hdr_size = active_header_size();
   if (pending_rx_frames_.empty() || !queue.ready || queue.num == 0u || queue.desc_addr == 0u ||
       queue.avail_addr == 0u || queue.used_addr == 0u) {
     return false;
@@ -565,14 +629,18 @@ bool VirtioNetMmio::process_rx() {
     }
 
     const std::vector<std::uint8_t>& frame = pending_rx_frames_.front();
-    const std::size_t total_len = kVirtioNetHdrSize + frame.size();
+    const std::size_t total_len = net_hdr_size + frame.size();
     if (capacity < total_len) {
       break;
     }
 
     std::vector<std::uint8_t> payload(total_len, 0u);
+    if (net_hdr_size == kVirtioNetMrgRxbufHdrSize) {
+      payload[kVirtioNetHdrSize + 0u] = 1u;
+      payload[kVirtioNetHdrSize + 1u] = 0u;
+    }
     if (!frame.empty()) {
-      std::memcpy(payload.data() + kVirtioNetHdrSize, frame.data(), frame.size());
+      std::memcpy(payload.data() + net_hdr_size, frame.data(), frame.size());
     }
 
     std::size_t remaining = total_len;

@@ -9,6 +9,9 @@ set -x
 cmake --build build -j
 
 ./build/aarchvm_unit_cpu_cache_consistency
+if [ -x ./build/aarchvm_unit_slirp_backend ]; then
+  ./build/aarchvm_unit_slirp_backend
+fi
 
 tests/arm64/build_tests.sh
 
@@ -78,6 +81,10 @@ check_simulator_stderr() {
       return 1
       ;;
   esac
+}
+
+build_has_slirp() {
+  ./build/aarchvm -h 2>&1 | grep -q 'slirp'
 }
 
 run() {
@@ -151,6 +158,22 @@ run_expect_net_loopback() {
   local stdout=""
   local stderr=""
   capture_cmd stdout stderr ./build/aarchvm -net loopback -bin "tests/arm64/out/${bin}" -load 0x0 -entry 0x0 -steps "$steps"
+  test "$CAPTURE_STATUS" -eq 0
+  check_simulator_stderr "$stderr"
+  test "$(printf '%s' "$stdout" | tr -d '\r\n')" = "$expected"
+}
+
+run_expect_net_slirp() {
+  local bin="$1"
+  local steps="$2"
+  local expected="$3"
+  local stdout=""
+  local stderr=""
+  if ! build_has_slirp; then
+    printf 'Skipping %s because this build does not include libslirp support\n' "$bin" >&2
+    return 0
+  fi
+  capture_cmd stdout stderr ./build/aarchvm -net slirp -bin "tests/arm64/out/${bin}" -load 0x0 -entry 0x0 -steps "$steps"
   test "$CAPTURE_STATUS" -eq 0
   check_simulator_stderr "$stderr"
   test "$(printf '%s' "$stdout" | tr -d '\r\n')" = "$expected"
@@ -301,6 +324,7 @@ run_expect contextidr_el1_res0_bits.bin 200000 C
 run_expect hello_c.bin 400000 C
 run_expect stack_c.bin 600000 S
 run_expect_net_loopback virtio_net_loopback.bin 2000000 N
+run_expect_net_slirp virtio_net_slirp.bin 2000000 S
 run_expect irq_minimal.bin 1400000 IM
 run_expect irq_twice.bin 2400000 T
 run_expect irq_disabled.bin 1200000 D
