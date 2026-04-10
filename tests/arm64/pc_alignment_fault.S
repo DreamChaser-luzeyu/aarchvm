@@ -118,9 +118,12 @@ sync_spx_handler:
     b.ne fail5
 
     mrs  x0, esr_el1
+    tbz  x0, #25, fail5
     ubfx x1, x0, #26, #6
     cmp  x1, #0x22
     b.ne fail5
+    and  x8, x0, #0x1ffffff
+    cbnz x8, fail5
 
     mrs  x2, far_el1
     mrs  x3, elr_el1
@@ -148,9 +151,12 @@ sync_lower_handler:
     b.ne fail5
 
     mrs  x0, esr_el1
+    tbz  x0, #25, fail9
     ubfx x1, x0, #26, #6
     cmp  x1, #0x22
     b.ne fail9
+    and  x8, x0, #0x1ffffff
+    cbnz x8, fail9
 
     mrs  x2, far_el1
     mrs  x3, elr_el1

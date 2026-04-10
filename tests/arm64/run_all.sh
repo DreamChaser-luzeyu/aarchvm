@@ -463,6 +463,7 @@ run_expect fpsimd_subtract_sat_more.bin 500000 S
 run_expect fpsimd_shift_narrow_more.bin 400000 N
 run_expect fpsr_qc_saturation.bin 400000 Q
 run_expect cpacr_fp_trap.bin 300000 C
+run_expect cpacr_fp_trap_regs.bin 300000 F
 run_expect cpacr_fp_absent_undef.bin 1200000 Q
 run_expect cpacr_fp_absent_more_undef.bin 1600000 N
 run_expect rdm_absent_undef.bin 1000000 R
@@ -638,6 +639,7 @@ run_expect_slow mmu_ext_abort_data.bin 4000000 E
 run_expect_slow mmu_ext_abort_fetch.bin 4000000 Q
 run_expect_slow mmu_walk_ext_abort_data.bin 4000000 W
 run_expect_slow mmu_walk_ext_abort_fetch.bin 4000000 X
+run_expect_slow cpacr_fp_trap_regs.bin 300000 F
 run_expect_slow debug_break_bas_res1.bin 800000 R
 run_expect_slow flagm_integer_undef.bin 800000 m
 run_expect_slow mte_absent_undef.bin 1000000 M

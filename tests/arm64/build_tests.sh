@@ -148,6 +148,7 @@ build_asm_prog fpsimd_subtract_sat_more
 build_asm_prog fpsimd_shift_narrow_more
 build_asm_prog fpsr_qc_saturation
 build_asm_prog cpacr_fp_trap
+build_asm_prog cpacr_fp_trap_regs
 build_asm_prog cpacr_fp_absent_undef
 build_asm_prog cpacr_fp_absent_more_undef
 build_asm_prog cpacr_fp16_absent_more_undef2

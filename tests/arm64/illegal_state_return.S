@@ -164,6 +164,10 @@ handle_case1:
     ubfx x1, x0, #26, #6
     cmp  x1, #0x0e
     b.ne fail6
+    and  x10, x0, #0x1ffffff
+    cbnz x10, fail6
+    mrs  x10, far_el1
+    cbnz x10, fail6
 
     mrs  x2, elr_el1
     adr  x3, illegal_target_el1
@@ -199,6 +203,10 @@ handle_case3:
     ubfx x1, x0, #26, #6
     cmp  x1, #0x0e
     b.ne fail6
+    and  x10, x0, #0x1ffffff
+    cbnz x10, fail6
+    mrs  x10, far_el1
+    cbnz x10, fail6
 
     mrs  x2, elr_el1
     adr  x3, illegal_target_a32
@@ -239,6 +247,10 @@ sync_lower_handler:
     ubfx x1, x0, #26, #6
     cmp  x1, #0x0e
     b.ne fail6
+    and  x10, x0, #0x1ffffff
+    cbnz x10, fail6
+    mrs  x10, far_el1
+    cbnz x10, fail6
 
     mrs  x2, elr_el1
     adr  x3, illegal_target_el0

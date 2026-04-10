@@ -197,6 +197,8 @@ sync_spx_handler:
     mrs  x24, esr_el1
     mrs  x25, elr_el1
     mrs  x26, spsr_el1
+    mrs  x27, far_el1
+    cbnz x27, failF
 
     adr  x27, case1_step_target
     cmp  x25, x27
@@ -221,6 +223,8 @@ sync_lower_handler:
     mrs  x24, esr_el1
     mrs  x25, elr_el1
     mrs  x26, spsr_el1
+    mrs  x27, far_el1
+    cbnz x27, failF
 
     adr  x27, el0_case2_step_target
     cmp  x25, x27
