@@ -62,6 +62,15 @@
 			status = "okay";
 		};
 
+		virtio_net@9050000 {
+			compatible = "virtio,mmio";
+			reg = <0x0 0x09050000 0x0 0x00001000>;
+			interrupt-parent = <&intc>;
+			interrupts = <0 4 4>;
+			dma-coherent;
+			status = "okay";
+		};
+
 	rtc@9030000 {
 		compatible = "arm,pl031", "arm,primecell";
 		reg = <0x0 0x09030000 0x0 0x00001000>;

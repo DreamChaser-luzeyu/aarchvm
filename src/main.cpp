@@ -29,6 +29,12 @@ struct ByteEvent {
 };
 
 struct Options {
+  enum class NetMode {
+    Off,
+    Loopback,
+    Slirp,
+  };
+
   std::string bin_path;
   std::uint64_t load_addr = 0;
   std::uint64_t entry_pc = 0;
@@ -41,6 +47,7 @@ struct Options {
   std::optional<std::string> snapshot_load_path;
   std::optional<std::string> snapshot_save_path;
   std::optional<std::string> drive_path;
+  NetMode net_mode = NetMode::Off;
   std::vector<BinaryLoad> extra_bins;
   std::optional<std::string> stop_on_uart_pattern;
   bool predecode_enabled = true;
@@ -166,7 +173,12 @@ void print_usage(const char* argv0) {
       << "Usage: " << argv0 << " -bin <program.bin> "
       << "[-load <addr>] [-entry <pc>] [-steps <n>] [-sp <addr>] [-smp <n>] [-smp-mode <all|psci>] "
       << "[-dtb <file>] [-dtb-addr <addr>] [-segment <file@addr>]... "
-      << "[-snapshot-load <file>] [-snapshot-save <file>] [-drive <image.bin>] \n"
+      << "[-snapshot-load <file>] [-snapshot-save <file>] [-drive <image.bin>] "
+#ifdef AARCHVM_HAS_SLIRP
+      << "[-net <off|loopback|slirp>] \n"
+#else
+      << "[-net <off|loopback>] \n"
+#endif
       << "[-stop-on-uart <text>] [-decode <fast|slow>] [-fb-sdl <on|off>] "
       << "[-arch-timer-mode <step|host>]\n";
 }
@@ -230,6 +242,17 @@ std::optional<Options> parse_args(int argc, char** argv) {
       opt.snapshot_save_path = val;
     } else if (key == "-drive") {
       opt.drive_path = val;
+    } else if (key == "-net") {
+      if (val == "off") {
+        opt.net_mode = Options::NetMode::Off;
+      } else if (val == "loopback") {
+        opt.net_mode = Options::NetMode::Loopback;
+      } else if (val == "slirp") {
+        opt.net_mode = Options::NetMode::Slirp;
+      } else {
+        std::cerr << "Invalid -net value (expected off, loopback, or slirp): " << val << '\n';
+        return std::nullopt;
+      }
     } else if (key == "-stop-on-uart") {
       opt.stop_on_uart_pattern = val;
     } else if (key == "-decode") {
@@ -442,6 +465,14 @@ int main(int argc, char** argv) {
   aarchvm::SoC soc(opt.cpu_count);
   const bool debug_slow_mode = env_enabled("AARCHVM_DEBUG_SLOW");
   soc.set_secondary_boot_mode(opt.secondary_boot_mode);
+  if (opt.net_mode == Options::NetMode::Loopback) {
+    soc.attach_network_loopback();
+  } else if (opt.net_mode == Options::NetMode::Slirp) {
+    if (!soc.attach_network_slirp()) {
+      std::cerr << "This build does not include libslirp host networking support\n";
+      return 1;
+    }
+  }
   if (opt.framebuffer_sdl_specified) {
     soc.set_framebuffer_sdl_enabled(opt.framebuffer_sdl);
   }

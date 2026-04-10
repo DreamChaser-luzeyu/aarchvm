@@ -69,7 +69,7 @@ Optional for the 2-core SMP / GUI path:
 The following paths are currently implemented and exercised by in-tree regression flows:
 - Single-core AArch64 EL1 interpreter execution.
 - Same-thread round-robin SMP execution, currently validated for `-smp 2`.
-- Current Linux-facing platform path: low boot RAM alias, 1 GiB SDRAM, PL011 UART, PL031 RTC, Generic Timer, minimal GICv3, SDL framebuffer, PL050 KMI keyboard, virtio-mmio block, and perf mailbox.
+- Current Linux-facing platform path: low boot RAM alias, 1 GiB SDRAM, PL011 UART, PL031 RTC, Generic Timer, minimal GICv3, SDL framebuffer, PL050 KMI keyboard, virtio-mmio block/net transport, and perf mailbox.
 - Minimal synchronous exception loop with `ESR_EL1`, `FAR_EL1`, `ELR_EL1`, and `SPSR_EL1`.
 - Minimal MMU/TLB behavior required by early Linux page-table bring-up.
 - U-Boot serial boot and Linux hand-off via `booti`.
@@ -79,6 +79,7 @@ The following paths are currently implemented and exercised by in-tree regressio
 - PL050 KMI keyboard device recognized by Linux through `CONFIG_SERIO_AMBAKMI` + `CONFIG_KEYBOARD_ATKBD`.
 - Host-backed PL031 RTC recognized by Linux through `rtc-pl031`, with `/sys/class/rtc/rtc0` enumeration and read/set smoke coverage in the Linux functional suites.
 - Standard Linux `virtio-mmio + virtio-blk` raw disk path, validated through `/dev/vda` enumeration plus a read-only Debian ext4 mount smoke.
+- Standard Linux-mainline-supported `virtio-mmio + virtio-net` device path, exposed through `-net loopback` and optionally through `-net slirp` when built with `libslirp`, covered by in-tree bare-metal loopback and slirp smokes.
 - Full-machine snapshot save / restore.
 - In-tree bare-metal regression, Linux functional regression, and Linux algorithm/perf regression suites.
 - Linux SMP smoke bring-up through PSCI secondary boot to BusyBox shell, with user space observing 2 CPUs in `/proc/cpuinfo`.
@@ -105,6 +106,7 @@ The current repository includes and uses the following device / platform pieces:
 - SDL window backend for presenting framebuffer contents
 - PL050 KMI keyboard controller
 - standard `virtio,mmio` transport with a `virtio-blk` device behind `-drive`
+- standard `virtio,mmio` transport with an optional `virtio-net` device behind `-net loopback`, plus optional host networking behind `-net slirp` when built with `libslirp`
 - full-machine snapshot support
 
 The Linux-facing DTs already contain the relevant nodes in:
@@ -160,6 +162,8 @@ aarch64-linux-gnu-as --version | head -n 1
 cmake -S . -B build
 cmake --build build -j
 ```
+
+If the build host does not provide `libslirp`, add `-DAARCHVM_ENABLE_HOST_NETWORK=OFF` to disable the optional `-net slirp` backend while keeping `virtio-net` loopback support available.
 
 ### 2. Build U-Boot
 
@@ -336,6 +340,7 @@ Common options:
 - `-snapshot-save <file>`: save a full-machine snapshot at the end of the run
 - `-snapshot-load <file>`: resume from a snapshot
 - `-drive <image.bin>`: attach a raw image to the standard `virtio-mmio + virtio-blk` device
+- `-net <off|loopback|slirp>`: attach the standard `virtio-mmio + virtio-net` device. `off` leaves the transport empty; `loopback` enables the in-tree loopback backend; `slirp` enables `libslirp` user-mode host networking when the emulator was built with `AARCHVM_ENABLE_HOST_NETWORK=ON`
 - `-stop-on-uart <text>`: stop immediately when UART output matches a string
 - `-decode <fast|slow>`: switch decode execution path, default is the fast path
 - `-fb-sdl <on|off>`: explicitly enable or disable the SDL framebuffer window

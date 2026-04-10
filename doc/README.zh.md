@@ -69,7 +69,7 @@ cmake --build build -j
 当前仓库已经实际跑通并回归过的路径包括：
 - 单核 AArch64 EL1 解释执行。
 - 同线程 round-robin 的 SMP 执行路径，当前已验证 `-smp 2`。
-- 当前 Linux 启动平台路径：低地址 boot RAM 映射、1 GiB SDRAM、PL011 UART、PL031 RTC、Generic Timer、最小 GICv3、SDL framebuffer、PL050 KMI 键盘、virtio-mmio 块设备，以及 perf mailbox。
+- 当前 Linux 启动平台路径：低地址 boot RAM 映射、1 GiB SDRAM、PL011 UART、PL031 RTC、Generic Timer、最小 GICv3、SDL framebuffer、PL050 KMI 键盘、virtio-mmio 块/网卡传输层，以及 perf mailbox。
 - 最小同步异常闭环：`ESR_EL1`、`FAR_EL1`、`ELR_EL1`、`SPSR_EL1`。
 - Linux 早期页表所需的最小 MMU/TLB 路径。
 - U-Boot 串口启动与 `booti` 引导 Linux。
@@ -79,6 +79,7 @@ cmake --build build -j
 - PL050 KMI 键盘设备，Linux 侧可由 `CONFIG_SERIO_AMBAKMI` + `CONFIG_KEYBOARD_ATKBD` 驱动识别。
 - 宿主一致的 PL031 RTC，Linux 侧可由 `rtc-pl031` 识别，且 Linux 功能回归已覆盖 `/sys/class/rtc/rtc0` 枚举与读写冒烟。
 - 标准 Linux `virtio-mmio + virtio-blk` 原始磁盘路径，已通过 `/dev/vda` 枚举与只读 Debian ext4 挂载冒烟验证。
+- 标准 Linux 主线可识别的 `virtio-mmio + virtio-net` 设备路径，可通过 `-net loopback` 暴露，也可在构建时启用 `libslirp` 后通过 `-net slirp` 暴露，并已有仓库内裸机 loopback/slirp 冒烟覆盖。
 - 整机 snapshot 保存 / 恢复。
 - 仓库内裸机回归、Linux 功能回归、Linux 算法/性能回归。
 - Linux SMP 冒烟路径：通过 PSCI 启动次级核，进入 BusyBox shell，用户态 `/proc/cpuinfo` 可见 2 个 CPU。
@@ -105,6 +106,7 @@ cmake --build build -j
 - SDL 窗口后端，用于把 framebuffer 内容显示到宿主机窗口
 - PL050 KMI 键盘控制器
 - 标准 `virtio,mmio` 传输层和其后的 `virtio-blk` 设备，可通过 `-drive` 挂载原始镜像
+- 标准 `virtio,mmio` 传输层和其后的可选 `virtio-net` 设备，可通过 `-net loopback` 启用仓库内 loopback 后端，也可在构建时启用 `libslirp` 后通过 `-net slirp` 接入宿主用户态网络
 - 整机 snapshot
 
 与 Linux GUI 路径相关的设备树节点已经在以下文件中提供：
@@ -160,6 +162,8 @@ aarch64-linux-gnu-as --version | head -n 1
 cmake -S . -B build
 cmake --build build -j
 ```
+
+如果构建主机没有 `libslirp`，可以额外传 `-DAARCHVM_ENABLE_HOST_NETWORK=OFF`，关闭可选的 `-net slirp` 后端，同时保留 `virtio-net` 的 loopback 支持。
 
 ### 2. 构建 U-Boot
 
@@ -336,6 +340,7 @@ mkdir -p out/initramfs-full-root/{dev,proc,sys,tmp,run,root,mnt,etc}
 - `-snapshot-save <file>`：运行结束保存整机快照
 - `-snapshot-load <file>`：从整机快照恢复
 - `-drive <image.bin>`：把原始镜像挂到标准 `virtio-mmio + virtio-blk` 设备上
+- `-net <off|loopback|slirp>`：挂接标准 `virtio-mmio + virtio-net` 设备。`off` 表示该传输层不暴露网卡；`loopback` 启用仓库内 loopback 后端；`slirp` 在模拟器以 `AARCHVM_ENABLE_HOST_NETWORK=ON` 构建时启用 `libslirp` 用户态宿主网络
 - `-stop-on-uart <text>`：UART 输出命中特定字符串时立即停止
 - `-decode <fast|slow>`：切换解码执行路径，默认使用快路径
 - `-fb-sdl <on|off>`：显式打开或关闭 SDL framebuffer 窗口

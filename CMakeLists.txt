@@ -5,12 +5,17 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(AARCHVM_ENABLE_HOST_NETWORK "Enable libslirp-backed host networking (-net slirp)" ON)
+
 if (NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL2 REQUIRED sdl2)
+if (AARCHVM_ENABLE_HOST_NETWORK)
+  pkg_check_modules(SLIRP REQUIRED slirp)
+endif()
 
 add_executable(aarchvm
   src/main.cpp
@@ -28,12 +33,22 @@ add_executable(aarchvm
   src/pl050_kmi.cpp
   src/rtc_pl031.cpp
   src/virtio_blk_mmio.cpp
+  src/virtio_net_mmio.cpp
 )
 
 target_include_directories(aarchvm PRIVATE include ${SDL2_INCLUDE_DIRS})
 target_link_directories(aarchvm PRIVATE ${SDL2_LIBRARY_DIRS})
 target_link_libraries(aarchvm PRIVATE ${SDL2_LIBRARIES})
 target_compile_options(aarchvm PRIVATE ${SDL2_CFLAGS_OTHER})
+
+if (AARCHVM_ENABLE_HOST_NETWORK)
+  target_sources(aarchvm PRIVATE src/slirp_net_backend.cpp)
+  target_compile_definitions(aarchvm PRIVATE AARCHVM_HAS_SLIRP=1)
+  target_include_directories(aarchvm PRIVATE ${SLIRP_INCLUDE_DIRS})
+  target_link_directories(aarchvm PRIVATE ${SLIRP_LIBRARY_DIRS})
+  target_link_libraries(aarchvm PRIVATE ${SLIRP_LIBRARIES})
+  target_compile_options(aarchvm PRIVATE ${SLIRP_CFLAGS_OTHER})
+endif()
 
 add_executable(aarchvm_unit_cpu_cache_consistency
   tests/unit_cpu_cache_consistency.cpp
@@ -43,6 +58,7 @@ add_executable(aarchvm_unit_cpu_cache_consistency
   src/ram.cpp
   src/uart_pl011.cpp
   src/virtio_blk_mmio.cpp
+  src/virtio_net_mmio.cpp
   src/gicv3.cpp
   src/generic_timer.cpp
   src/system_registers.cpp
@@ -51,10 +67,28 @@ add_executable(aarchvm_unit_cpu_cache_consistency
 
 target_include_directories(aarchvm_unit_cpu_cache_consistency PRIVATE include)
 
+if (AARCHVM_ENABLE_HOST_NETWORK)
+  add_executable(aarchvm_unit_slirp_backend
+    tests/unit_slirp_backend.cpp
+    src/slirp_net_backend.cpp
+  )
+  target_compile_definitions(aarchvm_unit_slirp_backend PRIVATE AARCHVM_HAS_SLIRP=1)
+  target_include_directories(aarchvm_unit_slirp_backend PRIVATE include ${SLIRP_INCLUDE_DIRS})
+  target_link_directories(aarchvm_unit_slirp_backend PRIVATE ${SLIRP_LIBRARY_DIRS})
+  target_link_libraries(aarchvm_unit_slirp_backend PRIVATE ${SLIRP_LIBRARIES})
+  target_compile_options(aarchvm_unit_slirp_backend PRIVATE ${SLIRP_CFLAGS_OTHER})
+endif()
+
 if (MSVC)
   target_compile_options(aarchvm PRIVATE /W4 /permissive-)
   target_compile_options(aarchvm_unit_cpu_cache_consistency PRIVATE /W4 /permissive-)
+  if (AARCHVM_ENABLE_HOST_NETWORK)
+    target_compile_options(aarchvm_unit_slirp_backend PRIVATE /W4 /permissive-)
+  endif()
 else()
   target_compile_options(aarchvm PRIVATE -Wall -Wextra -Wpedantic -Werror)
   target_compile_options(aarchvm_unit_cpu_cache_consistency PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  if (AARCHVM_ENABLE_HOST_NETWORK)
+    target_compile_options(aarchvm_unit_slirp_backend PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  endif()
 endif()

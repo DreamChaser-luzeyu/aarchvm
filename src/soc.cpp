@@ -8,6 +8,9 @@
 
 #include "aarchvm/snapshot_io.hpp"
 #include "aarchvm/soc.hpp"
+#ifdef AARCHVM_HAS_SLIRP
+#include "aarchvm/slirp_net_backend.hpp"
+#endif
 
 namespace aarchvm {
 
@@ -153,6 +156,7 @@ SoC::SoC(std::size_t cpu_count)
       })),
       rtc_(std::make_shared<RtcPl031>()),
       virtio_blk_mmio_(std::make_shared<VirtioBlkMmio>(bus_)),
+      virtio_net_mmio_(std::make_shared<VirtioNetMmio>(bus_)),
       gic_(std::make_shared<GicV3>()),
       timer_(std::make_shared<GenericTimer>()) {
   if (cpu_count == 0) {
@@ -173,6 +177,7 @@ SoC::SoC(std::size_t cpu_count)
   bus_.map(kPerfBase, kPerfSize, perf_mailbox_);
   bus_.map(kRtcBase, kRtcSize, rtc_);
   bus_.map(kVirtioBlkBase, kVirtioBlkSize, virtio_blk_mmio_);
+  bus_.map(kVirtioNetBase, kVirtioNetSize, virtio_net_mmio_);
   bus_.map(kGicBase, kGicSize, gic_);
   bus_.map(kTimerBase, kTimerSize, timer_);
   bus_.set_ram_write_observer([this](std::uint64_t pa, std::size_t size) {
@@ -234,6 +239,7 @@ SoC::SoC(std::size_t cpu_count)
   uart_->set_state_change_observer([this]() { invalidate_device_schedule(); });
   kmi_->set_state_change_observer([this]() { invalidate_device_schedule(); });
   virtio_blk_mmio_->set_state_change_observer([this]() { invalidate_device_schedule(); });
+  virtio_net_mmio_->set_state_change_observer([this]() { invalidate_device_schedule(); });
   timer_->set_state_change_observer([this]() { invalidate_device_schedule(); });
   timer_->set_cycles_per_step(timer_tick_scale_);
   timer_->set_clock_mode(arch_timer_mode_, guest_time_ticks());
@@ -250,6 +256,8 @@ SoC::SoC(std::size_t cpu_count)
   reset_perf_measurement_state();
 }
 
+SoC::~SoC() = default;
+
 void SoC::rebuild_fast_path() {
   fast_path_ = std::make_shared<BusFastPath>(*boot_ram_,
                                              *framebuffer_ram_,
@@ -257,6 +265,7 @@ void SoC::rebuild_fast_path() {
                                              *uart_,
                                              *perf_mailbox_,
                                              *virtio_blk_mmio_,
+                                             *virtio_net_mmio_,
                                              *gic_,
                                              *timer_,
                                              framebuffer_dirty_tracker_.get());
@@ -469,6 +478,90 @@ bool SoC::load_binary(std::uint64_t addr, const std::vector<std::uint8_t>& bytes
 bool SoC::load_block_image(const std::vector<std::uint8_t>& bytes) {
   virtio_blk_mmio_->set_image(bytes);
   return true;
+}
+
+void SoC::clear_network_backend() {
+  virtio_net_mmio_->set_tx_frame_handler({});
+  virtio_net_mmio_->detach();
+#ifdef AARCHVM_HAS_SLIRP
+  slirp_net_backend_.reset();
+#endif
+  net_backend_mode_ = NetBackendMode::Off;
+}
+
+void SoC::attach_network_loopback() {
+  clear_network_backend();
+  virtio_net_mmio_->attach_loopback();
+  net_backend_mode_ = NetBackendMode::Loopback;
+}
+
+bool SoC::attach_network_slirp() {
+#ifndef AARCHVM_HAS_SLIRP
+  return false;
+#else
+  clear_network_backend();
+  slirp_net_backend_ = std::make_unique<SlirpNetBackend>(
+      [this](std::vector<std::uint8_t> frame) {
+        if (virtio_net_mmio_->enqueue_rx_frame(std::move(frame))) {
+          invalidate_device_schedule();
+        }
+      });
+  if (!slirp_net_backend_->ready()) {
+    slirp_net_backend_.reset();
+    return false;
+  }
+  virtio_net_mmio_->attach_host_backend();
+  virtio_net_mmio_->set_tx_frame_handler(
+      [this](std::vector<std::uint8_t> frame) {
+        if (slirp_net_backend_ != nullptr) {
+          slirp_net_backend_->send_guest_frame(std::move(frame));
+          invalidate_device_schedule();
+        }
+      });
+  net_backend_mode_ = NetBackendMode::Slirp;
+  return true;
+#endif
+}
+
+bool SoC::restore_network_backend_after_snapshot() {
+  virtio_net_mmio_->set_tx_frame_handler({});
+#ifdef AARCHVM_HAS_SLIRP
+  slirp_net_backend_.reset();
+#endif
+
+  if (net_backend_mode_ == NetBackendMode::Off) {
+    return true;
+  }
+  if (net_backend_mode_ == NetBackendMode::Loopback) {
+    return true;
+  }
+
+  if (net_backend_mode_ == NetBackendMode::Slirp) {
+#ifdef AARCHVM_HAS_SLIRP
+    slirp_net_backend_ = std::make_unique<SlirpNetBackend>(
+        [this](std::vector<std::uint8_t> frame) {
+          if (virtio_net_mmio_->enqueue_rx_frame(std::move(frame))) {
+            invalidate_device_schedule();
+          }
+        });
+    if (slirp_net_backend_ == nullptr || !slirp_net_backend_->ready()) {
+      slirp_net_backend_.reset();
+      return false;
+    }
+    virtio_net_mmio_->set_tx_frame_handler(
+        [this](std::vector<std::uint8_t> frame) {
+          if (slirp_net_backend_ != nullptr) {
+            slirp_net_backend_->send_guest_frame(std::move(frame));
+            invalidate_device_schedule();
+          }
+        });
+    return true;
+#else
+    return false;
+#endif
+  }
+
+  return false;
 }
 
 void SoC::set_framebuffer_sdl_enabled(bool enabled) {
@@ -809,6 +902,7 @@ void SoC::reset_perf_measurement_state() {
   last_uart_level_ = false;
   last_kmi_level_ = false;
   last_virtio_blk_level_ = false;
+  last_virtio_net_level_ = false;
   runnable_state_dirty_ = false;
   bus_.reset_perf_counters();
   if (fast_path_ != nullptr) {
@@ -835,9 +929,16 @@ bool SoC::run(std::size_t max_steps) {
               << " wfe=" << (cpu.waiting_for_event() ? 1 : 0)
               << '\n';
   };
-  auto sync_devices = [&](bool force_timer_sync = false) {
+  auto sync_devices = [&](bool force_timer_sync = false, std::uint32_t host_wait_ms = 0) {
     ++local_perf_counters_.sync_devices;
     const std::uint64_t guest_ticks = guest_time_ticks();
+#ifdef AARCHVM_HAS_SLIRP
+    if (slirp_net_backend_ != nullptr && slirp_net_backend_->poll(host_wait_ms)) {
+      device_sync_valid_ = false;
+    }
+#else
+    (void)host_wait_ms;
+#endif
     if (force_timer_sync || !device_sync_valid_ || device_sync_guest_ticks_ != guest_ticks) {
       timer_->sync_to_steps(guest_ticks);
       device_sync_guest_ticks_ = guest_ticks;
@@ -873,6 +974,12 @@ bool SoC::run(std::size_t max_steps) {
     if (!device_sync_valid_ || virtio_blk_level != last_virtio_blk_level_) {
       gic_->set_level(kVirtioBlkIntId, virtio_blk_level);
       last_virtio_blk_level_ = virtio_blk_level;
+    }
+
+    const bool virtio_net_level = virtio_net_mmio_->irq_pending();
+    if (!device_sync_valid_ || virtio_net_level != last_virtio_net_level_) {
+      gic_->set_level(kVirtioNetIntId, virtio_net_level);
+      last_virtio_net_level_ = virtio_net_level;
     }
 
     if (framebuffer_sdl_ != nullptr) {
@@ -965,6 +1072,13 @@ bool SoC::run(std::size_t max_steps) {
     sync_devices(true);
     return true;
   };
+  const auto host_network_wait_enabled = [&]() {
+#ifdef AARCHVM_HAS_SLIRP
+    return slirp_net_backend_ != nullptr;
+#else
+    return false;
+#endif
+  };
   const auto compute_run_window = [&](std::size_t budget,
                                       std::size_t cpu_divisor,
                                       bool deadline_sensitive,
@@ -972,6 +1086,12 @@ bool SoC::run(std::size_t max_steps) {
     static constexpr std::size_t kHostTimerSyncChunk = 2048;
     static constexpr std::size_t kMaxLegacyInternalChunk = 65536;
     std::size_t chunk = std::max<std::size_t>(1, (budget + cpu_divisor - 1u) / cpu_divisor);
+#ifdef AARCHVM_HAS_SLIRP
+    static constexpr std::size_t kHostNetworkSyncChunk = 2048;
+    if (slirp_net_backend_ != nullptr) {
+      chunk = std::min<std::size_t>(chunk, kHostNetworkSyncChunk);
+    }
+#endif
     if (timer_->uses_host_clock()) {
       return std::max<std::size_t>(1, std::min<std::size_t>(chunk, kHostTimerSyncChunk));
     }
@@ -998,8 +1118,16 @@ bool SoC::run(std::size_t max_steps) {
     Cpu& cpu = primary_cpu();
     while (remaining > 0 && !stop_requested_) {
       maybe_sync_devices();
-      if (!cpu.ready_to_run() && fast_forward_to_next_guest_event()) {
-        continue;
+      if (!cpu.ready_to_run()) {
+        if (fast_forward_to_next_guest_event()) {
+          continue;
+        }
+        if (host_network_wait_enabled()) {
+          sync_devices(true, 1);
+          if (!cpu.ready_to_run()) {
+            continue;
+          }
+        }
       }
 
       const std::uint64_t guest_ticks = guest_time_ticks();
@@ -1055,8 +1183,25 @@ bool SoC::run(std::size_t max_steps) {
       if (fast_forward_to_next_guest_event()) {
         continue;
       }
-      runnable_cpus = dispatch.active_cpu_count;
-      fallback_poll_waiters = true;
+      if (host_network_wait_enabled()) {
+        sync_devices(true, 1);
+        const CpuDispatchState waited_dispatch = inspect_cpu_dispatch_state();
+        runnable_cpus = waited_dispatch.runnable_cpu_count;
+        if (runnable_cpus == 0) {
+          if (waited_dispatch.all_powered_on_halted) {
+            request_stop();
+            break;
+          }
+          if (waited_dispatch.active_cpu_count == 0) {
+            break;
+          }
+          continue;
+        }
+        fallback_poll_waiters = false;
+      } else {
+        runnable_cpus = dispatch.active_cpu_count;
+        fallback_poll_waiters = true;
+      }
     }
     if (runnable_cpus == 0) {
       if (dispatch.all_powered_on_halted) {
@@ -1368,7 +1513,7 @@ bool SoC::save_snapshot(const std::string& path) const {
     return false;
   }
   static constexpr char kMagic[8] = {'A', 'A', 'R', 'C', 'H', 'S', 'N', 'P'};
-  static constexpr std::uint32_t kVersion = 24;
+  static constexpr std::uint32_t kVersion = 26;
   const std::uint32_t snapshot_cpu_count = static_cast<std::uint32_t>(cpus_.size());
   out.write(kMagic, sizeof(kMagic));
   if (!out ||
@@ -1403,6 +1548,11 @@ bool SoC::save_snapshot(const std::string& path) const {
   }
   if (!framebuffer_ram_->save_state(out) ||
       !virtio_blk_mmio_->save_state(out) ||
+      !virtio_net_mmio_->save_state(out) ||
+      !snapshot_io::write(out, static_cast<std::uint32_t>(net_backend_mode_)) ||
+#ifdef AARCHVM_HAS_SLIRP
+      (net_backend_mode_ == NetBackendMode::Slirp && !slirp_net_backend_->save_state(out)) ||
+#endif
       !snapshot_io::write_bool(out, snapshot_perf_session.active) ||
       !snapshot_io::write(out, snapshot_perf_session.case_id) ||
       !snapshot_io::write(out, snapshot_perf_session.arg0) ||
@@ -1438,7 +1588,7 @@ bool SoC::load_snapshot(const std::string& path) {
       version != 7 && version != 8 && version != 9 && version != 10 && version != 11 && version != 12 &&
       version != 13 && version != 14 && version != 15 && version != 16 && version != 17 &&
       version != 18 && version != 19 && version != 20 && version != 21 && version != 22 &&
-      version != 23 && version != 24) ||
+      version != 23 && version != 24 && version != 25 && version != 26) ||
       boot_ram_base != kBootRamBase || boot_ram_size != kBootRamSize ||
       sdram_base != kSdramBase || sdram_size != kSdramSize ||
       !snapshot_io::read(in, timer_tick_scale_)) {
@@ -1528,9 +1678,36 @@ bool SoC::load_snapshot(const std::string& path) {
     if (!block_state_ok) {
       return false;
     }
+    if (version >= 25 && !virtio_net_mmio_->load_state(in)) {
+      return false;
+    }
+    if (version >= 26) {
+      std::uint32_t net_backend_mode = 0;
+      if (!snapshot_io::read(in, net_backend_mode) ||
+          net_backend_mode > static_cast<std::uint32_t>(NetBackendMode::Slirp)) {
+        return false;
+      }
+      net_backend_mode_ = static_cast<NetBackendMode>(net_backend_mode);
+      if (!restore_network_backend_after_snapshot()) {
+        return false;
+      }
+#ifdef AARCHVM_HAS_SLIRP
+      if (net_backend_mode_ == NetBackendMode::Slirp &&
+          (slirp_net_backend_ == nullptr || !slirp_net_backend_->load_state(in))) {
+        return false;
+      }
+#endif
+    } else {
+      net_backend_mode_ = (version >= 25 && virtio_net_mmio_->attached()) ? NetBackendMode::Loopback
+                                                                           : NetBackendMode::Off;
+      if (!restore_network_backend_after_snapshot()) {
+        return false;
+      }
+    }
   } else {
     framebuffer_ram_->load_bytes(0, std::vector<std::uint8_t>(kFramebufferSize, 0));
     virtio_blk_mmio_->set_image({});
+    clear_network_backend();
   }
   if (version >= 11) {
     if (!snapshot_io::read_bool(in, restored_perf_session.active) ||

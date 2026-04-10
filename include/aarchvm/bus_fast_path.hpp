@@ -7,6 +7,7 @@
 #include "aarchvm/ram.hpp"
 #include "aarchvm/uart_pl011.hpp"
 #include "aarchvm/virtio_blk_mmio.hpp"
+#include "aarchvm/virtio_net_mmio.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -43,6 +44,8 @@ public:
   static constexpr std::uint64_t kPerfSize = 0x1000ull;
   static constexpr std::uint64_t kVirtioBlkBase = 0x09040000ull;
   static constexpr std::uint64_t kVirtioBlkSize = 0x1000ull;
+  static constexpr std::uint64_t kVirtioNetBase = 0x09050000ull;
+  static constexpr std::uint64_t kVirtioNetSize = 0x1000ull;
   static constexpr std::uint64_t kGicBase = 0x08000000ull;
   static constexpr std::uint64_t kGicSize = 0x100000ull;
   static constexpr std::uint64_t kTimerBase = 0x0A000000ull;
@@ -54,6 +57,7 @@ public:
               UartPl011& uart,
               PerfMailbox& perf_mailbox,
               VirtioBlkMmio& virtio_blk_mmio,
+              VirtioNetMmio& virtio_net_mmio,
               GicV3& gic,
               GenericTimer& timer,
               FramebufferDirtyTracker* framebuffer_dirty_tracker)
@@ -66,6 +70,7 @@ public:
         uart_(&uart),
         perf_mailbox_(&perf_mailbox),
         virtio_blk_mmio_(&virtio_blk_mmio),
+        virtio_net_mmio_(&virtio_net_mmio),
         gic_(&gic),
         timer_(&timer),
         framebuffer_dirty_tracker_(framebuffer_dirty_tracker) {}
@@ -101,6 +106,16 @@ public:
         ++perf_counters_.read_ops;
         perf_counters_.read_bytes += size;
         value = virtio_blk_mmio_->read(block_off, size);
+        return true;
+      }
+    }
+
+    if (kVirtioNetBase <= addr && addr < kVirtioNetBase + kVirtioNetSize) {
+      const std::uint64_t net_off = addr - kVirtioNetBase;
+      if (size <= (kVirtioNetSize - net_off)) {
+        ++perf_counters_.read_ops;
+        perf_counters_.read_bytes += size;
+        value = virtio_net_mmio_->read(net_off, size);
         return true;
       }
     }
@@ -159,6 +174,16 @@ public:
         ++perf_counters_.write_ops;
         perf_counters_.write_bytes += size;
         virtio_blk_mmio_->write(block_off, value, size);
+        return true;
+      }
+    }
+
+    if (kVirtioNetBase <= addr && addr < kVirtioNetBase + kVirtioNetSize) {
+      const std::uint64_t net_off = addr - kVirtioNetBase;
+      if (size <= (kVirtioNetSize - net_off)) {
+        ++perf_counters_.write_ops;
+        perf_counters_.write_bytes += size;
+        virtio_net_mmio_->write(net_off, value, size);
         return true;
       }
     }
@@ -339,6 +364,7 @@ private:
   UartPl011* uart_ = nullptr;
   PerfMailbox* perf_mailbox_ = nullptr;
   VirtioBlkMmio* virtio_blk_mmio_ = nullptr;
+  VirtioNetMmio* virtio_net_mmio_ = nullptr;
   GicV3* gic_ = nullptr;
   GenericTimer* timer_ = nullptr;
   FramebufferDirtyTracker* framebuffer_dirty_tracker_ = nullptr;

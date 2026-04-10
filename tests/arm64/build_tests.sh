@@ -17,6 +17,26 @@ build_asm_prog() {
   "$AARCH64_OBJDUMP" -d "$OUT_DIR/${name}.elf" > "$OUT_DIR/${name}.dis"
 }
 
+build_c_prog() {
+  local name="$1"
+  shift
+  if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
+    aarch64-linux-gnu-gcc "$@" -nostdlib -static -ffreestanding -fomit-frame-pointer -fno-stack-protector \
+      -fno-asynchronous-unwind-tables -fno-unwind-tables -Wl,-T,tests/arm64/link.ld \
+      -o "$OUT_DIR/${name}.elf" tests/arm64/start.S "tests/arm64/${name}.c"
+  elif command -v clang >/dev/null 2>&1; then
+    clang --target=aarch64-linux-gnu "$@" -ffreestanding -fomit-frame-pointer -fno-stack-protector \
+      -fno-asynchronous-unwind-tables -fno-unwind-tables -nostdlib -c "tests/arm64/${name}.c" -o "$OUT_DIR/${name}.o"
+    "$AARCH64_AS" tests/arm64/start.S -o "$OUT_DIR/${name}_start.o"
+    "$AARCH64_LD" -T tests/arm64/link.ld -o "$OUT_DIR/${name}.elf" "$OUT_DIR/${name}_start.o" "$OUT_DIR/${name}.o"
+  else
+    echo "missing AArch64 C compiler for ${name}.c" >&2
+    exit 1
+  fi
+  "$AARCH64_OBJCOPY" -O binary "$OUT_DIR/${name}.elf" "$OUT_DIR/${name}.bin"
+  "$AARCH64_OBJDUMP" -d "$OUT_DIR/${name}.elf" > "$OUT_DIR/${name}.dis"
+}
+
 build_asm_prog hello_uart
 build_asm_prog branch_arith
 build_asm_prog irq_minimal
@@ -382,26 +402,10 @@ build_asm_prog smp_timer_ppi
 build_asm_prog smp_timer_rate
 build_asm_prog smp_dc_zva_invalidate
 
-if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
-  aarch64-linux-gnu-gcc -nostdlib -static -ffreestanding -fomit-frame-pointer -fno-stack-protector \
-    -fno-asynchronous-unwind-tables -fno-unwind-tables -Wl,-T,tests/arm64/link.ld \
-    -o "$OUT_DIR/hello_c.elf" tests/arm64/start.S tests/arm64/hello_c.c
-  "$AARCH64_OBJCOPY" -O binary "$OUT_DIR/hello_c.elf" "$OUT_DIR/hello_c.bin"
-  "$AARCH64_OBJDUMP" -d "$OUT_DIR/hello_c.elf" > "$OUT_DIR/hello_c.dis"
-
-  aarch64-linux-gnu-gcc -O0 -nostdlib -static -ffreestanding -fno-stack-protector \
-    -fno-asynchronous-unwind-tables -fno-unwind-tables -Wl,-T,tests/arm64/link.ld \
-    -o "$OUT_DIR/stack_c.elf" tests/arm64/start.S tests/arm64/stack_c.c
-  "$AARCH64_OBJCOPY" -O binary "$OUT_DIR/stack_c.elf" "$OUT_DIR/stack_c.bin"
-  "$AARCH64_OBJDUMP" -d "$OUT_DIR/stack_c.elf" > "$OUT_DIR/stack_c.dis"
-elif command -v clang >/dev/null 2>&1; then
-  clang --target=aarch64-linux-gnu -ffreestanding -fomit-frame-pointer -fno-stack-protector \
-    -fno-asynchronous-unwind-tables -fno-unwind-tables -nostdlib -c tests/arm64/hello_c.c -o "$OUT_DIR/hello_c.o"
-  "$AARCH64_AS" tests/arm64/start.S -o "$OUT_DIR/start.o"
-  "$AARCH64_LD" -T tests/arm64/link.ld -o "$OUT_DIR/hello_c.elf" "$OUT_DIR/start.o" "$OUT_DIR/hello_c.o"
-  "$AARCH64_OBJCOPY" -O binary "$OUT_DIR/hello_c.elf" "$OUT_DIR/hello_c.bin"
-  "$AARCH64_OBJDUMP" -d "$OUT_DIR/hello_c.elf" > "$OUT_DIR/hello_c.dis"
-fi
+build_c_prog hello_c
+build_c_prog stack_c -O0
+build_c_prog virtio_net_loopback
+build_c_prog virtio_net_slirp
 
 echo "Built test binaries in $OUT_DIR"
 ls -1 "$OUT_DIR"/*.bin
