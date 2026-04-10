@@ -1,3 +1,39 @@
+# 修改日志 2026-04-10 22:57
+
+## 本轮修改
+
+- 调整 [tests/linux/mprotect_exec_stress.c](/workspaces/aarchvm/tests/linux/mprotect_exec_stress.c) 的 `busybox` 路径解析：
+  - 优先使用 guest 侧标准路径 `/bin/busybox`；
+  - 当 direct `qemu-aarch64 ./out/mprotect_exec_stress` 从仓库根目录执行时，回退到 `./out/initramfs-usertests-root/bin/busybox` 与 `out/initramfs-usertests-root/bin/busybox`；
+  - 这修复了 `qemu-user` 差分里一个测试前提问题：此前 `execl("/bin/busybox", ...)` 会错误依赖宿主根文件系统，而不是 guest rootfs。
+- 修复 [tests/linux/run_algorithm_perf.sh](/workspaces/aarchvm/tests/linux/run_algorithm_perf.sh) 的回归脚本前置条件：
+  - 现在会先按需构建 shell snapshot / initrd，再读取 `INITRD_SIZE_HEX`；
+  - 避免在 initrd 缺失时，脚本自己先因为 `stat` 失败而退出。
+- 更新 [TODO.md](/workspaces/aarchvm/TODO.md) 与 [doc/armv8a-program-visible-audit.md](/workspaces/aarchvm/doc/armv8a-program-visible-audit.md)：
+  - 补记 `qemu-aarch64` user-mode 差分现已在当前环境通过；
+  - 把这轮测试侧修补与最终收口结论同步进审计文档。
+- 本轮未修改模拟器源代码；只调整测试 / 回归侧代码与审计文档。
+
+## 本轮测试
+
+- 在当前容器补齐并验证了 `qemu-aarch64` / `qemu-system-aarch64` 工具可用。
+- `timeout 60s qemu-aarch64 ./out/mprotect_exec_stress`
+- `timeout 3600s tests/linux/run_qemu_user_diff.sh`
+- `timeout 3600s tests/linux/run_functional_suite.sh`
+- `timeout 3600s tests/linux/run_functional_suite_smp.sh`
+- `timeout 3600s tests/arm64/run_all.sh`
+- `timeout 3600s tests/linux/run_algorithm_perf.sh`
+- `timeout 3600s tests/linux/run_block_mount_smoke.sh`
+- 过程中暴露出的两处瞬时失败都来自测试侧而非模拟器行为：
+  - `run_algorithm_perf.sh` 在 initrd 缺失时先 `stat` 的脚本前置条件 bug，已修复后通过；
+  - `run_algorithm_perf.sh` 与 `run_block_mount_smoke.sh` 并行时会竞争 `out/initramfs-usertests-root`，顺序重跑后通过。
+
+## 当前结论
+
+- 当前 `qemu-aarch64` user-mode 差分、裸机完整回归、Linux UMP/SMP 功能回归、Linux algorithm perf 与 block mount smoke 都已通过。
+- 基于此前已完成的白盒审计与这轮补齐的差分验证，我现在可以自信地说“模拟器已经完整实现 ARM v8-A 要求的最小集合”。
+- `qemu-system-aarch64` 系统级差分与更长期 Linux SMP soak 仍然值得继续做，但它们现在属于额外置信度工作，而不是当前最小集阻塞项。
+
 # 修改日志 2026-04-10 14:33
 
 ## 本轮修改

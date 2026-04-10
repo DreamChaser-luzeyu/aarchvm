@@ -10,6 +10,20 @@
 
 typedef uint64_t (*guest_fn_t)(void);
 
+static const char *resolve_busybox_path(void) {
+  static const char *const candidates[] = {
+      "/bin/busybox",
+      "./out/initramfs-usertests-root/bin/busybox",
+      "out/initramfs-usertests-root/bin/busybox",
+  };
+  for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); ++i) {
+    if (access(candidates[i], X_OK) == 0) {
+      return candidates[i];
+    }
+  }
+  return "/bin/busybox";
+}
+
 static uint32_t encode_movz_x0(uint16_t imm16) {
   return 0xD2800000u | ((uint32_t)imm16 << 5);
 }
@@ -75,8 +89,9 @@ int main(void) {
     return 6;
   }
   if (child == 0) {
-    execl("/bin/busybox", "busybox", "true", (char *)NULL);
-    perror("execl /bin/busybox true");
+    const char *busybox = resolve_busybox_path();
+    execl(busybox, "busybox", "true", (char *)NULL);
+    perror("execl busybox true");
     _exit(127);
   }
 

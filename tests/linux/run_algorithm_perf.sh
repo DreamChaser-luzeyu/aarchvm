@@ -27,7 +27,6 @@ if [[ " $AARCHVM_ARGS_RAW " == *" -smp "* ]]; then
   SNAPSHOT_BUILD_SCRIPT="tests/linux/build_linux_smp_shell_snapshot.sh"
 fi
 INITRD="out/initramfs-usertests.cpio.gz"
-INITRD_SIZE_HEX=$(printf '0x%x' "$(stat -c '%s' "$INITRD")")
 CMD="${AARCHVM_PERF_COMMAND:-bench_runner}"
 
 build_uart_rx_script() {
@@ -55,6 +54,7 @@ print_cmd() {
 if [[ ! -f "$BUILD_LOG" || ! -f "$INITRD" || tests/linux/build_usertests_rootfs.sh -nt "$BUILD_LOG" || "$SNAPSHOT_BUILD_SCRIPT" -nt "$BUILD_LOG" || "$INITRD" -nt "$BUILD_LOG" ]]; then
   "$SNAPSHOT_BUILD_SCRIPT" >/dev/null
 fi
+INITRD_SIZE_HEX=$(printf '0x%x' "$(stat -c '%s' "$INITRD")")
 
 PROMPT_STEPS=$(tr -d '\r' < "$BUILD_LOG" | sed -n 's/.*SUMMARY: steps=\([0-9][0-9]*\).*/\1/p' | tail -n 1)
 [[ -n "$PROMPT_STEPS" ]] || { echo 'prompt step summary missing from snapshot build log' >&2; tail -n 120 "$BUILD_LOG" >&2; exit 1; }

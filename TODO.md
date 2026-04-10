@@ -22,7 +22,8 @@
 - [x] 已重新审查 `DMB/DSB/ISB` 在当前执行模型下的程序可见语义：`SoC::run()` 以单个 `cpu.step()` 为粒度交织各核，`mmu_write_value()/raw_mmu_write()` 同步提交访存效果，因此 guest 可见内存效果本身已经形成单一全序；在该模型下 barrier 继续实现为 no-op 不会放宽程序可见顺序。
 - [x] 已重新审查多个 LSE 指令家族的 acquire/release/ordered 变体：由于当前模型不存在写缓冲、延迟提交或宿主侧乱序可见性，`CAS/CASP/SWP/LDADD/LDCLR/LDEOR/LDSET` 的顺序变体折叠到同一同步 RMW 结果不会放宽 guest 可见语义；`smp_dmb_message_passing`、`smp_lse_casa_publish`、`smp_lse_ldaddal_counter`、`smp_spinlock_ldaxr_stlxr` 与 Linux SMP functional suite 也已继续通过。
 - [x] `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 已按异常类别完成“当前已实现路径逐类对白盒对账”；当前已实现同步异常家族的 `EC/IL/ISS/FAR/ELR/SPSR` 生成链路已经闭环。
-- [ ] 差分验证当前以 `qemu-aarch64`（user-mode）为主；系统级路径还需补强与 `qemu-system-aarch64` 和 Linux SMP 压测的组合对账。
+- [x] 已在当前容器补齐 `qemu-aarch64` 并重跑 `tests/linux/run_qemu_user_diff.sh`；当前 user-mode 差分入口通过。
+- [ ] 系统级路径仍可继续补强 `qemu-system-aarch64` 与 Linux SMP 压测的组合对账。
 
 本轮复核（2026-04-01 22:34）：
 - [x] 已复核 `TODO.md` 中 Armv8-A 收口相关复选框一致性：未发现“明确已完成但仍未打勾”的文档/计划项。
@@ -39,7 +40,14 @@
 - [x] 已复跑 `tests/arm64/build_tests.sh`、`tests/arm64/run_all.sh`、`tests/linux/run_functional_suite.sh`、`tests/linux/run_algorithm_perf.sh`、`tests/linux/run_functional_suite_smp.sh`、`tests/linux/run_block_mount_smoke.sh`，全部通过。
 - [x] 已把 `debug_exception_regs` 正式接入 `tests/arm64/build_tests.sh` 与 `tests/arm64/run_all.sh`，并修正测试侧对 `EL1 PSTATE.D=1` 时 hardware breakpoint 仍应触发的错误预期；同时收紧 `mmu_el0_ap_fault`、`mmu_el0_uxn_fetch_abort` 对保存态 `SPSR_EL1` 的断言。
 - [x] 此前剩余的高优先级收口点已经清空：`ESR_EL1/FAR_EL1/PAR_EL1/ISS` 逐类对账与 `MMU/TLB/fault` 细颗粒边界现已完成；`qemu-system-aarch64` 系统级差分继续保留为额外验证项，但不再作为“当前模型最小集”阻塞条件。
-- [ ] 当前环境缺少 `qemu-aarch64`，因此 `tests/linux/run_qemu_user_diff.sh` 本轮未能重跑（脚本直接报 `missing qemu-aarch64`）；待环境补齐后仍可继续作为额外差分入口。
+- [ ] 在 2026-04-10 14:33 这轮审计时，当前环境仍缺少 `qemu-aarch64`，因此 `tests/linux/run_qemu_user_diff.sh` 当时尚未重跑；该缺口已在后续补齐。
+
+本轮补充复核（2026-04-10 22:57）：
+- [x] 已在当前容器补齐 `qemu-user/qemu-system` 工具，并重跑 `tests/linux/run_qemu_user_diff.sh`；当前 `fpsimd_selftest`、`fpint_selftest`、`mprotect_exec_stress`、`pthread_sync_stress` 的 `qemu-aarch64` user-mode 差分入口通过。
+- [x] 已把 `tests/linux/mprotect_exec_stress.c` 的 `busybox` 路径解析改为优先 guest `/bin/busybox`、再回退到仓库内 `out/initramfs-usertests-root/bin/busybox`，修复 direct `qemu-aarch64 ./out/mprotect_exec_stress` 时误依赖宿主根文件系统的测试前提问题。
+- [x] 已修复 `tests/linux/run_algorithm_perf.sh` 在按需重建 shell snapshot / initrd 之前先读取 `INITRD_SIZE_HEX` 的脚本前置条件问题，确保缺少 initrd 时仍能独立自举并跑完整回归。
+- [x] 已再次复跑 `tests/arm64/run_all.sh`、`tests/linux/run_qemu_user_diff.sh`、`tests/linux/run_functional_suite.sh`、`tests/linux/run_functional_suite_smp.sh`、`tests/linux/run_algorithm_perf.sh`、`tests/linux/run_block_mount_smoke.sh`，全部通过。
+- [x] 基于此前已闭环的 `ESR_EL1/FAR_EL1/PAR_EL1/ISS`、`MMU/TLB/fault` 与 `SMP barrier/LSE` 白盒审计，再叠加当前补齐的 `qemu-aarch64` 差分与全回归结果，我现在可以自信地说“模拟器已经完整实现 ARM v8-A 要求的最小集合”。
 
 ### 1. 浮点 / AdvSIMD 程序可见语义收尾
 
