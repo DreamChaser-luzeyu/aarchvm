@@ -117,6 +117,15 @@ sync_lower:
     mrs  x6, elr_el1
     subs xzr, x6, x20
     b.ne fail_from_handler
+    mrs  x7, spsr_el1
+    and  x8, x7, #0xf
+    cbnz x8, fail_from_handler
+    tbnz x7, #20, fail_from_handler
+    ubfx x8, x7, #28, #4
+    cbnz x8, fail_from_handler
+    ubfx x8, x7, #6, #4
+    cbnz x8, fail_from_handler
+    tbnz x7, #22, fail_from_handler
 
     adr  x8, after_fault
     movz x9, #0x5                 // EL1h

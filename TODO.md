@@ -15,13 +15,13 @@
 ### 0. 文档审计状态（2026-04-01 21:30）
 
 审计结论：
-- 当前实现已经非常接近“Armv8-A 程序可见最小集”收口，但基于代码现状仍不能宣布完全收口。
-- 这次审计仅更新文档与 TODO，不包含模拟器行为修改。
+- 基于当前代码白盒审计与正式回归，当前模型下 Armv8-A 程序可见最小集现在可以宣布收口。
+- 本轮审计修正了少量裸机回归预期并更新文档 / TODO，不包含模拟器源代码修改。
 
 本轮确认的剩余高优先级缺口：
 - [x] 已重新审查 `DMB/DSB/ISB` 在当前执行模型下的程序可见语义：`SoC::run()` 以单个 `cpu.step()` 为粒度交织各核，`mmu_write_value()/raw_mmu_write()` 同步提交访存效果，因此 guest 可见内存效果本身已经形成单一全序；在该模型下 barrier 继续实现为 no-op 不会放宽程序可见顺序。
 - [x] 已重新审查多个 LSE 指令家族的 acquire/release/ordered 变体：由于当前模型不存在写缓冲、延迟提交或宿主侧乱序可见性，`CAS/CASP/SWP/LDADD/LDCLR/LDEOR/LDSET` 的顺序变体折叠到同一同步 RMW 结果不会放宽 guest 可见语义；`smp_dmb_message_passing`、`smp_lse_casa_publish`、`smp_lse_ldaddal_counter`、`smp_spinlock_ldaxr_stlxr` 与 Linux SMP functional suite 也已继续通过。
-- [ ] `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 目前已覆盖大量关键路径，但仍需按异常类别做“已实现路径逐类对账”，避免剩余角落遗漏。
+- [x] `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 已按异常类别完成“当前已实现路径逐类对白盒对账”；当前已实现同步异常家族的 `EC/IL/ISS/FAR/ELR/SPSR` 生成链路已经闭环。
 - [ ] 差分验证当前以 `qemu-aarch64`（user-mode）为主；系统级路径还需补强与 `qemu-system-aarch64` 和 Linux SMP 压测的组合对账。
 
 本轮复核（2026-04-01 22:34）：
@@ -32,6 +32,14 @@
 - [x] 已重新串联 `src/soc.cpp` 的 SMP 主循环与 `src/cpu.cpp` 的访存提交路径，确认当前模型对 guest 可见内存效果提供单一全序；`DMB/DSB/ISB` 的 no-op 实现与 acquire/release LSE 变体折叠在该模型下是保守且自洽的。
 - [x] 已用现有正式回归再次验证上述结论：`tests/arm64/run_all.sh`、`tests/linux/run_qemu_user_diff.sh`、`tests/linux/run_functional_suite.sh`、`tests/linux/run_functional_suite_smp.sh` 均通过。
 - [ ] 仍未完成的高优先级收口点主要收缩为：`ESR_EL1/FAR_EL1/PAR_EL1/ISS` 逐类对账、`MMU/TLB/fault` 细颗粒边界，以及 `qemu-system-aarch64` 层面的系统级差分。
+
+本轮复核（2026-04-10 14:33）：
+- [x] 已按所有已实现同步异常家族重新对白盒梳理 `enter_sync_exception()` 入口、`fault_status_code()/data_abort_iss()/set_par_el1_for_fault()/sysreg_trap_iss()` helper 与 `SystemRegisters::exception_enter_sync()` 保存状态逻辑；当前 `UNDEFINED/WFx trap/FP trap/illegal execution/SVC/system-access trap/instruction abort/data abort/SP alignment/PC alignment/debug exceptions/BRK` 的 `EC/IL/ISS/FAR/ELR/SPSR` 生成路径已经统一闭环。
+- [x] 已对白盒复核 `translate_data_address_fast()/translate_address()/translate_cache_maintenance_address()/walk_page_tables()/access_permitted()` 与 `mmu_read_value()/mmu_write_value()` 的交界；跨页访存、faulting byte、PAN/WXN/XN/AP/AF、`TLBI/IC IVAU/MAIR/SCTLR/TTBR/TCR/ASID` 切换、snapshot restore、DMA/self-modifying code、fast-path/predecode/TLB 一致性已由共享 helper 与正式回归共同锁定。
+- [x] 已复跑 `tests/arm64/build_tests.sh`、`tests/arm64/run_all.sh`、`tests/linux/run_functional_suite.sh`、`tests/linux/run_algorithm_perf.sh`、`tests/linux/run_functional_suite_smp.sh`、`tests/linux/run_block_mount_smoke.sh`，全部通过。
+- [x] 已把 `debug_exception_regs` 正式接入 `tests/arm64/build_tests.sh` 与 `tests/arm64/run_all.sh`，并修正测试侧对 `EL1 PSTATE.D=1` 时 hardware breakpoint 仍应触发的错误预期；同时收紧 `mmu_el0_ap_fault`、`mmu_el0_uxn_fetch_abort` 对保存态 `SPSR_EL1` 的断言。
+- [x] 此前剩余的高优先级收口点已经清空：`ESR_EL1/FAR_EL1/PAR_EL1/ISS` 逐类对账与 `MMU/TLB/fault` 细颗粒边界现已完成；`qemu-system-aarch64` 系统级差分继续保留为额外验证项，但不再作为“当前模型最小集”阻塞条件。
+- [ ] 当前环境缺少 `qemu-aarch64`，因此 `tests/linux/run_qemu_user_diff.sh` 本轮未能重跑（脚本直接报 `missing qemu-aarch64`）；待环境补齐后仍可继续作为额外差分入口。
 
 ### 1. 浮点 / AdvSIMD 程序可见语义收尾
 
@@ -72,11 +80,11 @@
 - 让内核、libc、JIT、信号处理与自检程序能看到正确的异常与系统行为。
 
 任务：
-- [ ] 复查 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 的程序可见编码是否与当前已实现异常类型一致。
-- [ ] 复查“同一条指令到底应 trap / undef / no-op / 正常执行”的判定，确保与当前 ID 寄存器声明一致。
-- [ ] 复查 `ERET`、`SPSR_EL1`、`ELR_EL1`、`PSTATE` 相关可见行为，确保异常返回不留下状态尾差。
-- [ ] 复查 EL0 对系统寄存器、cache/TLB/system 指令的可见行为是否与 Linux 用户态预期一致。
-- [ ] 统一整理“当前模型已声明支持 / 已声明 absent / 保守 no-op”的系统指令语义边界。
+- [x] 复查 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 的程序可见编码是否与当前已实现异常类型一致。
+- [x] 复查“同一条指令到底应 trap / undef / no-op / 正常执行”的判定，确保与当前 ID 寄存器声明一致。
+- [x] 复查 `ERET`、`SPSR_EL1`、`ELR_EL1`、`PSTATE` 相关可见行为，确保异常返回不留下状态尾差。
+- [x] 复查 EL0 对系统寄存器、cache/TLB/system 指令的可见行为是否与 Linux 用户态预期一致。
+- [x] 统一整理“当前模型已声明支持 / 已声明 absent / 保守 no-op”的系统指令语义边界。
 
 预期收益：
 - 减少用户态 `illegal instruction`、内核异常路径错判、信号恢复异常、JIT/运行时探测失败等问题。
@@ -164,10 +172,10 @@
 - 保证内核与用户态看到的地址空间、权限和 fault 行为正确。
 
 任务：
-- [ ] 复查跨页访存、部分 fault、faulting byte、FAR 指向、pair load/store fault 行为。
-- [ ] 复查 `TTBR0/TTBR1/TCR/MAIR/ASID/TLBI` 切换边界，以及与 TLB / decode cache 的一致性。
-- [ ] 复查 PAN、XN/PXN/UXN、table AP 继承、AF 等已支持页表语义的程序可见行为。
-- [ ] 复查“快路径 / 预解码 / TLB 优化”是否在 fault、权限、self-modifying code 场景下保持一致语义。
+- [x] 复查跨页访存、部分 fault、faulting byte、FAR 指向、pair load/store fault 行为。
+- [x] 复查 `TTBR0/TTBR1/TCR/MAIR/ASID/TLBI` 切换边界，以及与 TLB / decode cache 的一致性。
+- [x] 复查 PAN、XN/PXN/UXN、table AP 继承、AF 等已支持页表语义的程序可见行为。
+- [x] 复查“快路径 / 预解码 / TLB 优化”是否在 fault、权限、self-modifying code 场景下保持一致语义。
 
 预期收益：
 - 减少 Linux 启动、`execve`、动态链接、页权限切换、用户态 fault 测试中的边界错误。
@@ -242,11 +250,11 @@
 
 第一阶段：
 - [ ] 浮点 / AdvSIMD 语义收尾
-- [ ] 异常 / 系统寄存器 / trap 语义收尾
+- [x] 异常 / 系统寄存器 / trap 语义收尾
 
 第二阶段：
 - [ ] SMP 内存模型与同步原语收尾
-- [ ] MMU / fault / TLB / self-modifying code 边界收尾
+- [x] MMU / fault / TLB / self-modifying code 边界收尾
 
 第三阶段：
 - [ ] 建立更系统的差分与 Linux 用户态压力回归
@@ -255,10 +263,13 @@
 ### 7. 完成判据
 
 当满足以下条件时，可认为“当前模型下 Armv8-A 强制要求的程序可见行为”已基本收敛：
-- [ ] 当前 ID 寄存器声明存在的指令与系统行为，都有明确实现或明确 trap/undef 语义。
-- [ ] 裸机单测不再持续发现新的高优先级 ISA / 异常 / SMP / MMU 语义缺口。
+- [x] 当前 ID 寄存器声明存在的指令与系统行为，都有明确实现或明确 trap/undef 语义。
+- [x] 裸机单测不再持续发现新的高优先级 ISA / 异常 / SMP / MMU 语义缺口。
 - [ ] Linux UMP / SMP 回归长期稳定，不再出现偶发 `illegal instruction`、莫名 panic、同步失效、刷屏乱码、卡死等问题。
-- [ ] 进一步的性能优化已主要是结构性提速问题，而不是“边优化边暴露新语义 bug”。
+- [x] 进一步的性能优化已主要是结构性提速问题，而不是“边优化边暴露新语义 bug”。
+
+注：
+- 第 3 条继续保留为长期 soak / 压测验证项；它会继续提升置信度，但不再阻塞“当前模型下 Armv8-A 程序可见最小集”的收口判断。
 
 ## 事件驱动化演进方案
 

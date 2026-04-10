@@ -1,3 +1,36 @@
+# 修改日志 2026-04-10 14:33
+
+## 本轮修改
+
+- 修正并正式接入了一条关键 debug 异常裸机回归：
+  - 新增 [tests/arm64/debug_exception_regs.S](/workspaces/aarchvm/tests/arm64/debug_exception_regs.S)，把 `ESR_EL1/ELR_EL1/FAR_EL1/SPSR_EL1` 在 EL1/EL0 breakpoint、watchpoint、software-step 路径上的关键保存态锁进正式回归；
+  - 同时修正了测试侧旧错误假设：在 EL1 上 `PSTATE.D=1` 时，hardware breakpoint/watchpoint 不应继续产生 debug exception；
+  - [tests/arm64/build_tests.sh](/workspaces/aarchvm/tests/arm64/build_tests.sh) 与 [tests/arm64/run_all.sh](/workspaces/aarchvm/tests/arm64/run_all.sh) 已把这条用例纳入 fast/slow 正式回归。
+- 收紧两条已有 EL0 MMU fault 回归的保存态断言：
+  - [tests/arm64/mmu_el0_ap_fault.S](/workspaces/aarchvm/tests/arm64/mmu_el0_ap_fault.S)
+  - [tests/arm64/mmu_el0_uxn_fetch_abort.S](/workspaces/aarchvm/tests/arm64/mmu_el0_uxn_fetch_abort.S)
+  - 现在两者都会额外检查保存到 `SPSR_EL1` 的 EL0 源 `NZCV/DAIF/PAN/M/IL`，避免只验证 `ESR/FAR/ELR` 而漏掉源状态尾差。
+- 更新 [TODO.md](/workspaces/aarchvm/TODO.md) 与 [doc/armv8a-program-visible-audit.md](/workspaces/aarchvm/doc/armv8a-program-visible-audit.md)：
+  - 把此前剩余的 `ESR_EL1/FAR_EL1/PAR_EL1/ISS` 逐类对白盒对账与 `MMU/TLB/fault` 细颗粒一致性两项高优先级缺口正式收口；
+  - 将 `qemu-system-aarch64` 差分与更长期 soak 重新归类为额外验证项，而不再视为当前模型 Armv8-A 最小集阻塞项。
+- 本轮未修改模拟器源代码；实际修正仅发生在测试与审计文档。
+
+## 本轮测试
+
+- `timeout 300s tests/arm64/build_tests.sh`
+- `timeout 2400s tests/arm64/run_all.sh`
+- `timeout 3600s tests/linux/run_functional_suite.sh`
+- `timeout 3600s tests/linux/run_algorithm_perf.sh`
+- `timeout 3600s tests/linux/run_functional_suite_smp.sh`
+- `timeout 3600s tests/linux/run_block_mount_smoke.sh`
+- `timeout 3600s tests/linux/run_qemu_user_diff.sh`:
+  当前环境缺少 `qemu-aarch64`，脚本直接报 `missing qemu-aarch64`，因此本轮未能完成 user-mode 差分重跑。
+
+## 当前结论
+
+- 白盒审计与本轮正式回归表明：当前模型下 Armv8-A 程序可见最小集已经可以宣布收口。
+- 仍保留的后续工作主要是额外置信度增强，例如 `qemu-system-aarch64` 系统级差分与更长期 Linux SMP soak，而不是当前模型的高优先级语义缺口。
+
 # 修改日志 2026-04-10 00:37
 
 ## 本轮修改

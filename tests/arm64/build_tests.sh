@@ -199,6 +199,7 @@ build_asm_prog fpsimd_sp_alignment_fault
 build_asm_prog id_aa64_feature_regs
 build_asm_prog sp_special_sysreg_access
 build_asm_prog debug_break_watch_basic
+build_asm_prog debug_exception_regs
 build_asm_prog debug_break_bas_res1
 build_asm_prog debug_cache_maint_watchpoints
 build_asm_prog debug_halted_sysregs_undef

@@ -280,6 +280,7 @@ run_expect gic_sysreg_id_consistency.bin 300000 J
 run_expect gic_sysreg_manual_ack.bin 400000 M
 run_expect debug_sysreg_resource_bounds.bin 800000 K
 run_expect debug_break_watch_basic.bin 1200000 Q
+run_expect debug_exception_regs.bin 1200000 G
 run_expect debug_break_bas_res1.bin 800000 R
 run_expect debug_cache_maint_watchpoints.bin 1200000 W
 run_expect debug_halted_sysregs_undef.bin 800000 D
@@ -681,6 +682,7 @@ run_expect_slow mmu_ext_abort_fetch.bin 4000000 Q
 run_expect_slow mmu_walk_ext_abort_data.bin 4000000 W
 run_expect_slow mmu_walk_ext_abort_fetch.bin 4000000 X
 run_expect_slow cpacr_fp_trap_regs.bin 300000 F
+run_expect_slow debug_exception_regs.bin 1200000 G
 run_expect_slow debug_break_bas_res1.bin 800000 R
 run_expect_slow flagm_integer_undef.bin 800000 m
 run_expect_slow mte_absent_undef.bin 1000000 M

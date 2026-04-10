@@ -113,6 +113,7 @@ sync_lower:
     ubfx x4, x2, #26, #6          // EC
     cmp  x4, #0x24
     b.ne fail_from_handler
+    tbz  x2, #25, fail_from_handler // IL=1
     tbnz x2, #6, fail_from_handler // WnR must be 0
     and  x4, x2, #0x3f            // FSC
     cmp  x4, #0x0f                // permission fault, level 3
@@ -124,6 +125,15 @@ sync_lower:
     adr  x7, el0_fault
     subs xzr, x6, x7
     b.ne fail_from_handler
+    mrs  x10, spsr_el1
+    and  x11, x10, #0xf
+    cbnz x11, fail_from_handler
+    tbnz x10, #20, fail_from_handler
+    ubfx x11, x10, #28, #4
+    cbnz x11, fail_from_handler
+    ubfx x11, x10, #6, #4
+    cbnz x11, fail_from_handler
+    tbnz x10, #22, fail_from_handler
     adr  x8, after_fault
     movz x9, #0x5
     msr  spsr_el1, x9
